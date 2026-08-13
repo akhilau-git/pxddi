@@ -1,0 +1,10 @@
+torch
+torch-geometric
+pandas
+numpy
+scikit-learn
+rdkit
+fastapi
+uvicorn
+pymupdf
+pydantic
