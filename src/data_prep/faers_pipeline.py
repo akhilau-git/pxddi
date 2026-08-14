@@ -15,8 +15,6 @@ def build_toxicity_labels(faers_base_path: str):
     """
     Returns a DataFrame: drugname -> toxicity_score (0-1)
     toxicity_score = fraction of reports for that drug with a severe outcome.
-    This is REAL FAERS data, not synthetic — a legitimate proxy for
-    "how often does this drug show up in serious adverse event reports."
     """
     print("Loading FAERS DRUG file...")
     drug = pd.read_csv(f'{faers_base_path}/DRUG23Q4.txt', sep='$',
@@ -34,7 +32,6 @@ def build_toxicity_labels(faers_base_path: str):
     tox_scores = merged.groupby('drugname')['is_severe'].agg(['mean', 'count']).reset_index()
     tox_scores.columns = ['drugname', 'toxicity_score', 'n_reports']
 
-    # Only trust drugs with enough reports to be statistically meaningful
     tox_scores = tox_scores[tox_scores['n_reports'] >= 5]
     print(f"Built toxicity labels for {len(tox_scores)} drugs (min 5 reports each)")
     return tox_scores
@@ -50,7 +47,6 @@ def build_patient_context(faers_base_path: str, sample_size: int = 50000):
                         usecols=['primaryid', 'age', 'age_cod', 'sex'],
                         low_memory=False, nrows=sample_size)
 
-    # Normalize age to years (FAERS reports age in different units via age_cod)
     def normalize_age(row):
         if pd.isna(row['age']):
             return None
@@ -72,10 +68,5 @@ def build_patient_context(faers_base_path: str, sample_size: int = 50000):
 
 
 def match_drugname_to_smiles(drugname: str, chembl_synonym_map: dict):
-    """
-    Bridges FAERS text drug names to structural SMILES.
-    Honest limitation: exact-string match only for now — many drugs
-    won't match due to spelling/brand-name variation. We log the
-    match rate rather than silently dropping data.
-    """
+    """Bridges FAERS text drug names to structural SMILES (exact match)."""
     return chembl_synonym_map.get(drugname.strip().upper())
