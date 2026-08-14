@@ -89,15 +89,19 @@ class PxDDIDataset(Dataset):
         super().__init__()
         records = []
         skipped = 0
-        for _, row in df.iterrows():
-            ga = smiles_to_graph(row[source_col])
-            gb = smiles_to_graph(row[target_col])
+        total = len(df)
+        for i, row in enumerate(df.itertuples(), 1):  # itertuples is much faster than iterrows
+            source, target, label = getattr(row, source_col), getattr(row, target_col), getattr(row, label_col)
+            ga = smiles_to_graph(source)
+            gb = smiles_to_graph(target)
             if ga is None or gb is None:
                 skipped += 1
                 continue
-            tox_a = get_toxicity(row[source_col], tox_lookup)
-            tox_b = get_toxicity(row[target_col], tox_lookup)
-            records.append((ga, gb, tox_a, tox_b, row[label_col]))
+            tox_a = get_toxicity(source, tox_lookup)
+            tox_b = get_toxicity(target, tox_lookup)
+            records.append((ga, gb, tox_a, tox_b, label))
+            if i % 5000 == 0:
+                print(f"    ...processed {i}/{total} rows")
         print(f"Built dataset: {len(records)} valid pairs, {skipped} skipped (bad SMILES)")
         self.records = records
 
@@ -161,7 +165,9 @@ if __name__ == "__main__":
 
     print("\nSTEP 2: Loading real TWOSIDES edges + generating negatives...")
     edges = pd.read_csv(TWOSIDES_EDGES)
-    print(f"Raw positive edges: {len(edges)}")
+    print(f"Raw positive edges (before cap): {len(edges)}")
+    edges = edges.sample(n=min(20000, len(edges)), random_state=42)  # cap for a fast first run
+    print(f"Raw positive edges (after cap): {len(edges)}")
     full_df = add_negative_samples(edges, neg_ratio=1.0)
 
     print("\nSTEP 3: Creating cold-start-aware splits...")
