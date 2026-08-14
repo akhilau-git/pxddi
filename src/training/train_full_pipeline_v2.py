@@ -24,7 +24,36 @@ from torch_geometric.loader import DataLoader
 
 from models.ddi_model import PxDDIModel
 from data_prep.prepare_twosides import smiles_to_graph, NUM_ATOM_FEATURES
-from data_prep.build_dataloader import add_negative_samples
+def add_negative_samples(df, source_col='source', target_col='target', neg_ratio=1.0, seed=42):
+    """
+    drug_drug_edges.csv only has POSITIVE (known-interaction) pairs.
+    Generates random drug pairs NOT in the real edge list, labels them 0.
+    """
+    rng = np.random.default_rng(seed)
+    all_drugs = pd.unique(df[[source_col, target_col]].values.ravel())
+    real_pairs = set(zip(df[source_col], df[target_col]))
+
+    n_negatives = int(len(df) * neg_ratio)
+    negatives = []
+    attempts = 0
+    max_attempts = n_negatives * 20
+
+    while len(negatives) < n_negatives and attempts < max_attempts:
+        a, b = rng.choice(all_drugs, size=2, replace=False)
+        if (a, b) not in real_pairs and (b, a) not in real_pairs:
+            negatives.append({source_col: a, target_col: b, 'label': 0})
+        attempts += 1
+
+    print(f"Generated {len(negatives)} negative samples (target was {n_negatives})")
+
+    positives = df[[source_col, target_col]].copy()
+    positives['label'] = 1
+    negatives_df = pd.DataFrame(negatives)
+
+    combined = pd.concat([positives, negatives_df], ignore_index=True)
+    combined = combined.sample(frac=1, random_state=seed).reset_index(drop=True)
+    print(f"Final dataset: {len(combined)} rows ({positives.shape[0]} pos, {len(negatives_df)} neg)")
+    return combined
 from data_prep.splits import create_splits
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
