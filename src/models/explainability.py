@@ -27,10 +27,32 @@ def literature_match_check(smiles, important_atoms):
     return {"literature_match": hit, "matched_groups": matches,
             "explanation": f"Matched: {list(matches.keys())}" if hit else "No known-group overlap — flag for review"}
 
-def full_explanation_pipeline(model, drug_a_graph, drug_b_smiles):
-    _, node_mask = run_gnn_explainer(model, drug_a_graph)
-    top = torch.topk(node_mask.sum(dim=1), k=min(5, node_mask.shape[0])).indices.tolist()
-    check = literature_match_check(drug_b_smiles, top)
-    return {"important_atom_indices": top, "literature_validated": check["literature_match"],
-            "matched_functional_groups": check["matched_groups"],
-            "human_readable_explanation": check["explanation"]}
+def full_explanation_pipeline(model, drug_a_graph, drug_a_smiles, drug_b_graph, drug_b_smiles):
+    """
+    FIXED: now explains BOTH drugs correctly — each drug's important
+    atoms are checked against THAT SAME drug's SMILES, not the other one.
+    """
+    # Explain drug A
+    _, node_mask_a = run_gnn_explainer(model, drug_a_graph)
+    top_atoms_a = torch.topk(node_mask_a.sum(dim=1), k=min(5, node_mask_a.shape[0])).indices.tolist()
+    check_a = literature_match_check(drug_a_smiles, top_atoms_a)
+
+    # Explain drug B
+    _, node_mask_b = run_gnn_explainer(model, drug_b_graph)
+    top_atoms_b = torch.topk(node_mask_b.sum(dim=1), k=min(5, node_mask_b.shape[0])).indices.tolist()
+    check_b = literature_match_check(drug_b_smiles, top_atoms_b)
+
+    return {
+        "drug_a": {
+            "important_atom_indices": top_atoms_a,
+            "literature_validated": check_a["literature_match"],
+            "matched_functional_groups": check_a["matched_groups"],
+            "human_readable_explanation": check_a["explanation"]
+        },
+        "drug_b": {
+            "important_atom_indices": top_atoms_b,
+            "literature_validated": check_b["literature_match"],
+            "matched_functional_groups": check_b["matched_groups"],
+            "human_readable_explanation": check_b["explanation"]
+        }
+    }
