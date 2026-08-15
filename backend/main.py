@@ -3,7 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import torch
 import sys
-sys.path.append('/app/src')
+import os
+
+# Works both locally (uvicorn run from backend/) and inside Docker
+# (where backend/ and src/ are siblings under /app)
+SRC_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src')
+sys.path.append(SRC_PATH)
 from models.ddi_model import PxDDIModel
 from models.explainability import full_explanation_pipeline
 from data_prep.prepare_twosides import smiles_to_graph, NUM_ATOM_FEATURES

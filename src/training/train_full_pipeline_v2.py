@@ -33,8 +33,8 @@ TWOSIDES_EDGES = DRIVE_BASE + 'twosides/drug_drug_edges.csv'
 TOXICITY_BRIDGE = DRIVE_BASE + 'checkpoints/toxicity_smiles_bridge.csv'
 CHECKPOINT_PATH = DRIVE_BASE + 'checkpoints/pxddi_model.pt'
 
-DATA_CAP = 50000  # bump to 200000 once this run confirms everything works
-EPOCHS = 100
+DATA_CAP = 200000  # bump to 200000 once this run confirms everything works
+EPOCHS = 200
 
 
 def load_toxicity_lookup():
@@ -184,13 +184,13 @@ if __name__ == "__main__":
         print(f"  {name}: {len(split_df)} rows")
 
     print("\nSTEP 4: Building real DataLoaders...")
-    train_loader = build_loader(splits['transductive_train'], tox_lookup, batch_size=32)
-    test_loader = build_loader(splits['transductive_test'], tox_lookup, batch_size=32, shuffle=False)
-    s1_loader = build_loader(splits['s1_test'], tox_lookup, batch_size=32, shuffle=False)
-    s2_loader = build_loader(splits['s2_test'], tox_lookup, batch_size=32, shuffle=False)
+    train_loader = build_loader(splits['transductive_train'], tox_lookup, batch_size=128)
+    test_loader = build_loader(splits['transductive_test'], tox_lookup, batch_size=128, shuffle=False)
+    s1_loader = build_loader(splits['s1_test'], tox_lookup, batch_size=128, shuffle=False)
+    s2_loader = build_loader(splits['s2_test'], tox_lookup, batch_size=128, shuffle=False)
 
     print("\nSTEP 5: Training...")
-    model = PxDDIModel(in_channels=NUM_ATOM_FEATURES).to(DEVICE)
+    model = PxDDIModel(in_channels=NUM_ATOM_FEATURES, hidden_channels=128).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     # FIX #2: decaying learning rate schedule, matching FG-DDI's approach
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
