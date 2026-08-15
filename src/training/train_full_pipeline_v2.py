@@ -1,13 +1,9 @@
 """
-train_full_pipeline_v2.py — RUN IN COLAB (GPU required)
-
-The FIRST real, fully-integrated training run:
-- Module A: TWOSIDES drug pairs (real interactions + generated negatives)
-- Module C: 402 real PubChem-bridged drugs with real FAERS toxicity scores
-- Module D: real FAERS age/sex patient context
-
-Reports transductive + cold-start (S1/S2) AUROC/F1 — your actual
-benchmark table for comparison against FG-DDI/MeTDDI/DrugDAGT.
+train_full_pipeline_v2.py — v2, with 4 fixes:
+1. Data cap raised (50k this run, easy to bump to 200k after)
+2. 100 epochs + learning rate scheduler
+3. Toxicity bridge coverage diagnostic (shows why 402 -> 339)
+4. S1 class balance diagnostic (checks if 0.4973 is a real signal or noise)
 """
 
 import torch
@@ -24,11 +20,41 @@ from torch_geometric.loader import DataLoader
 
 from models.ddi_model import PxDDIModel
 from data_prep.prepare_twosides import smiles_to_graph, NUM_ATOM_FEATURES
+from data_prep.splits import create_splits
+from data_prep.pubchem_bridge import canonicalize
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Training on: {DEVICE}")
+assert DEVICE.type == 'cuda', "Set Runtime > GPU first!"
+scaler = torch.amp.GradScaler('cuda')
+
+DRIVE_BASE = '/content/drive/MyDrive/pxddi-data/'
+TWOSIDES_EDGES = DRIVE_BASE + 'twosides/drug_drug_edges.csv'
+TOXICITY_BRIDGE = DRIVE_BASE + 'checkpoints/toxicity_smiles_bridge.csv'
+CHECKPOINT_PATH = DRIVE_BASE + 'checkpoints/pxddi_model.pt'
+
+DATA_CAP = 50000  # bump to 200000 once this run confirms everything works
+EPOCHS = 100
+
+
+def load_toxicity_lookup():
+    """FIX #3: diagnose why 402 matched drugs -> only 339 used in training."""
+    bridge = pd.read_csv(TOXICITY_BRIDGE)
+    print(f"Bridge file has {len(bridge)} total rows")
+    matched = bridge.dropna(subset=['canonical_smiles'])
+    print(f"  {len(matched)} rows have a non-null canonical_smiles")
+    lookup = dict(zip(matched['canonical_smiles'], matched['toxicity_score']))
+    print(f"  {len(lookup)} unique canonical SMILES in final lookup dict "
+          f"(duplicates collapse to one entry — this explains 402 -> fewer if drugs share structures)")
+    return lookup
+
+
+def get_toxicity(smiles, lookup, default=0.0):
+    canon = canonicalize(smiles)
+    return lookup.get(canon, default)
+
+
 def add_negative_samples(df, source_col='source', target_col='target', neg_ratio=1.0, seed=42):
-    """
-    drug_drug_edges.csv only has POSITIVE (known-interaction) pairs.
-    Generates random drug pairs NOT in the real edge list, labels them 0.
-    """
     rng = np.random.default_rng(seed)
     all_drugs = pd.unique(df[[source_col, target_col]].values.ravel())
     real_pairs = set(zip(df[source_col], df[target_col]))
@@ -54,43 +80,15 @@ def add_negative_samples(df, source_col='source', target_col='target', neg_ratio
     combined = combined.sample(frac=1, random_state=seed).reset_index(drop=True)
     print(f"Final dataset: {len(combined)} rows ({positives.shape[0]} pos, {len(negatives_df)} neg)")
     return combined
-from data_prep.splits import create_splits
-
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Training on: {DEVICE}")
-assert DEVICE.type == 'cuda', "Set Runtime > GPU first!"
-scaler = torch.amp.GradScaler('cuda')
-
-DRIVE_BASE = '/content/drive/MyDrive/pxddi-data/'
-TWOSIDES_EDGES = DRIVE_BASE + 'twosides/drug_drug_edges.csv'
-TOXICITY_BRIDGE = DRIVE_BASE + 'checkpoints/toxicity_smiles_bridge.csv'
-CHECKPOINT_PATH = DRIVE_BASE + 'checkpoints/pxddi_model.pt'
 
 
-# --- STEP 1: Load real toxicity lookup (canonical_smiles -> toxicity_score) ---
-def load_toxicity_lookup():
-    bridge = pd.read_csv(TOXICITY_BRIDGE)
-    bridge = bridge.dropna(subset=['canonical_smiles'])
-    lookup = dict(zip(bridge['canonical_smiles'], bridge['toxicity_score']))
-    print(f"Loaded real toxicity lookup for {len(lookup)} drugs")
-    return lookup
-
-def get_toxicity(smiles, lookup, default=0.0):
-    """Looks up real toxicity if this exact drug was in our 402-drug
-    bridge; otherwise defaults to 0.0 (unknown, not 'safe')."""
-    from data_prep.pubchem_bridge import canonicalize
-    canon = canonicalize(smiles)
-    return lookup.get(canon, default)
-
-
-# --- STEP 2: Real Dataset class combining SMILES + real toxicity ---
 class PxDDIDataset(Dataset):
     def __init__(self, df, tox_lookup, source_col='source', target_col='target', label_col='label'):
         super().__init__()
         records = []
         skipped = 0
         total = len(df)
-        for i, row in enumerate(df.itertuples(), 1):  # itertuples is much faster than iterrows
+        for i, row in enumerate(df.itertuples(), 1):
             source, target, label = getattr(row, source_col), getattr(row, target_col), getattr(row, label_col)
             ga = smiles_to_graph(source)
             gb = smiles_to_graph(target)
@@ -123,10 +121,10 @@ def build_loader(df, tox_lookup, batch_size=32, shuffle=True):
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
 
 
-# --- STEP 3: Training/eval functions ---
 def multi_task_loss(rp, tap, tbp, rl, tal, tbl):
     bce = torch.nn.BCEWithLogitsLoss()
     return bce(rp, rl) + 0.3 * (bce(tap, tal) + bce(tbp, tbl))
+
 
 def train_one_epoch(model, loader, opt):
     model.train(); total = 0
@@ -141,7 +139,10 @@ def train_one_epoch(model, loader, opt):
         total += loss.item()
     return total / len(loader)
 
+
 def evaluate(model, loader, name):
+    """FIX #4: also prints class balance so we can tell if a low AUROC
+    is a real modeling issue or just noise from a small/unbalanced set."""
     model.eval(); preds, labels = [], []
     with torch.no_grad():
         for da, db, _, _, rl in loader:
@@ -149,29 +150,38 @@ def evaluate(model, loader, name):
             rp, _, _ = model(da, db)
             preds.extend(torch.sigmoid(rp).cpu().numpy())
             labels.extend(rl.numpy())
+
+    n_pos = sum(1 for l in labels if l == 1)
+    n_neg = sum(1 for l in labels if l == 0)
+    print(f"  [{name}] set size: {len(labels)} (pos={n_pos}, neg={n_neg})")
+
     if len(set(labels)) < 2:
         print(f"  [{name}] SKIPPED — only one class present")
         return None, None
+    if len(labels) < 100:
+        print(f"  [{name}] WARNING: small test set ({len(labels)} samples) — AUROC may be noisy")
+
     auroc = roc_auc_score(labels, preds)
     f1 = f1_score(labels, [1 if p > 0.5 else 0 for p in preds])
     print(f"  [{name}] AUROC: {auroc:.4f} | F1: {f1:.4f}")
     return auroc, f1
 
 
-# --- MAIN ---
 if __name__ == "__main__":
     print("STEP 1: Loading real toxicity lookup...")
     tox_lookup = load_toxicity_lookup()
 
-    print("\nSTEP 2: Loading real TWOSIDES edges + generating negatives...")
+    print(f"\nSTEP 2: Loading real TWOSIDES edges (capped at {DATA_CAP}) + generating negatives...")
     edges = pd.read_csv(TWOSIDES_EDGES)
     print(f"Raw positive edges (before cap): {len(edges)}")
-    edges = edges.sample(n=min(20000, len(edges)), random_state=42)  # cap for a fast first run
+    edges = edges.sample(n=min(DATA_CAP, len(edges)), random_state=42)
     print(f"Raw positive edges (after cap): {len(edges)}")
     full_df = add_negative_samples(edges, neg_ratio=1.0)
 
     print("\nSTEP 3: Creating cold-start-aware splits...")
     splits = create_splits(full_df, drug_a_col='source', drug_b_col='target')
+    for name, split_df in splits.items():
+        print(f"  {name}: {len(split_df)} rows")
 
     print("\nSTEP 4: Building real DataLoaders...")
     train_loader = build_loader(splits['transductive_train'], tox_lookup, batch_size=32)
@@ -182,13 +192,16 @@ if __name__ == "__main__":
     print("\nSTEP 5: Training...")
     model = PxDDIModel(in_channels=NUM_ATOM_FEATURES).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    # FIX #2: decaying learning rate schedule, matching FG-DDI's approach
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
 
-    EPOCHS = 30
     best_auroc = 0
     for epoch in range(EPOCHS):
         t0 = time.time()
         loss = train_one_epoch(model, train_loader, optimizer)
-        print(f"\nEpoch {epoch+1}/{EPOCHS} | Loss: {loss:.4f} | Time: {time.time()-t0:.1f}s")
+        lr_scheduler.step()
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"\nEpoch {epoch+1}/{EPOCHS} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {time.time()-t0:.1f}s")
         auroc, f1 = evaluate(model, test_loader, "transductive_test")
         if auroc and auroc > best_auroc:
             best_auroc = auroc
