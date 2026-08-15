@@ -41,13 +41,13 @@ def add_negative_samples(df, source_col='source', target_col='target', neg_ratio
     while len(negatives) < n_negatives and attempts < max_attempts:
         a, b = rng.choice(all_drugs, size=2, replace=False)
         if (a, b) not in real_pairs and (b, a) not in real_pairs:
-            negatives.append({source_col: a, target_col: b, 'label': 0})
+            negatives.append({source_col: a, target_col: b, 'label': 0.0})
         attempts += 1
 
     print(f"Generated {len(negatives)} negative samples (target was {n_negatives})")
 
     positives = df[[source_col, target_col]].copy()
-    positives['label'] = 1
+    positives['label'] = 1.0
     negatives_df = pd.DataFrame(negatives)
 
     combined = pd.concat([positives, negatives_df], ignore_index=True)
@@ -59,7 +59,7 @@ from data_prep.splits import create_splits
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Training on: {DEVICE}")
 assert DEVICE.type == 'cuda', "Set Runtime > GPU first!"
-scaler = torch.cuda.amp.GradScaler()
+scaler = torch.amp.GradScaler('cuda')
 
 DRIVE_BASE = '/content/drive/MyDrive/pxddi-data/'
 TWOSIDES_EDGES = DRIVE_BASE + 'twosides/drug_drug_edges.csv'
@@ -134,7 +134,7 @@ def train_one_epoch(model, loader, opt):
         da, db = da.to(DEVICE), db.to(DEVICE)
         tal, tbl, rl = tal.to(DEVICE), tbl.to(DEVICE), rl.to(DEVICE)
         opt.zero_grad()
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda'):
             rp, tap, tbp = model(da, db)
             loss = multi_task_loss(rp, tap, tbp, rl, tal, tbl)
         scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
