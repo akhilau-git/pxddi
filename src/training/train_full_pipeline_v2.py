@@ -211,7 +211,9 @@ def train_one_epoch(model, loader, opt):
         with torch.amp.autocast('cuda'):
             rp, tap, tbp = model(da, db)
             loss = multi_task_loss(rp, tap, tbp, rl, tal, tbl)
-        scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
+        scaled_loss = scaler.scale(loss)
+        scaled_loss.backward()  # type: ignore
+        scaler.step(opt); scaler.update()
         total += loss.item()
     return total / len(loader)
 

@@ -36,12 +36,14 @@ model.eval()
 DECISION_THRESHOLD = checkpoint.get('threshold', 0.5)
 print(f"Loaded model. AUROC={checkpoint.get('auroc')}, threshold={DECISION_THRESHOLD}")
 
+from typing import Optional, List
+
 class DDIRequest(BaseModel):
     smiles_a: str
     smiles_b: str
-    age_band: int = None      # 0-9, representing decades (0=0-9yrs, 9=90+)
-    sex: int = None           # 0=male, 1=female
-    comorbidities: list = None  # multi-hot list of length 10, e.g. [0,1,0,...]
+    age_band: Optional[int] = None      # 0-9, representing decades (0=0-9yrs, 9=90+)
+    sex: Optional[int] = None           # 0=male, 1=female
+    comorbidities: Optional[List[int]] = None  # multi-hot list of length 10, e.g. [0,1,0,...]
 
     @field_validator('age_band')
     @classmethod

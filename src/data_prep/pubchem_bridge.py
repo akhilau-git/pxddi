@@ -56,7 +56,7 @@ def build_name_to_smiles_bridge(tox_labels_df: pd.DataFrame, cache_path: str,
 
     results = []
     for i, row in enumerate(top_drugs.itertuples(), 1):
-        smiles = fetch_smiles_from_pubchem(row.drugname)
+        smiles = fetch_smiles_from_pubchem(str(row.drugname))
         canonical = canonicalize(smiles) if smiles else None
         results.append({
             'drugname': row.drugname,
