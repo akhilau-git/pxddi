@@ -23,7 +23,7 @@ async function checkRisk() {
             Model-estimated interaction likelihood: ${(data.interaction_risk_estimate * 100).toFixed(1)}%<br>
             Drug A toxicity: ${data.drug_a_toxicity.score.toFixed(2)}
                 ${data.drug_a_toxicity.known ? '(model prediction, trained on FAERS-derived signal)' : '(UNKNOWN — no data available, not a "safe" result)'}<br>
-                <strong>Drug B Toxicity:</strong> ${(data.drug_b_toxicity.score * 100).toFixed(1)}% 
+                <strong>Drug B Toxicity:</strong> ${data.drug_b_toxicity.score.toFixed(3)} 
                 ${data.drug_b_toxicity.known ? '(model prediction, trained on FAERS-derived signal)' : '(UNKNOWN — no data available, not a "safe" result)'}<br>
             Patient context applied: ${data.patient_context_applied}
         `;
