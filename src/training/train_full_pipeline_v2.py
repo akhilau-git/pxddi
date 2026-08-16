@@ -120,7 +120,7 @@ def load_toxicity_lookup():
     return lookup
 
 
-def get_toxicity(smiles, lookup, default=0.0):
+def get_toxicity(smiles, lookup, default=None):
     canon = canonicalize(smiles)
     return lookup.get(canon, default)
 
@@ -171,7 +171,11 @@ class PxDDIDataset(Dataset):
                 continue
             tox_a = get_toxicity(source, tox_lookup)
             tox_b = get_toxicity(target, tox_lookup)
-            records.append((ga, gb, tox_a, tox_b, label))
+            tox_a_known = float(tox_a is not None)
+            tox_b_known = float(tox_b is not None)
+            tox_a = tox_a if tox_a is not None else 0.0
+            tox_b = tox_b if tox_b is not None else 0.0
+            records.append((ga, gb, tox_a, tox_b, tox_a_known, tox_b_known, label))
             if i % 5000 == 0:
                 print(f"    ...processed {i}/{total} rows")
         print(f"Built dataset: {len(records)} valid pairs, {skipped} skipped (bad SMILES)")
@@ -188,8 +192,10 @@ def collate_fn(batch):
     gb = [b[1] for b in batch]
     ta = torch.tensor([b[2] for b in batch], dtype=torch.float)
     tb = torch.tensor([b[3] for b in batch], dtype=torch.float)
-    lb = torch.tensor([b[4] for b in batch], dtype=torch.float)
-    return Batch.from_data_list(ga), Batch.from_data_list(gb), ta, tb, lb
+    tak = torch.tensor([b[4] for b in batch], dtype=torch.float)
+    tbk = torch.tensor([b[5] for b in batch], dtype=torch.float)
+    lb = torch.tensor([b[6] for b in batch], dtype=torch.float)
+    return Batch.from_data_list(ga), Batch.from_data_list(gb), ta, tb, tak, tbk, lb
 
 
 def build_loader(df, tox_lookup, batch_size=32, shuffle=True):
@@ -197,20 +203,23 @@ def build_loader(df, tox_lookup, batch_size=32, shuffle=True):
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
 
 
-def multi_task_loss(rp, tap, tbp, rl, tal, tbl):
-    bce = torch.nn.BCEWithLogitsLoss()
-    return bce(rp, rl) + 0.3 * (bce(tap, tal) + bce(tbp, tbl))
+def multi_task_loss(rp, tap, tbp, rl, tal, tbl, tak, tbk):
+    bce = torch.nn.BCEWithLogitsLoss(reduction='none')
+    ddi_loss = bce(rp, rl).mean()
+    tox_a_loss = (bce(tap, tal) * tak).sum() / (tak.sum() + 1e-8)
+    tox_b_loss = (bce(tbp, tbl) * tbk).sum() / (tbk.sum() + 1e-8)
+    return ddi_loss + 0.3 * (tox_a_loss + tox_b_loss)
 
 
 def train_one_epoch(model, loader, opt):
     model.train(); total = 0
-    for da, db, tal, tbl, rl in loader:
+    for da, db, tal, tbl, tak, tbk, rl in loader:
         da, db = da.to(DEVICE), db.to(DEVICE)
-        tal, tbl, rl = tal.to(DEVICE), tbl.to(DEVICE), rl.to(DEVICE)
+        tal, tbl, tak, tbk, rl = tal.to(DEVICE), tbl.to(DEVICE), tak.to(DEVICE), tbk.to(DEVICE), rl.to(DEVICE)
         opt.zero_grad()
         with torch.amp.autocast('cuda'):
             rp, tap, tbp = model(da, db)
-            loss = multi_task_loss(rp, tap, tbp, rl, tal, tbl)
+            loss = multi_task_loss(rp, tap, tbp, rl, tal, tbl, tak, tbk)
         scaled_loss = scaler.scale(loss)
         scaled_loss.backward()  # type: ignore
         scaler.step(opt); scaler.update()
@@ -230,7 +239,7 @@ def evaluate(model, loader, name, threshold=None):
     is a real modeling issue or just noise from a small/unbalanced set."""
     model.eval(); preds, labels = [], []
     with torch.no_grad():
-        for da, db, _, _, rl in loader:
+        for da, db, _, _, _, _, rl in loader:
             da, db = da.to(DEVICE), db.to(DEVICE)
             rp, _, _ = model(da, db)
             preds.extend(torch.sigmoid(rp).cpu().numpy())
@@ -324,7 +333,7 @@ if __name__ == "__main__":
     val_preds, val_labels = [], []
     model.eval()
     with torch.no_grad():
-        for da, db, _, _, rl in val_loader:
+        for da, db, _, _, _, _, rl in val_loader:
             da, db = da.to(DEVICE), db.to(DEVICE)
             rp, _, _ = model(da, db)
             val_preds.extend(torch.sigmoid(rp).cpu().numpy())
@@ -356,7 +365,7 @@ if __name__ == "__main__":
     # Get predictions for transductive set for ROC curve
     model.eval(); preds, labels = [], []
     with torch.no_grad():
-        for da, db, _, _, rl in test_loader:
+        for da, db, _, _, _, _, rl in test_loader:
             da, db = da.to(DEVICE), db.to(DEVICE)
             rp, _, _ = model(da, db)
             preds.extend(torch.sigmoid(rp).cpu().numpy())

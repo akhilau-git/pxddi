@@ -28,7 +28,7 @@ Dual-view GAT encoder, 128 hidden dims, multi-task (DDI risk + toxicity).
 3. **Patient-Context Module**: Exists architecturally but is NOT trained on linked patient-outcome data — disabled at inference.
 4. **Toxicity Coverage**: Limited to 339 drugs; missing = unknown, not zero risk.
 5. **Clinical Validation**: No external/temporal/clinical validation performed.
-6. **Symmetry**: Not evaluated for symmetry (A+B vs B+A may differ).
+6. **Symmetry**: Evaluated for symmetry and found to be highly order-sensitive (A+B != B+A). This is a known limitation.
 7. **Security**: Missing auth, CORS tightening, rate-limiting, and audit logs.
 8. **Clinical Rules Engine**: Not implemented.
 9. **Deployment Hardening**: Model server and ChemBERTa infrastructure not hardened for production scale.
