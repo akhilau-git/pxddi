@@ -26,7 +26,11 @@ app.add_middleware(
 )
 
 checkpoint = torch.load('checkpoints/pxddi_model.pt', map_location='cpu')
-model = PxDDIModel(in_channels=checkpoint['in_channels'], hidden_channels=checkpoint['hidden_channels'])
+model = PxDDIModel(
+    in_channels=checkpoint['in_channels'],
+    hidden_channels=checkpoint['hidden_channels'],
+    use_chemberta=checkpoint.get('use_chemberta', False)
+)
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
 print(f"Loaded model: hidden_channels={checkpoint['hidden_channels']}, "

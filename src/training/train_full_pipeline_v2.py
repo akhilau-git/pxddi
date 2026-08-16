@@ -31,10 +31,11 @@ scaler = torch.amp.GradScaler('cuda')
 DRIVE_BASE = '/content/drive/MyDrive/pxddi-data/'
 TWOSIDES_EDGES = DRIVE_BASE + 'twosides/drug_drug_edges.csv'
 TOXICITY_BRIDGE = DRIVE_BASE + 'checkpoints/toxicity_smiles_bridge.csv'
-CHECKPOINT_PATH = DRIVE_BASE + 'checkpoints/pxddi_model.pt'
+USE_CHEMBERTA = True
+CHECKPOINT_PATH = DRIVE_BASE + ('checkpoints/pxddi_model_chemberta.pt' if USE_CHEMBERTA else 'checkpoints/pxddi_model.pt')
 
-DATA_CAP = 200000  # bump to 200000 once this run confirms everything works
-EPOCHS = 200
+DATA_CAP = 50000
+EPOCHS = 50
 HIDDEN_CHANNELS = 128
 
 
@@ -201,7 +202,7 @@ if __name__ == "__main__":
     s2_loader = build_loader(splits['s2_test'], tox_lookup, batch_size=128, shuffle=False)
 
     print("\nSTEP 5: Training...")
-    model = PxDDIModel(in_channels=NUM_ATOM_FEATURES, hidden_channels=HIDDEN_CHANNELS).to(DEVICE)
+    model = PxDDIModel(in_channels=NUM_ATOM_FEATURES, hidden_channels=HIDDEN_CHANNELS, use_chemberta=USE_CHEMBERTA).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     # FIX #2: decaying learning rate schedule, matching FG-DDI's approach
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
@@ -220,6 +221,7 @@ if __name__ == "__main__":
                 'model_state_dict': model.state_dict(),
                 'hidden_channels': HIDDEN_CHANNELS,
                 'in_channels': NUM_ATOM_FEATURES,
+                'use_chemberta': USE_CHEMBERTA,
                 'auroc': auroc,
                 'epoch': epoch + 1,
                 'data_cap': DATA_CAP,
