@@ -90,9 +90,13 @@ def predict_ddi(req: DDIRequest):
     with torch.no_grad():
         risk, tox_a, tox_b = model(batch_a, batch_b, patient=None)
 
+    risk_score = float(torch.sigmoid(risk))
+
     return {
         "disclaimer": "Research prototype output. Not clinical advice. Not FDA/regulatory reviewed.",
-        "interaction_risk_estimate": float(torch.sigmoid(risk)),
+        "interaction_risk_estimate": risk_score,
+        "interaction_predicted": risk_score >= DECISION_THRESHOLD,
+        "decision_threshold_used": DECISION_THRESHOLD,
         "patient_context_applied": False,
         "patient_context_note": patient_context_note,
         "drug_a_toxicity": {"score": float(tox_a), "known": req.smiles_a in KNOWN_TOXICITY_SMILES},

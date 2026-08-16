@@ -22,15 +22,16 @@ Dual-view GAT encoder, 128 hidden dims, multi-task (DDI risk + toxicity).
 | S1 (both unseen) | 0.5021 | 0.3530 |
 | S2 (one unseen) | 0.7474 | 0.6387 |
 
-## Known limitations
-1. S1 generalization is near-random — model cannot reliably predict
-   interactions for entirely novel drug pairs.
-2. Negative labels represent "not reported" not "confirmed safe."
-3. Patient-context module exists architecturally but is NOT trained
-   on linked patient-outcome data — disabled at inference.
-4. Toxicity coverage limited to 339 drugs; missing = unknown, not zero risk.
-5. No external/temporal/clinical validation performed.
-6. Not evaluated for symmetry (A+B vs B+A may differ).
+## Known Limitations / Not Yet Implemented
+1. **S1 Generalization**: Performance is near-random — model cannot reliably predict interactions for entirely novel drug pairs.
+2. **Negative Labels**: Represent "not reported" in TWOSIDES, not "confirmed safe."
+3. **Patient-Context Module**: Exists architecturally but is NOT trained on linked patient-outcome data — disabled at inference.
+4. **Toxicity Coverage**: Limited to 339 drugs; missing = unknown, not zero risk.
+5. **Clinical Validation**: No external/temporal/clinical validation performed.
+6. **Symmetry**: Not evaluated for symmetry (A+B vs B+A may differ).
+7. **Security**: Missing auth, CORS tightening, rate-limiting, and audit logs.
+8. **Clinical Rules Engine**: Not implemented.
+9. **Deployment Hardening**: Model server and ChemBERTa infrastructure not hardened for production scale.
 
 ## Ablation: ChemBERTa-2 encoder
 Tested as alternative encoder (50k pairs, 50 epochs). Did not improve

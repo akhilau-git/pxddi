@@ -293,25 +293,25 @@ if __name__ == "__main__":
         lr_scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
         print(f"\nEpoch {epoch+1}/{EPOCHS} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {time.time()-t0:.1f}s")
-        auroc, f1 = evaluate(model, test_loader, "transductive_test")
+        val_auroc, val_f1 = evaluate(model, val_loader, "validation")
         
         history['epoch'].append(epoch + 1)
         history['loss'].append(loss)
-        history['auroc'].append(auroc if auroc else 0)
-        history['f1'].append(f1 if f1 else 0)
+        history['auroc'].append(val_auroc if val_auroc else 0)
+        history['f1'].append(val_f1 if val_f1 else 0)
         
-        if auroc and auroc > best_auroc:
-            best_auroc = auroc
+        if val_auroc and val_auroc > best_auroc:
+            best_auroc = val_auroc
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'hidden_channels': HIDDEN_CHANNELS,
                 'in_channels': NUM_ATOM_FEATURES,
                 'use_chemberta': USE_CHEMBERTA,
-                'auroc': auroc,
+                'auroc': val_auroc,
                 'epoch': epoch + 1,
                 'data_cap': DATA_CAP,
             }, CHECKPOINT_PATH)
-            print(f"  -> New best model saved (AUROC {auroc:.4f})")
+            print(f"  -> New best model saved (VALIDATION AUROC {val_auroc:.4f})")
 
     print("\nReloading BEST checkpoint (not final epoch) for final reporting...")
     best_checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
@@ -335,7 +335,8 @@ if __name__ == "__main__":
     torch.save(best_checkpoint, CHECKPOINT_PATH)
     print("Saved optimal threshold to checkpoint.")
 
-    print("\n=== FINAL BENCHMARK TABLE (from BEST checkpoint) ===")
+    print("\n=== FINAL BENCHMARK (test touched ONCE, model selected via validation) ===")
+    print(f"Threshold (from validation): {FROZEN_THRESHOLD:.4f}")
     
     PLOTS_DIR = DRIVE_BASE + 'plots/'
     import os
@@ -344,9 +345,9 @@ if __name__ == "__main__":
     plot_training_curves(history, PLOTS_DIR + 'training_curves.png')
 
     final_results = {
-        'Transductive': evaluate(model, test_loader, "Transductive", threshold=FROZEN_THRESHOLD),
-        'S1 (unseen)': evaluate(model, s1_loader, "S1", threshold=FROZEN_THRESHOLD),
-        'S2 (one unseen)': evaluate(model, s2_loader, "S2", threshold=FROZEN_THRESHOLD),
+        'Transductive': evaluate(model, test_loader, "Transductive TEST", threshold=FROZEN_THRESHOLD),
+        'S1 (unseen)': evaluate(model, s1_loader, "S1 (both unseen) TEST", threshold=FROZEN_THRESHOLD),
+        'S2 (one unseen)': evaluate(model, s2_loader, "S2 (one unseen) TEST", threshold=FROZEN_THRESHOLD),
     }
     plot_benchmark_comparison(final_results, PLOTS_DIR + 'benchmark_comparison.png')
     
