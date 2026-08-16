@@ -12,7 +12,10 @@ model.eval()
 
 smiles_a = "CC(=O)OC1=CC=CC=C1C(=O)O"
 smiles_b = "CC(=O)NC1=CC=C(C=C1)O"
-ga, gb = Batch.from_data_list([smiles_to_graph(smiles_a)]), Batch.from_data_list([smiles_to_graph(smiles_b)])
+ga_data = smiles_to_graph(smiles_a)
+gb_data = smiles_to_graph(smiles_b)
+assert ga_data is not None and gb_data is not None
+ga, gb = Batch.from_data_list([ga_data]), Batch.from_data_list([gb_data])
 
 with torch.no_grad():
     risk_ab, _, _ = model(ga, gb)
