@@ -32,11 +32,11 @@ scaler = torch.amp.GradScaler('cuda')
 DRIVE_BASE = '/content/drive/MyDrive/pxddi-data/'
 TWOSIDES_EDGES = DRIVE_BASE + 'twosides/drug_drug_edges.csv'
 TOXICITY_BRIDGE = DRIVE_BASE + 'checkpoints/toxicity_smiles_bridge.csv'
-USE_CHEMBERTA = True
+USE_CHEMBERTA = False
 CHECKPOINT_PATH = DRIVE_BASE + ('checkpoints/pxddi_model_chemberta.pt' if USE_CHEMBERTA else 'checkpoints/pxddi_model.pt')
 
-DATA_CAP = 50000
-EPOCHS = 50
+DATA_CAP = 200000
+EPOCHS = 200
 HIDDEN_CHANNELS = 128
 
 history = {'epoch': [], 'loss': [], 'auroc': [], 'f1': []}
@@ -159,6 +159,7 @@ class PxDDIDataset(Dataset):
         super().__init__()
         records = []
         skipped = 0
+        skipped_examples = []
         total = len(df)
         for i, row in enumerate(df.itertuples(), 1):
             source, target, label = getattr(row, source_col), getattr(row, target_col), getattr(row, label_col)
@@ -166,6 +167,7 @@ class PxDDIDataset(Dataset):
             gb = smiles_to_graph(target)
             if ga is None or gb is None:
                 skipped += 1
+                skipped_examples.append((source, target))
                 continue
             tox_a = get_toxicity(source, tox_lookup)
             tox_b = get_toxicity(target, tox_lookup)
@@ -173,6 +175,8 @@ class PxDDIDataset(Dataset):
             if i % 5000 == 0:
                 print(f"    ...processed {i}/{total} rows")
         print(f"Built dataset: {len(records)} valid pairs, {skipped} skipped (bad SMILES)")
+        if skipped_examples:
+            print(f"Sample of skipped SMILES (first 5): {skipped_examples[:5]}")
         self.records = records
 
     def len(self): return len(self.records)
@@ -219,7 +223,7 @@ def find_best_threshold(labels, preds):
     return thresholds[best_idx]
 
 
-def evaluate(model, loader, name):
+def evaluate(model, loader, name, threshold=None):
     """FIX #4: also prints class balance so we can tell if a low AUROC
     is a real modeling issue or just noise from a small/unbalanced set."""
     model.eval(); preds, labels = [], []
@@ -241,11 +245,16 @@ def evaluate(model, loader, name):
         print(f"  [{name}] WARNING: small test set ({len(labels)} samples) — AUROC may be noisy")
 
     auroc = roc_auc_score(labels, preds)
-    best_thresh = find_best_threshold(labels, preds)
-    f1 = f1_score(labels, [1 if p > 0.5 else 0 for p in preds])
-    best_f1 = f1_score(labels, [1 if p > best_thresh else 0 for p in preds])
-    print(f"  [{name}] AUROC: {auroc:.4f} | F1 (0.5 threshold): {f1:.4f} | F1 (optimal {best_thresh:.3f}): {best_f1:.4f}")
-    return auroc, best_f1
+    if threshold is None:
+        best_thresh = find_best_threshold(labels, preds)
+        f1 = f1_score(labels, [1 if p > 0.5 else 0 for p in preds])
+        best_f1 = f1_score(labels, [1 if p > best_thresh else 0 for p in preds])
+        print(f"  [{name}] AUROC: {auroc:.4f} | F1 (0.5 threshold): {f1:.4f} | F1 (optimal {best_thresh:.3f}): {best_f1:.4f}")
+        return auroc, best_f1
+    else:
+        f1 = f1_score(labels, [1 if p > threshold else 0 for p in preds])
+        print(f"  [{name}] AUROC: {auroc:.4f} | F1 (threshold {threshold:.3f}): {f1:.4f}")
+        return auroc, f1
 
 
 if __name__ == "__main__":
@@ -266,6 +275,7 @@ if __name__ == "__main__":
 
     print("\nSTEP 4: Building real DataLoaders...")
     train_loader = build_loader(splits['transductive_train'], tox_lookup, batch_size=128)
+    val_loader = build_loader(splits['validation'], tox_lookup, batch_size=128, shuffle=False)
     test_loader = build_loader(splits['transductive_test'], tox_lookup, batch_size=128, shuffle=False)
     s1_loader = build_loader(splits['s1_test'], tox_lookup, batch_size=128, shuffle=False)
     s2_loader = build_loader(splits['s2_test'], tox_lookup, batch_size=128, shuffle=False)
@@ -303,7 +313,29 @@ if __name__ == "__main__":
             }, CHECKPOINT_PATH)
             print(f"  -> New best model saved (AUROC {auroc:.4f})")
 
-    print("\n=== FINAL BENCHMARK TABLE (real data, all modules) ===")
+    print("\nReloading BEST checkpoint (not final epoch) for final reporting...")
+    best_checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+    model.load_state_dict(best_checkpoint['model_state_dict'])
+    print(f"Loaded best checkpoint: AUROC={best_checkpoint['auroc']:.4f}, epoch={best_checkpoint['epoch']}")
+
+    # Find threshold on validation set
+    val_preds, val_labels = [], []
+    model.eval()
+    with torch.no_grad():
+        for da, db, _, _, rl in val_loader:
+            da, db = da.to(DEVICE), db.to(DEVICE)
+            rp, _, _ = model(da, db)
+            val_preds.extend(torch.sigmoid(rp).cpu().numpy())
+            val_labels.extend(rl.numpy())
+    FROZEN_THRESHOLD = find_best_threshold(val_labels, val_preds)
+    print(f"Threshold selected on VALIDATION set (not test): {FROZEN_THRESHOLD:.4f}")
+    
+    # Save threshold into the checkpoint dict
+    best_checkpoint['threshold'] = float(FROZEN_THRESHOLD)
+    torch.save(best_checkpoint, CHECKPOINT_PATH)
+    print("Saved optimal threshold to checkpoint.")
+
+    print("\n=== FINAL BENCHMARK TABLE (from BEST checkpoint) ===")
     
     PLOTS_DIR = DRIVE_BASE + 'plots/'
     import os
@@ -312,9 +344,9 @@ if __name__ == "__main__":
     plot_training_curves(history, PLOTS_DIR + 'training_curves.png')
 
     final_results = {
-        'Transductive': evaluate(model, test_loader, "Transductive"),
-        'S1 (unseen)': evaluate(model, s1_loader, "S1"),
-        'S2 (one unseen)': evaluate(model, s2_loader, "S2"),
+        'Transductive': evaluate(model, test_loader, "Transductive", threshold=FROZEN_THRESHOLD),
+        'S1 (unseen)': evaluate(model, s1_loader, "S1", threshold=FROZEN_THRESHOLD),
+        'S2 (one unseen)': evaluate(model, s2_loader, "S2", threshold=FROZEN_THRESHOLD),
     }
     plot_benchmark_comparison(final_results, PLOTS_DIR + 'benchmark_comparison.png')
     

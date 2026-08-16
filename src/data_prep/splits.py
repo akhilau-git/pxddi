@@ -12,5 +12,17 @@ def create_splits(df, drug_a_col='drug1_id', drug_b_col='drug2_id', seed=42):
     s2 = df[df.apply(one, axis=1)]
     seen = df[df.apply(none_, axis=1)].sample(frac=1, random_state=seed)
     split = int(0.8*len(seen))
-    return {'transductive_train': seen.iloc[:split], 'transductive_test': seen.iloc[split:],
-            's1_test': s1, 's2_test': s2}
+    transductive_train = seen.iloc[:split]
+    transductive_test = seen.iloc[split:]
+    
+    val_size = int(0.1 * len(transductive_train))
+    validation = transductive_train.iloc[:val_size]
+    transductive_train = transductive_train.iloc[val_size:]
+    
+    return {
+        'transductive_train': transductive_train,
+        'validation': validation,
+        'transductive_test': transductive_test,
+        's1_test': s1, 
+        's2_test': s2
+    }
