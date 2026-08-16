@@ -14,6 +14,7 @@ sys.path.append('/content/drive/MyDrive/pxddi-data/pxddi/src')
 
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score, f1_score, roc_curve
 from torch_geometric.data import Batch, Dataset
 from torch_geometric.loader import DataLoader
@@ -37,6 +38,74 @@ CHECKPOINT_PATH = DRIVE_BASE + ('checkpoints/pxddi_model_chemberta.pt' if USE_CH
 DATA_CAP = 50000
 EPOCHS = 50
 HIDDEN_CHANNELS = 128
+
+history = {'epoch': [], 'loss': [], 'auroc': [], 'f1': []}
+
+def plot_training_curves(history, save_path):
+    """Saves loss and AUROC curves as PNG — use these directly in your paper."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].plot(history['epoch'], history['loss'], color='crimson')
+    axes[0].set_title('Training Loss Over Epochs')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].grid(alpha=0.3)
+
+    axes[1].plot(history['epoch'], history['auroc'], label='AUROC', color='navy')
+    axes[1].plot(history['epoch'], history['f1'], label='F1', color='seagreen')
+    axes[1].set_title('Validation Performance Over Epochs')
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Score')
+    axes[1].legend()
+    axes[1].grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    print(f"Saved training curves to {save_path}")
+    plt.close()
+
+def plot_benchmark_comparison(results_dict, save_path):
+    """
+    results_dict example:
+    {'Transductive': (0.9735, 0.9170), 'S1 (unseen)': (0.5021, 0.3530), 'S2 (one unseen)': (0.7474, 0.6387)}
+    This is your headline comparison chart — put this directly in your paper.
+    """
+    labels = list(results_dict.keys())
+    aurocs = [v[0] for v in results_dict.values()]
+    f1s = [v[1] for v in results_dict.values()]
+
+    x = range(len(labels))
+    fig, ax = plt.subplots(figsize=(8, 5))
+    width = 0.35
+    ax.bar([i - width/2 for i in x], aurocs, width, label='AUROC', color='navy')
+    ax.bar([i + width/2 for i in x], f1s, width, label='F1', color='seagreen')
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylim(0, 1)
+    ax.axhline(0.5, color='red', linestyle='--', alpha=0.5, label='Random baseline (0.5)')
+    ax.set_title('PxDDI Performance: Transductive vs. Cold-Start Splits')
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    print(f"Saved benchmark comparison to {save_path}")
+    plt.close()
+
+def plot_roc_curve(labels, preds, save_path, title="ROC Curve"):
+    """A real ROC curve — standard in every ML paper's results section."""
+    from sklearn.metrics import roc_curve, auc
+    fpr, tpr, _ = roc_curve(labels, preds)
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure(figsize=(6, 6))
+    plt.plot(fpr, tpr, color='darkorange', label=f'ROC curve (AUC = {roc_auc:.3f})')
+    plt.plot([0, 1], [0, 1], color='gray', linestyle='--', label='Random')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(title)
+    plt.legend()
+    plt.savefig(save_path, dpi=150)
+    print(f"Saved ROC curve to {save_path}")
+    plt.close()
 
 
 def load_toxicity_lookup():
@@ -215,6 +284,12 @@ if __name__ == "__main__":
         current_lr = optimizer.param_groups[0]['lr']
         print(f"\nEpoch {epoch+1}/{EPOCHS} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {time.time()-t0:.1f}s")
         auroc, f1 = evaluate(model, test_loader, "transductive_test")
+        
+        history['epoch'].append(epoch + 1)
+        history['loss'].append(loss)
+        history['auroc'].append(auroc if auroc else 0)
+        history['f1'].append(f1 if f1 else 0)
+        
         if auroc and auroc > best_auroc:
             best_auroc = auroc
             torch.save({
@@ -229,6 +304,26 @@ if __name__ == "__main__":
             print(f"  -> New best model saved (AUROC {auroc:.4f})")
 
     print("\n=== FINAL BENCHMARK TABLE (real data, all modules) ===")
-    evaluate(model, test_loader, "Transductive")
-    evaluate(model, s1_loader, "S1 (both drugs unseen)")
-    evaluate(model, s2_loader, "S2 (one drug unseen)")
+    
+    PLOTS_DIR = DRIVE_BASE + 'plots/'
+    import os
+    os.makedirs(PLOTS_DIR, exist_ok=True)
+
+    plot_training_curves(history, PLOTS_DIR + 'training_curves.png')
+
+    final_results = {
+        'Transductive': evaluate(model, test_loader, "Transductive"),
+        'S1 (unseen)': evaluate(model, s1_loader, "S1"),
+        'S2 (one unseen)': evaluate(model, s2_loader, "S2"),
+    }
+    plot_benchmark_comparison(final_results, PLOTS_DIR + 'benchmark_comparison.png')
+    
+    # Get predictions for transductive set for ROC curve
+    model.eval(); preds, labels = [], []
+    with torch.no_grad():
+        for da, db, _, _, rl in test_loader:
+            da, db = da.to(DEVICE), db.to(DEVICE)
+            rp, _, _ = model(da, db)
+            preds.extend(torch.sigmoid(rp).cpu().numpy())
+            labels.extend(rl.numpy())
+    plot_roc_curve(labels, preds, PLOTS_DIR + 'roc_curve.png')
