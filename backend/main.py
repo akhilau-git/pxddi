@@ -33,8 +33,8 @@ model = PxDDIModel(
 )
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
-print(f"Loaded model: hidden_channels={checkpoint['hidden_channels']}, "
-      f"trained AUROC={checkpoint.get('auroc', 'unknown')}, epoch={checkpoint.get('epoch', 'unknown')}")
+DECISION_THRESHOLD = checkpoint.get('threshold', 0.5)
+print(f"Loaded model. AUROC={checkpoint.get('auroc')}, threshold={DECISION_THRESHOLD}")
 
 class DDIRequest(BaseModel):
     smiles_a: str
@@ -119,4 +119,12 @@ def explain_ddi(req: DDIRequest):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": True}
+    return {
+        "status": "ok",
+        "model_loaded": True,
+        "model_type": "GNN" if not checkpoint.get('use_chemberta', False) else "ChemBERTa",
+        "model_auroc": checkpoint.get('auroc'),
+        "toxicity_bridge_loaded": len(KNOWN_TOXICITY_SMILES) > 0,
+        "toxicity_bridge_size": len(KNOWN_TOXICITY_SMILES),
+        "decision_threshold": DECISION_THRESHOLD,
+    }
