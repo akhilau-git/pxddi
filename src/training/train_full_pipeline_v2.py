@@ -35,6 +35,7 @@ CHECKPOINT_PATH = DRIVE_BASE + 'checkpoints/pxddi_model.pt'
 
 DATA_CAP = 200000  # bump to 200000 once this run confirms everything works
 EPOCHS = 200
+HIDDEN_CHANNELS = 128
 
 
 def load_toxicity_lookup():
@@ -74,11 +75,12 @@ def add_negative_samples(df, source_col='source', target_col='target', neg_ratio
 
     positives = df[[source_col, target_col]].copy()
     positives['label'] = 1.0
-    negatives_df = pd.DataFrame(negatives)
+    negatives_df = pd.DataFrame(negatives).drop_duplicates(subset=[source_col, target_col])
+    print(f"After deduplication: {len(negatives_df)} unique 'no interaction reported in TWOSIDES' samples")
 
     combined = pd.concat([positives, negatives_df], ignore_index=True)
     combined = combined.sample(frac=1, random_state=seed).reset_index(drop=True)
-    print(f"Final dataset: {len(combined)} rows ({positives.shape[0]} pos, {len(negatives_df)} neg)")
+    print(f"Final dataset: {len(combined)} rows ({positives.shape[0]} pos, {len(negatives_df)} 'no interaction reported in TWOSIDES')")
     return combined
 
 
@@ -190,7 +192,7 @@ if __name__ == "__main__":
     s2_loader = build_loader(splits['s2_test'], tox_lookup, batch_size=128, shuffle=False)
 
     print("\nSTEP 5: Training...")
-    model = PxDDIModel(in_channels=NUM_ATOM_FEATURES, hidden_channels=128).to(DEVICE)
+    model = PxDDIModel(in_channels=NUM_ATOM_FEATURES, hidden_channels=HIDDEN_CHANNELS).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     # FIX #2: decaying learning rate schedule, matching FG-DDI's approach
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
@@ -205,7 +207,14 @@ if __name__ == "__main__":
         auroc, f1 = evaluate(model, test_loader, "transductive_test")
         if auroc and auroc > best_auroc:
             best_auroc = auroc
-            torch.save(model.state_dict(), CHECKPOINT_PATH)
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'hidden_channels': HIDDEN_CHANNELS,
+                'in_channels': NUM_ATOM_FEATURES,
+                'auroc': auroc,
+                'epoch': epoch + 1,
+                'data_cap': DATA_CAP,
+            }, CHECKPOINT_PATH)
             print(f"  -> New best model saved (AUROC {auroc:.4f})")
 
     print("\n=== FINAL BENCHMARK TABLE (real data, all modules) ===")

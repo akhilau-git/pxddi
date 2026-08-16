@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import torch
 import sys
 import os
@@ -25,9 +25,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-model = PxDDIModel(in_channels=NUM_ATOM_FEATURES)
-model.load_state_dict(torch.load('checkpoints/pxddi_model.pt', map_location='cpu'))
+checkpoint = torch.load('checkpoints/pxddi_model.pt', map_location='cpu')
+model = PxDDIModel(in_channels=checkpoint['in_channels'], hidden_channels=checkpoint['hidden_channels'])
+model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
+print(f"Loaded model: hidden_channels={checkpoint['hidden_channels']}, "
+      f"trained AUROC={checkpoint.get('auroc', 'unknown')}, epoch={checkpoint.get('epoch', 'unknown')}")
 
 class DDIRequest(BaseModel):
     smiles_a: str
@@ -35,6 +38,27 @@ class DDIRequest(BaseModel):
     age_band: int = None      # 0-9, representing decades (0=0-9yrs, 9=90+)
     sex: int = None           # 0=male, 1=female
     comorbidities: list = None  # multi-hot list of length 10, e.g. [0,1,0,...]
+
+    @field_validator('age_band')
+    @classmethod
+    def validate_age_band(cls, v):
+        if v is not None and not (0 <= v <= 9):
+            raise ValueError('age_band must be between 0 and 9')
+        return v
+
+    @field_validator('sex')
+    @classmethod
+    def validate_sex(cls, v):
+        if v is not None and v not in (0, 1):
+            raise ValueError('sex must be 0 or 1')
+        return v
+
+    @field_validator('comorbidities')
+    @classmethod
+    def validate_comorbidities(cls, v):
+        if v is not None and len(v) != 10:
+            raise ValueError('comorbidities must be a list of exactly 10 values')
+        return v
 
 @app.post("/predict")
 def predict_ddi(req: DDIRequest):
@@ -48,33 +72,45 @@ def predict_ddi(req: DDIRequest):
     batch_a = Batch.from_data_list([graph_a])
     batch_b = Batch.from_data_list([graph_b])
 
-    # FIX: actually build and pass the patient dict, instead of ignoring the input
+    # HONEST LIMITATION: patient-context module exists architecturally but
+    # has not been trained on linked patient-outcome data (no dataset in
+    # this project links a specific patient to a specific drug-pair
+    # outcome). Applying it now would run UNTRAINED random weights and
+    # silently bias results. Disabled until real training data exists.
     patient = None
-    if req.age_band is not None and req.sex is not None and req.comorbidities is not None:
-        patient = {
-            'age_band': torch.tensor([float(req.age_band)]),
-            'sex': torch.tensor([float(req.sex)]),
-            'comorbidities': torch.tensor([[float(x) for x in req.comorbidities]])
-        }
+    patient_context_note = (
+        "Patient context fields were accepted but NOT applied — the "
+        "patient-conditioning module is not yet trained on real linked "
+        "patient-outcome data. This will be enabled once available."
+    )
 
     with torch.no_grad():
-        risk, tox_a, tox_b = model(batch_a, batch_b, patient=patient)
-
-    explanation = full_explanation_pipeline(model, batch_a, req.smiles_a, batch_b, req.smiles_b)
+        risk, tox_a, tox_b = model(batch_a, batch_b, patient=None)
 
     return {
-        # Honest framing (from review) — not a clinical probability
         "disclaimer": "Research prototype output. Not clinical advice. Not FDA/regulatory reviewed.",
         "interaction_risk_estimate": float(torch.sigmoid(risk)),
-        "patient_context_applied": patient is not None,
-        "drug_a_toxicity": {
-            "score": float(tox_a),
-            "known": req.smiles_a in KNOWN_TOXICITY_SMILES  # Fix 3, defined below
-        },
-        "drug_b_toxicity": {
-            "score": float(tox_b),
-            "known": req.smiles_b in KNOWN_TOXICITY_SMILES
-        },
+        "patient_context_applied": False,
+        "patient_context_note": patient_context_note,
+        "drug_a_toxicity": {"score": float(tox_a), "known": req.smiles_a in KNOWN_TOXICITY_SMILES},
+        "drug_b_toxicity": {"score": float(tox_b), "known": req.smiles_b in KNOWN_TOXICITY_SMILES},
+        "explanation_available_at": "/explain (separate, slower endpoint)"
+    }
+
+
+@app.post("/explain")
+def explain_ddi(req: DDIRequest):
+    """Separate, slower endpoint — GNNExplainer is expensive (100 epochs
+    x2), so it's decoupled from the fast /predict path per review feedback."""
+    graph_a = smiles_to_graph(req.smiles_a)
+    graph_b = smiles_to_graph(req.smiles_b)
+    if graph_a is None or graph_b is None:
+        raise HTTPException(status_code=422, detail="Invalid SMILES string for one or both drugs.")
+    batch_a = Batch.from_data_list([graph_a])
+    batch_b = Batch.from_data_list([graph_b])
+    explanation = full_explanation_pipeline(model, batch_a, req.smiles_a, batch_b, req.smiles_b)
+    return {
+        "disclaimer": "Explanation identifies which atoms most influenced this molecule's learned embedding, cross-checked against a small curated list of known-risk functional groups. This is not a validated literature review.",
         "explanation": explanation
     }
 
