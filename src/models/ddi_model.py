@@ -30,5 +30,12 @@ class PxDDIModel(nn.Module):
         if patient is not None:
             g = self.patient_encoder(patient['age_band'], patient['sex'], patient['comorbidities'])
             ea, eb = ea*g, eb*g
-        combined = torch.cat([ea, eb, ta.unsqueeze(-1), tb.unsqueeze(-1)], dim=1)
+
+        # SYMMETRIC combination — sum and abs-difference are order-independent
+        emb_sum = ea + eb
+        emb_diff = torch.abs(ea - eb)
+        tox_sum = (ta + tb).unsqueeze(-1)
+        tox_diff = torch.abs(ta - tb).unsqueeze(-1)
+
+        combined = torch.cat([emb_sum, emb_diff, tox_sum, tox_diff], dim=1)
         return self.risk_classifier(combined).squeeze(-1), ta, tb
