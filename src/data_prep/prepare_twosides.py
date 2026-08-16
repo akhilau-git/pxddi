@@ -22,4 +22,4 @@ def smiles_to_graph(smiles):
         ei += [[i,j],[j,i]]
     if not ei: return None
     edge_index = torch.tensor(ei, dtype=torch.long).t().contiguous()
-    return Data(x=x, edge_index=edge_index)
+    return Data(x=x, edge_index=edge_index, smiles=smiles)

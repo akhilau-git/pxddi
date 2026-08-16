@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 import torch
@@ -66,7 +66,6 @@ def predict_ddi(req: DDIRequest):
     graph_b = smiles_to_graph(req.smiles_b)
     if graph_a is None or graph_b is None:
         # Fix (from review): don't return 200 with a hidden error — return a real error status
-        from fastapi import HTTPException
         raise HTTPException(status_code=422, detail="Invalid SMILES string for one or both drugs.")
 
     batch_a = Batch.from_data_list([graph_a])

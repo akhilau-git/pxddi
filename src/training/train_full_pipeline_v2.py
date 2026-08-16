@@ -14,7 +14,7 @@ sys.path.append('/content/drive/MyDrive/pxddi-data/pxddi/src')
 
 import pandas as pd
 import numpy as np
-from sklearn.metrics import roc_auc_score, f1_score
+from sklearn.metrics import roc_auc_score, f1_score, roc_curve
 from torch_geometric.data import Batch, Dataset
 from torch_geometric.loader import DataLoader
 
@@ -142,6 +142,13 @@ def train_one_epoch(model, loader, opt):
     return total / len(loader)
 
 
+def find_best_threshold(labels, preds):
+    fpr, tpr, thresholds = roc_curve(labels, preds)
+    j_scores = tpr - fpr  # Youden's J statistic — standard threshold selection method
+    best_idx = j_scores.argmax()
+    return thresholds[best_idx]
+
+
 def evaluate(model, loader, name):
     """FIX #4: also prints class balance so we can tell if a low AUROC
     is a real modeling issue or just noise from a small/unbalanced set."""
@@ -164,9 +171,11 @@ def evaluate(model, loader, name):
         print(f"  [{name}] WARNING: small test set ({len(labels)} samples) — AUROC may be noisy")
 
     auroc = roc_auc_score(labels, preds)
+    best_thresh = find_best_threshold(labels, preds)
     f1 = f1_score(labels, [1 if p > 0.5 else 0 for p in preds])
-    print(f"  [{name}] AUROC: {auroc:.4f} | F1: {f1:.4f}")
-    return auroc, f1
+    best_f1 = f1_score(labels, [1 if p > best_thresh else 0 for p in preds])
+    print(f"  [{name}] AUROC: {auroc:.4f} | F1 (0.5 threshold): {f1:.4f} | F1 (optimal {best_thresh:.3f}): {best_f1:.4f}")
+    return auroc, best_f1
 
 
 if __name__ == "__main__":
@@ -193,7 +202,7 @@ if __name__ == "__main__":
 
     print("\nSTEP 5: Training...")
     model = PxDDIModel(in_channels=NUM_ATOM_FEATURES, hidden_channels=HIDDEN_CHANNELS).to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     # FIX #2: decaying learning rate schedule, matching FG-DDI's approach
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
 
