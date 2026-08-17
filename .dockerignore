@@ -1,0 +1,10 @@
+.git
+.pytest_cache
+__pycache__
+*.py[cod]
+.venv
+venv
+.idea
+.vscode
+notebooks
+tests

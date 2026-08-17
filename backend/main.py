@@ -1,153 +1,262 @@
+"""FastAPI service for the research-only PxDDI model."""
+
+from pathlib import Path
+from typing import List, Optional
+import hashlib
+import os
+import sys
+import threading
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 import torch
-import sys
-from pathlib import Path
+from torch_geometric.data import Batch
 
-# Works both locally (uvicorn run from backend/) and inside Docker
-# (where backend/ and src/ are siblings under /app)
+
 BACKEND_DIR = Path(__file__).resolve().parent
 SRC_PATH = BACKEND_DIR.parent / 'src'
 if str(SRC_PATH) not in sys.path:
     sys.path.append(str(SRC_PATH))
+
 from models.ddi_model import PxDDIModel
 from models.explainability import full_explanation_pipeline
-from data_prep.prepare_twosides import smiles_to_graph, NUM_ATOM_FEATURES
-from torch_geometric.data import Batch
+from data_prep.prepare_twosides import smiles_to_graph
+
 if __package__:
-    from .toxicity_lookup import KNOWN_TOXICITY_SMILES, is_toxicity_known
+    from .toxicity_lookup import (
+        KNOWN_TOXICITY_SMILES,
+        TOXICITY_BRIDGE_ERROR,
+        is_toxicity_known,
+    )
 else:
-    from toxicity_lookup import KNOWN_TOXICITY_SMILES, is_toxicity_known
+    from toxicity_lookup import (
+        KNOWN_TOXICITY_SMILES,
+        TOXICITY_BRIDGE_ERROR,
+        is_toxicity_known,
+    )
 
-app = FastAPI(title="PxDDI API")
 
-# Fix 6: CORS, so the frontend (port 3000) can actually call this API (port 8000)
+def positive_integer_from_environment(name: str, default: int) -> int:
+    """Read a positive integer setting and fail early on an invalid config."""
+    value = int(os.environ.get(name, default))
+    if value <= 0:
+        raise RuntimeError(f'{name} must be a positive integer')
+    return value
+
+
+def configured_origins():
+    default_origins = 'http://localhost:3000,http://127.0.0.1:3000'
+    raw_origins = os.environ.get('PXDDI_ALLOWED_ORIGINS', default_origins)
+    origins = [origin.strip() for origin in raw_origins.split(',') if origin.strip()]
+    if not origins:
+        raise RuntimeError('PXDDI_ALLOWED_ORIGINS must contain at least one origin')
+    return origins
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as checkpoint_file:
+        for block in iter(lambda: checkpoint_file.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+MAX_SMILES_LENGTH = positive_integer_from_environment('PXDDI_MAX_SMILES_LENGTH', 1000)
+MAX_MOLECULE_ATOMS = positive_integer_from_environment('PXDDI_MAX_MOLECULE_ATOMS', 200)
+MAX_MOLECULE_BONDS = positive_integer_from_environment('PXDDI_MAX_MOLECULE_BONDS', 250)
+MAX_CONCURRENT_EXPLANATIONS = positive_integer_from_environment(
+    'PXDDI_MAX_CONCURRENT_EXPLANATIONS', 1
+)
+ALLOWED_ORIGINS = configured_origins()
+
+app = FastAPI(title='PxDDI API')
+
+# The default permits only the local frontend. Deployments must explicitly set
+# PXDDI_ALLOWED_ORIGINS to their own comma-separated frontend origins.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten this to your real frontend domain before any real deployment
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=['GET', 'POST'],
+    allow_headers=['Content-Type'],
 )
 
-checkpoint = torch.load(
-    BACKEND_DIR / 'checkpoints' / 'pxddi_model.pt',
-    map_location='cpu',
-    weights_only=False,
-)
+CHECKPOINT_PATH = BACKEND_DIR / 'checkpoints' / 'pxddi_model.pt'
+# The current trusted local checkpoint contains legacy NumPy scalar metadata.
+# Phase 3 will write a clean checkpoint that can use weights_only=True.
+checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
 model = PxDDIModel(
     in_channels=checkpoint['in_channels'],
     hidden_channels=checkpoint['hidden_channels'],
-    use_chemberta=checkpoint.get('use_chemberta', False)
+    use_chemberta=checkpoint.get('use_chemberta', False),
 )
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
-DECISION_THRESHOLD = checkpoint.get('threshold', 0.5)
-print(f"Loaded model. AUROC={checkpoint.get('auroc')}, threshold={DECISION_THRESHOLD}")
 
-from typing import Optional, List
+DECISION_THRESHOLD = float(checkpoint.get('threshold', 0.5))
+CHECKPOINT_SHA256 = file_sha256(CHECKPOINT_PATH)
+EXPLANATION_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_EXPLANATIONS)
+
+print(
+    'Loaded model. '
+    f"AUROC={checkpoint.get('auroc')}, threshold={DECISION_THRESHOLD}, "
+    f'checkpoint_sha256={CHECKPOINT_SHA256}'
+)
+
 
 class DDIRequest(BaseModel):
-    smiles_a: str = Field(min_length=1, max_length=1000)
-    smiles_b: str = Field(min_length=1, max_length=1000)
-    age_band: Optional[int] = None      # 0-9, representing decades (0=0-9yrs, 9=90+)
-    sex: Optional[int] = None           # 0=male, 1=female
-    comorbidities: Optional[List[int]] = None  # multi-hot list of length 10, e.g. [0,1,0,...]
+    smiles_a: str = Field(min_length=1, max_length=MAX_SMILES_LENGTH)
+    smiles_b: str = Field(min_length=1, max_length=MAX_SMILES_LENGTH)
+    age_band: Optional[int] = None
+    sex: Optional[int] = None
+    comorbidities: Optional[List[int]] = None
+
+    @field_validator('smiles_a', 'smiles_b', mode='before')
+    @classmethod
+    def strip_smiles(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
     @field_validator('age_band')
     @classmethod
-    def validate_age_band(cls, v):
-        if v is not None and not (0 <= v <= 9):
+    def validate_age_band(cls, value):
+        if value is not None and not (0 <= value <= 9):
             raise ValueError('age_band must be between 0 and 9')
-        return v
+        return value
 
     @field_validator('sex')
     @classmethod
-    def validate_sex(cls, v):
-        if v is not None and v not in (0, 1):
+    def validate_sex(cls, value):
+        if value is not None and value not in (0, 1):
             raise ValueError('sex must be 0 or 1')
-        return v
+        return value
 
     @field_validator('comorbidities')
     @classmethod
-    def validate_comorbidities(cls, v):
-        if v is not None and len(v) != 10:
+    def validate_comorbidities(cls, value):
+        if value is not None and len(value) != 10:
             raise ValueError('comorbidities must be a list of exactly 10 values')
-        if v is not None and any(value not in (0, 1) for value in v):
+        if value is not None and any(item not in (0, 1) for item in value):
             raise ValueError('comorbidities must contain only 0 or 1 values')
-        return v
+        return value
 
-@app.post("/predict")
-def predict_ddi(req: DDIRequest):
+
+def build_drug_batches(req: DDIRequest):
+    """Build bounded molecular batches shared by prediction and explanation."""
     graph_a = smiles_to_graph(req.smiles_a)
     graph_b = smiles_to_graph(req.smiles_b)
     if graph_a is None or graph_b is None:
-        # Fix (from review): don't return 200 with a hidden error — return a real error status
-        raise HTTPException(status_code=422, detail="Invalid SMILES string for one or both drugs.")
+        raise HTTPException(
+            status_code=422,
+            detail='Invalid, unsupported, or single-atom SMILES string for one or both drugs.',
+        )
 
-    batch_a = Batch.from_data_list([graph_a])
-    batch_b = Batch.from_data_list([graph_b])
+    for name, graph in (('drug A', graph_a), ('drug B', graph_b)):
+        atom_count = int(graph.num_nodes)
+        bond_count = int(graph.edge_index.size(1) // 2)
+        if atom_count > MAX_MOLECULE_ATOMS:
+            raise HTTPException(
+                status_code=422,
+                detail=f'{name} has {atom_count} atoms; the limit is {MAX_MOLECULE_ATOMS}.',
+            )
+        if bond_count > MAX_MOLECULE_BONDS:
+            raise HTTPException(
+                status_code=422,
+                detail=f'{name} has {bond_count} bonds; the limit is {MAX_MOLECULE_BONDS}.',
+            )
 
-    # HONEST LIMITATION: patient-context module exists architecturally but
-    # has not been trained on linked patient-outcome data (no dataset in
-    # this project links a specific patient to a specific drug-pair
-    # outcome). Applying it now would run UNTRAINED random weights and
-    # silently bias results. Disabled until real training data exists.
-    patient = None
+    return Batch.from_data_list([graph_a]), Batch.from_data_list([graph_b])
+
+
+def toxicity_response(smiles: str, score: float):
+    """State whether the molecular structure had a FAERS-derived training label."""
+    training_label_available = is_toxicity_known(smiles)
+    coverage_note = (
+        'A matched FAERS-derived toxicity training label is available for this structure.'
+        if training_label_available
+        else 'No matched FAERS-derived toxicity training label is available for this structure.'
+    )
+    return {
+        'score': score,
+        'known': training_label_available,
+        'training_label_available': training_label_available,
+        'coverage_note': coverage_note,
+    }
+
+
+@app.post('/predict')
+def predict_ddi(req: DDIRequest):
+    batch_a, batch_b = build_drug_batches(req)
+
+    # The patient encoder remains disabled: it has not been trained with linked
+    # patient, exposure, and outcome data, so applying it would add random bias.
     patient_context_note = (
-        "Patient context fields were accepted but NOT applied — the "
-        "patient-conditioning module is not yet trained on real linked "
-        "patient-outcome data. This will be enabled once available."
+        'Patient context fields were accepted but NOT applied. The patient '
+        'conditioning module is not trained on linked patient-outcome data.'
     )
 
     with torch.no_grad():
         risk, tox_a, tox_b = model(batch_a, batch_b, patient=None)
 
     risk_score = float(torch.sigmoid(risk))
-
     return {
-        "disclaimer": "Research prototype output. Not clinical advice. Not FDA/regulatory reviewed.",
-        "interaction_risk_estimate": risk_score,
-        "interaction_predicted": risk_score >= DECISION_THRESHOLD,
-        "decision_threshold_used": DECISION_THRESHOLD,
-        "patient_context_applied": False,
-        "patient_context_note": patient_context_note,
-        "drug_a_toxicity": {
-            "score": float(tox_a),
-            "known": is_toxicity_known(req.smiles_a),
-        },
-        "drug_b_toxicity": {
-            "score": float(tox_b),
-            "known": is_toxicity_known(req.smiles_b),
-        },
-        "explanation_available_at": "/explain (separate, slower endpoint)"
+        'disclaimer': 'Research prototype output. Not clinical advice. Not FDA/regulatory reviewed.',
+        'interaction_risk_estimate': risk_score,
+        'interaction_risk_note': (
+            'This is an uncalibrated research-model estimate, not a clinical probability.'
+        ),
+        'interaction_predicted': risk_score >= DECISION_THRESHOLD,
+        'decision_threshold_used': DECISION_THRESHOLD,
+        'patient_context_applied': False,
+        'patient_context_note': patient_context_note,
+        'drug_a_toxicity': toxicity_response(req.smiles_a, float(tox_a)),
+        'drug_b_toxicity': toxicity_response(req.smiles_b, float(tox_b)),
+        'explanation_available_at': '/explain (separate, slower endpoint)',
     }
 
 
-@app.post("/explain")
+@app.post('/explain')
 def explain_ddi(req: DDIRequest):
-    """Separate, slower endpoint — GNNExplainer is expensive (100 epochs
-    x2), so it's decoupled from the fast /predict path per review feedback."""
-    graph_a = smiles_to_graph(req.smiles_a)
-    graph_b = smiles_to_graph(req.smiles_b)
-    if graph_a is None or graph_b is None:
-        raise HTTPException(status_code=422, detail="Invalid SMILES string for one or both drugs.")
-    batch_a = Batch.from_data_list([graph_a])
-    batch_b = Batch.from_data_list([graph_b])
-    explanation = full_explanation_pipeline(model, batch_a, req.smiles_a, batch_b, req.smiles_b)
+    """Run the expensive embedding explanation with bounded local concurrency."""
+    batch_a, batch_b = build_drug_batches(req)
+    if not EXPLANATION_SEMAPHORE.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail='An explanation is already running. Please retry shortly.',
+        )
+
+    try:
+        explanation = full_explanation_pipeline(
+            model, batch_a, req.smiles_a, batch_b, req.smiles_b
+        )
+    finally:
+        EXPLANATION_SEMAPHORE.release()
+
     return {
-        "disclaimer": "Explanation identifies which atoms most influenced this molecule's learned embedding, cross-checked against a small curated list of known-risk functional groups. This is not a validated literature review.",
-        "explanation": explanation
+        'disclaimer': (
+            'Explanation identifies atoms that influenced each molecule embedding and '
+            'cross-checks them against a small functional-group heuristic. It is not a '
+            'validated literature review or a pair-risk explanation.'
+        ),
+        'explanation': explanation,
     }
 
-@app.get("/health")
+
+@app.get('/health')
 def health():
     return {
-        "status": "ok",
-        "model_loaded": True,
-        "model_type": "GNN" if not checkpoint.get('use_chemberta', False) else "ChemBERTa",
-        "model_auroc": checkpoint.get('auroc'),
-        "toxicity_bridge_loaded": len(KNOWN_TOXICITY_SMILES) > 0,
-        "toxicity_bridge_size": len(KNOWN_TOXICITY_SMILES),
-        "decision_threshold": DECISION_THRESHOLD,
+        'status': 'ok',
+        'model_loaded': True,
+        'model_type': 'GNN' if not checkpoint.get('use_chemberta', False) else 'ChemBERTa',
+        'model_auroc': float(checkpoint.get('auroc')) if checkpoint.get('auroc') is not None else None,
+        'model_epoch': int(checkpoint['epoch']) if checkpoint.get('epoch') is not None else None,
+        'model_checkpoint_sha256': CHECKPOINT_SHA256,
+        'toxicity_bridge_loaded': len(KNOWN_TOXICITY_SMILES) > 0,
+        'toxicity_bridge_size': len(KNOWN_TOXICITY_SMILES),
+        'toxicity_bridge_error': TOXICITY_BRIDGE_ERROR,
+        'decision_threshold': DECISION_THRESHOLD,
+        'patient_context_enabled': False,
+        'max_smiles_length': MAX_SMILES_LENGTH,
+        'max_molecule_atoms': MAX_MOLECULE_ATOMS,
+        'max_molecule_bonds': MAX_MOLECULE_BONDS,
+        'max_concurrent_explanations': MAX_CONCURRENT_EXPLANATIONS,
     }
