@@ -1,28 +1,64 @@
-"""Quick check: does the model give the same score for (A,B) as (B,A)?"""
-import torch, sys
-sys.path.append('src')
-from models.ddi_model import PxDDIModel
-from data_prep.prepare_twosides import smiles_to_graph, NUM_ATOM_FEATURES
+"""Regression tests for the order-independent PxDDI pair architecture."""
+
+from pathlib import Path
+import sys
+
+import pytest
+import torch
 from torch_geometric.data import Batch
 
-checkpoint = torch.load('backend/checkpoints/pxddi_model.pt', map_location='cpu', weights_only=False)
-model = PxDDIModel(in_channels=checkpoint['in_channels'], hidden_channels=checkpoint['hidden_channels'])
-model.load_state_dict(checkpoint['model_state_dict'])
-model.eval()
 
-smiles_a = "CC(=O)OC1=CC=CC=C1C(=O)O"
-smiles_b = "CC(=O)NC1=CC=C(C=C1)O"
-ga_data = smiles_to_graph(smiles_a)
-gb_data = smiles_to_graph(smiles_b)
-assert ga_data is not None and gb_data is not None
-ga, gb = Batch.from_data_list([ga_data]), Batch.from_data_list([gb_data])
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_PATH = PROJECT_ROOT / 'src'
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
 
-with torch.no_grad():
-    risk_ab, _, _ = model(ga, gb)
-    risk_ba, _, _ = model(gb, ga)
+from data_prep.prepare_twosides import smiles_to_graph
+from models.ddi_model import PxDDIModel
 
-diff = abs(torch.sigmoid(risk_ab).item() - torch.sigmoid(risk_ba).item())
-print(f"A+B risk: {torch.sigmoid(risk_ab).item():.4f}")
-print(f"B+A risk: {torch.sigmoid(risk_ba).item():.4f}")
-print(f"Difference: {diff:.4f}")
-print("PASS (symmetric enough)" if diff < 0.05 else "FAIL (model is order-sensitive — document this limitation)")
+
+CHECKPOINT_PATH = PROJECT_ROOT / 'backend' / 'checkpoints' / 'pxddi_model.pt'
+TEST_PAIRS = [
+    (
+        'CC(=O)OC1=CC=CC=C1C(=O)O',
+        'CC(=O)NC1=CC=C(C=C1)O',
+    ),
+    (
+        'CN1C=NC2=C1C(=O)N(C(=O)N2C)C',
+        'CC(C)Cc1ccc(cc1)C(C)C(=O)O',
+    ),
+]
+
+
+@pytest.fixture(scope='module')
+def model():
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
+    loaded_model = PxDDIModel(
+        in_channels=checkpoint['in_channels'],
+        hidden_channels=checkpoint['hidden_channels'],
+        use_chemberta=checkpoint.get('use_chemberta', False),
+    )
+    loaded_model.load_state_dict(checkpoint['model_state_dict'])
+    loaded_model.eval()
+    return loaded_model
+
+
+@pytest.mark.parametrize(('smiles_a', 'smiles_b'), TEST_PAIRS)
+def test_shipped_model_is_order_independent(model, smiles_a, smiles_b):
+    """The same pair must produce the same risk score in either input order."""
+    graph_a = smiles_to_graph(smiles_a)
+    graph_b = smiles_to_graph(smiles_b)
+    assert graph_a is not None
+    assert graph_b is not None
+
+    batch_a = Batch.from_data_list([graph_a])
+    batch_b = Batch.from_data_list([graph_b])
+
+    with torch.no_grad():
+        risk_ab, _, _ = model(batch_a, batch_b)
+        risk_ba, _, _ = model(batch_b, batch_a)
+
+    difference = abs(
+        torch.sigmoid(risk_ab).item() - torch.sigmoid(risk_ba).item()
+    )
+    assert difference < 1e-6, f'Model is order-sensitive: diff={difference:.8f}'

@@ -6,7 +6,7 @@ from .prepare_twosides import smiles_to_graph
 COLUMN_OVERRIDE = {}  # fix here if auto-detect guesses wrong
 SMILES_A_CANDIDATES = ['drug1_smiles','smiles_1','smiles_a','drug_a_smiles','SMILES_1']
 SMILES_B_CANDIDATES = ['drug2_smiles','smiles_2','smiles_b','drug_b_smiles','SMILES_2']
-LABEL_CANDIDATES = ['label','interaction','event_name','side_effect','y']
+LABEL_CANDIDATES = ['label','interaction','y']
 
 def _detect(df, cands, key, name):
     if key in COLUMN_OVERRIDE: print(f"  [{name}] OVERRIDE: {COLUMN_OVERRIDE[key]}"); return COLUMN_OVERRIDE[key]
@@ -19,6 +19,34 @@ def detect_columns(df):
             _detect(df, SMILES_B_CANDIDATES, "smiles_b", "Drug B"),
             _detect(df, LABEL_CANDIDATES, "label", "Label"))
 
+
+def parse_binary_label(value, column_name):
+    """Return a verified binary label without turning every non-null value positive."""
+    if pd.isna(value):
+        raise ValueError(f"Missing binary label in column '{column_name}'")
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        string_values = {
+            '0': 0.0, 'false': 0.0, 'no': 0.0, 'negative': 0.0,
+            '1': 1.0, 'true': 1.0, 'yes': 1.0, 'positive': 1.0,
+        }
+        if normalized in string_values:
+            return string_values[normalized]
+
+    try:
+        label = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Column '{column_name}' must contain binary 0/1 labels; got {value!r}"
+        ) from exc
+
+    if label not in (0.0, 1.0):
+        raise ValueError(
+            f"Column '{column_name}' must contain binary 0/1 labels; got {value!r}"
+        )
+    return label
+
 class DDIPairDataset(Dataset):
     def __init__(self, df, sa, sb, lc, ta=None, tb=None):
         super().__init__()
@@ -26,7 +54,7 @@ class DDIPairDataset(Dataset):
         for _, row in df.iterrows():
             ga, gb = smiles_to_graph(row[sa]), smiles_to_graph(row[sb])
             if ga is None or gb is None: skip += 1; continue
-            label = 1.0 if pd.notna(row[lc]) else 0.0
+            label = parse_binary_label(row[lc], lc)
             recs.append((ga, gb, float(row[ta]) if ta else 0.0, float(row[tb]) if tb else 0.0, label))
         print(f"Built dataset: {len(recs)} valid, {skip} skipped")
         self.records = recs
