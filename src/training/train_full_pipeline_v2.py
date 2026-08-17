@@ -318,14 +318,14 @@ if __name__ == "__main__":
                 'hidden_channels': HIDDEN_CHANNELS,
                 'in_channels': NUM_ATOM_FEATURES,
                 'use_chemberta': USE_CHEMBERTA,
-                'auroc': val_auroc,
+                'auroc': float(val_auroc),
                 'epoch': epoch + 1,
                 'data_cap': DATA_CAP,
             }, CHECKPOINT_PATH)
             print(f"  -> New best model saved (VALIDATION AUROC {val_auroc:.4f})")
 
     print("\nReloading BEST checkpoint (not final epoch) for final reporting...")
-    best_checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+    best_checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
     model.load_state_dict(best_checkpoint['model_state_dict'])
     print(f"Loaded best checkpoint: AUROC={best_checkpoint['auroc']:.4f}, epoch={best_checkpoint['epoch']}")
 

@@ -25,7 +25,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-checkpoint = torch.load('checkpoints/pxddi_model.pt', map_location='cpu')
+checkpoint = torch.load('checkpoints/pxddi_model.pt', map_location='cpu', weights_only=False)
 model = PxDDIModel(
     in_channels=checkpoint['in_channels'],
     hidden_channels=checkpoint['hidden_channels'],

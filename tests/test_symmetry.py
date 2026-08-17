@@ -5,7 +5,7 @@ from models.ddi_model import PxDDIModel
 from data_prep.prepare_twosides import smiles_to_graph, NUM_ATOM_FEATURES
 from torch_geometric.data import Batch
 
-checkpoint = torch.load('backend/checkpoints/pxddi_model.pt', map_location='cpu')
+checkpoint = torch.load('backend/checkpoints/pxddi_model.pt', map_location='cpu', weights_only=False)
 model = PxDDIModel(in_channels=checkpoint['in_channels'], hidden_channels=checkpoint['hidden_channels'])
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
