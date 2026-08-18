@@ -257,7 +257,8 @@ if __name__ == "__main__":
         loss = train_one_epoch(model, train_loader, optimizer)
         lr_scheduler.step()
         
-        print(f"\nEpoch {epoch+1}/{EPOCHS} | Loss: {loss:.4f} | Time: {time.time()-t0:.1f}s")
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"\nEpoch {epoch+1}/{EPOCHS} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {time.time()-t0:.1f}s")
         labels, preds = get_preds_labels(model, val_loader)
         
         if len(set(labels)) > 1:
