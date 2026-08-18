@@ -128,9 +128,16 @@ def remove_reversed_duplicates(df, source_col='source', target_col='target'):
     """Prevents leakage from A-B and B-A both appearing (possibly in
     different splits)."""
     df = df.copy()
-    df['pair_key'] = df.apply(lambda r: tuple(sorted([r[source_col], r[target_col]])), axis=1)
     before = len(df)
-    df = df.drop_duplicates(subset='pair_key').drop(columns='pair_key')
+    
+    # Vectorized sorting of pairs is vastly faster than apply() on millions of rows
+    min_col = np.minimum(df[source_col].astype(str), df[target_col].astype(str))
+    max_col = np.maximum(df[source_col].astype(str), df[target_col].astype(str))
+    
+    df = df.assign(__min=min_col, __max=max_col)
+    df = df.drop_duplicates(subset=['__min', '__max'])
+    df = df.drop(columns=['__min', '__max'])
+    
     print(f"Removed {before - len(df)} reversed/duplicate pairs")
     return df
 
