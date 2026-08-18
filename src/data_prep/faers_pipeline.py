@@ -7,11 +7,71 @@ Joins: DRUG (drugname) + OUTC (severity) + DEMO (age/sex) via primaryid.
 """
 
 import pandas as pd
-import numpy as np
 
 SEVERE_OUTCOMES = {'DE', 'HO', 'LT', 'DS'}  # Death, Hospitalization, Life-threatening, Disability
 
-def build_toxicity_labels(faers_base_path: str):
+
+def aggregate_toxicity_labels(
+    drug: pd.DataFrame,
+    outc: pd.DataFrame,
+    min_reports: int = 5,
+    missing_outcome_policy: str = 'exclude',
+) -> pd.DataFrame:
+    """Aggregate one severe-outcome flag per report before grouping by drug.
+
+    FAERS can contain multiple DRUG and OUTC rows for one ``primaryid``. A
+    direct table join creates a cartesian multiplication and biases toxicity
+    labels. This function first reduces each report to its maximum observed
+    severity, then counts each drug-report combination once.
+
+    ``missing_outcome_policy='exclude'`` preserves the conservative historical
+    interpretation: reports with no OUTC record are not assumed to be
+    non-severe. Use ``'non_severe'`` only when that study decision is explicit.
+    """
+    if min_reports < 1:
+        raise ValueError('min_reports must be at least 1.')
+    if missing_outcome_policy not in {'exclude', 'non_severe'}:
+        raise ValueError("missing_outcome_policy must be 'exclude' or 'non_severe'.")
+    for name, frame, columns in (
+        ('DRUG', drug, {'primaryid', 'drugname'}),
+        ('OUTC', outc, {'primaryid', 'outc_cod'}),
+    ):
+        missing = columns.difference(frame.columns)
+        if missing:
+            raise ValueError(f'{name} data is missing required columns: {sorted(missing)}.')
+
+    drug_reports = drug[['primaryid', 'drugname']].copy()
+    drug_reports = drug_reports.dropna(subset=['primaryid', 'drugname'])
+    drug_reports['drugname'] = drug_reports['drugname'].astype(str).str.strip().str.upper()
+    drug_reports = drug_reports[drug_reports['drugname'] != '']
+    drug_reports = drug_reports.drop_duplicates(subset=['primaryid', 'drugname'])
+
+    outcomes = outc[['primaryid', 'outc_cod']].copy()
+    outcomes = outcomes.dropna(subset=['primaryid'])
+    outcomes['is_severe'] = outcomes['outc_cod'].isin(SEVERE_OUTCOMES).astype(int)
+    report_severity = outcomes.groupby('primaryid', as_index=False)['is_severe'].max()
+
+    merged = drug_reports.merge(
+        report_severity,
+        on='primaryid',
+        how='left' if missing_outcome_policy == 'non_severe' else 'inner',
+    )
+    if missing_outcome_policy == 'non_severe':
+        merged['is_severe'] = merged['is_severe'].fillna(0).astype(int)
+
+    toxicity = merged.groupby('drugname', as_index=False).agg(
+        toxicity_score=('is_severe', 'mean'),
+        n_reports=('primaryid', 'nunique'),
+    )
+    toxicity = toxicity[toxicity['n_reports'] >= min_reports]
+    return toxicity.sort_values(['n_reports', 'drugname'], ascending=[False, True]).reset_index(drop=True)
+
+
+def build_toxicity_labels(
+    faers_base_path: str,
+    min_reports: int = 5,
+    missing_outcome_policy: str = 'exclude',
+):
     """
     Returns a DataFrame: drugname -> toxicity_score (0-1)
     toxicity_score = fraction of reports for that drug with a severe outcome.
@@ -19,20 +79,16 @@ def build_toxicity_labels(faers_base_path: str):
     print("Loading FAERS DRUG file...")
     drug = pd.read_csv(f'{faers_base_path}/DRUG23Q4.txt', sep='$',
                         usecols=['primaryid', 'drugname'], low_memory=False)
-    drug['drugname'] = drug['drugname'].str.strip().str.upper()
-
     print("Loading FAERS OUTC file...")
     outc = pd.read_csv(f'{faers_base_path}/OUTC23Q4.txt', sep='$',
                         usecols=['primaryid', 'outc_cod'], low_memory=False)
-    outc['is_severe'] = outc['outc_cod'].isin(SEVERE_OUTCOMES).astype(int)
-
-    print("Joining on primaryid...")
-    merged = drug.merge(outc[['primaryid', 'is_severe']], on='primaryid', how='inner')
-
-    tox_scores = merged.groupby('drugname')['is_severe'].agg(['mean', 'count']).reset_index()
-    tox_scores.columns = ['drugname', 'toxicity_score', 'n_reports']
-
-    tox_scores = tox_scores[tox_scores['n_reports'] >= 5]
+    print("Aggregating one outcome flag per report before grouping by drug...")
+    tox_scores = aggregate_toxicity_labels(
+        drug,
+        outc,
+        min_reports=min_reports,
+        missing_outcome_policy=missing_outcome_policy,
+    )
     print(f"Built toxicity labels for {len(tox_scores)} drugs (min 5 reports each)")
     return tox_scores
 

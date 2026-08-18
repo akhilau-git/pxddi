@@ -1,79 +1,270 @@
-"""
-pubchem_bridge.py
-Bridges FAERS drug NAMES to real SMILES structures using PubChem's
-free public REST API. No synthetic data — every SMILES returned here
-is a real, verified molecular structure from PubChem's database.
+"""Auditable mapping of FAERS drug names to PubChem molecular structures."""
 
-Caches results to Drive so we never re-query the same drug twice.
-"""
+from __future__ import annotations
 
-import requests
-import pandas as pd
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import quote
 import time
-import os
+
+import pandas as pd
+import requests
 from rdkit import Chem
 
-PUBCHEM_URL = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{}/property/CanonicalSMILES/TXT"
 
-def fetch_smiles_from_pubchem(drug_name: str, max_retries: int = 2):
-    """Single real API call to PubChem. Returns SMILES string or None."""
-    clean_name = drug_name.strip()
-    for attempt in range(max_retries):
+PUBCHEM_URL = (
+    'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{}/property/'
+    'CanonicalSMILES/TXT'
+)
+REQUIRED_BRIDGE_COLUMNS = {
+    'drugname',
+    'raw_smiles',
+    'canonical_smiles',
+    'toxicity_score',
+    'n_reports',
+}
+
+
+@dataclass(frozen=True)
+class PubChemLookupResult:
+    """The result and provenance of one PubChem name query."""
+
+    smiles: str | None
+    status: str
+    attempts: int
+    query_url: str
+
+
+def pubchem_query_url(drug_name: str) -> str:
+    """Build a path-safe PubChem URL for a drug name."""
+    if not isinstance(drug_name, str) or not drug_name.strip():
+        raise ValueError('drug_name must be a non-empty string.')
+    return PUBCHEM_URL.format(quote(drug_name.strip(), safe=''))
+
+
+def lookup_pubchem_smiles(
+    drug_name: str,
+    max_retries: int = 3,
+    timeout_seconds: int = 10,
+    request_get=requests.get,
+    sleep=time.sleep,
+) -> PubChemLookupResult:
+    """Query PubChem with bounded retries and record the outcome.
+
+    A 404 is a valid unresolved name and is not retried. Transient HTTP errors
+    and network failures are retried so a short outage is not silently treated
+    as a chemical mapping failure.
+    """
+    if max_retries < 1:
+        raise ValueError('max_retries must be at least 1.')
+    if timeout_seconds <= 0:
+        raise ValueError('timeout_seconds must be positive.')
+
+    query_url = pubchem_query_url(drug_name)
+    for attempt in range(1, max_retries + 1):
         try:
-            resp = requests.get(PUBCHEM_URL.format(clean_name), timeout=10)
-            if resp.status_code == 200:
-                return resp.text.strip()
-            return None  # 404 etc — name not found, not a network error
+            response = request_get(query_url, timeout=timeout_seconds)
         except requests.exceptions.RequestException:
-            time.sleep(1)
-    return None
+            if attempt == max_retries:
+                return PubChemLookupResult(None, 'network_error', attempt, query_url)
+            sleep(attempt)
+            continue
+
+        if response.status_code == 200:
+            smiles = response.text.strip()
+            status = 'matched' if smiles else 'empty_response'
+            return PubChemLookupResult(smiles or None, status, attempt, query_url)
+        if response.status_code in {400, 404}:
+            return PubChemLookupResult(None, f'not_found_http_{response.status_code}', attempt, query_url)
+        if response.status_code == 429 or 500 <= response.status_code < 600:
+            if attempt < max_retries:
+                sleep(attempt)
+                continue
+        return PubChemLookupResult(
+            None,
+            f'http_{response.status_code}',
+            attempt,
+            query_url,
+        )
+
+    raise AssertionError('PubChem retry loop exited unexpectedly.')
 
 
-def canonicalize(smiles: str):
-    """Standardizes a SMILES string so different-looking-but-same
-    molecules match. Essential for matching PubChem's SMILES against
-    TWOSIDES's SMILES correctly."""
+def fetch_smiles_from_pubchem(
+    drug_name: str,
+    max_retries: int = 3,
+    timeout_seconds: int = 10,
+) -> str | None:
+    """Backward-compatible wrapper returning only a matched SMILES string."""
+    return lookup_pubchem_smiles(
+        drug_name,
+        max_retries=max_retries,
+        timeout_seconds=timeout_seconds,
+    ).smiles
+
+
+def canonicalize(smiles: str | None) -> str | None:
+    """Return RDKit's canonical SMILES representation, or ``None`` if invalid."""
+    if not isinstance(smiles, str) or not smiles.strip():
+        return None
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
     return Chem.MolToSmiles(mol, canonical=True)
 
 
-def build_name_to_smiles_bridge(tox_labels_df: pd.DataFrame, cache_path: str,
-                                 top_n: int = 500, delay: float = 0.25):
+def validate_bridge_dataframe(bridge: pd.DataFrame) -> pd.DataFrame:
+    """Validate the minimum schema required for a reusable toxicity bridge."""
+    missing = REQUIRED_BRIDGE_COLUMNS.difference(bridge.columns)
+    if missing:
+        raise ValueError(
+            'Toxicity bridge is missing required columns: '
+            f'{sorted(missing)}.'
+        )
+    validated = bridge.copy()
+    validated['drugname'] = validated['drugname'].astype(str).str.strip().str.upper()
+    validated['toxicity_score'] = pd.to_numeric(
+        validated['toxicity_score'], errors='raise'
+    )
+    validated['n_reports'] = pd.to_numeric(validated['n_reports'], errors='raise')
+    if (validated['n_reports'] < 0).any():
+        raise ValueError('Toxicity bridge contains negative n_reports values.')
+    return validated
+
+
+def audit_toxicity_bridge(bridge: pd.DataFrame) -> tuple[dict[str, int], pd.DataFrame]:
+    """Return coverage counts and unresolved duplicate-structure conflicts.
+
+    This function intentionally does not resolve conflicting labels. A later
+    documented scientific policy must decide whether a duplicated structure is
+    a salt, combination product, synonym, or a mapping error.
     """
-    Queries PubChem for the top_n most-reported FAERS drugs (by n_reports),
-    builds a REAL drugname -> canonical_smiles mapping.
-    Caches to cache_path so re-running doesn't re-query PubChem.
-    delay: seconds between requests (respects PubChem's rate limits).
-    """
-    if os.path.exists(cache_path):
-        print(f"Loading cached bridge from {cache_path}")
-        return pd.read_csv(cache_path)
+    validated = validate_bridge_dataframe(bridge)
+    matched = validated.dropna(subset=['canonical_smiles']).copy()
+    matched['canonical_smiles'] = matched['canonical_smiles'].astype(str).str.strip()
+    matched = matched[matched['canonical_smiles'] != '']
+
+    grouped = matched.groupby('canonical_smiles', sort=True).agg(
+        source_rows=('canonical_smiles', 'size'),
+        unique_drug_names=('drugname', 'nunique'),
+        unique_scores=('toxicity_score', 'nunique'),
+        drug_names=('drugname', lambda values: ' | '.join(sorted(set(values)))),
+        toxicity_scores=(
+            'toxicity_score',
+            lambda values: ' | '.join(f'{value:.12g}' for value in sorted(set(values))),
+        ),
+        report_counts=(
+            'n_reports',
+            lambda values: ' | '.join(str(int(value)) for value in sorted(set(values))),
+        ),
+    ).reset_index()
+    duplicates = grouped[grouped['source_rows'] > 1].copy()
+    conflicts = grouped[
+        (grouped['source_rows'] > 1) & (grouped['unique_scores'] > 1)
+    ].copy()
+    summary = {
+        'source_rows': int(len(validated)),
+        'rows_with_canonical_smiles': int(len(matched)),
+        'unique_canonical_structures': int(len(grouped)),
+        'duplicate_canonical_structures': int(len(duplicates)),
+        'conflicting_canonical_structures': int(len(conflicts)),
+    }
+    return summary, conflicts
+
+
+def audit_and_resolve_duplicates(bridge_df):
+    dup_mask = bridge_df.duplicated(subset='canonical_smiles', keep=False)
+    if dup_mask.any():
+        conflicts = bridge_df[dup_mask].sort_values('canonical_smiles')
+        conflicts.to_csv('checkpoints/toxicity_duplicate_audit.csv', index=False)
+        print(f"AUDIT: {dup_mask.sum()} rows involved in {conflicts['canonical_smiles'].nunique()} "
+              f"conflicting structures. Saved to toxicity_duplicate_audit.csv for manual review.")
+    # Documented rule: use the entry with the MOST reports (most statistically reliable), not a blind average
+    bridge_df = bridge_df.sort_values('n_reports', ascending=False).drop_duplicates(subset='canonical_smiles', keep='first')
+    print(f"Resolved via 'highest n_reports wins' rule: {len(bridge_df)} final unique structures")
+    return bridge_df
+
+def resolve_toxicity_bridge(bridge: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int], pd.DataFrame]:
+    """Shim to retain interface while using the user-provided duplicate resolver."""
+    validated = validate_bridge_dataframe(bridge)
+    summary, conflicts = audit_toxicity_bridge(validated)
+    
+    matched = validated.dropna(subset=['canonical_smiles']).copy()
+    matched['canonical_smiles'] = matched['canonical_smiles'].astype(str).str.strip()
+    matched = matched[matched['canonical_smiles'] != '']
+    
+    resolved = audit_and_resolve_duplicates(matched)
+    
+    summary['resolved_unique_canonical_structures'] = int(len(resolved))
+    summary['excluded_conflicting_structures'] = int(len(conflicts))
+    return resolved.reset_index(drop=True), summary, conflicts
+
+
+def load_validated_bridge_cache(cache_path: str | Path) -> pd.DataFrame:
+    """Load a cached bridge only after confirming its required schema."""
+    path = Path(cache_path)
+    return validate_bridge_dataframe(pd.read_csv(path))
+
+
+def build_name_to_smiles_bridge(
+    tox_labels_df: pd.DataFrame,
+    cache_path: str | Path,
+    top_n: int = 500,
+    delay: float = 0.25,
+) -> pd.DataFrame:
+    """Build or validate an auditable FAERS-to-PubChem toxicity bridge."""
+    if top_n < 1:
+        raise ValueError('top_n must be at least 1.')
+    if delay < 0:
+        raise ValueError('delay must be non-negative.')
+    required_labels = {'drugname', 'toxicity_score', 'n_reports'}
+    missing = required_labels.difference(tox_labels_df.columns)
+    if missing:
+        raise ValueError(f'Toxicity labels are missing required columns: {sorted(missing)}.')
+
+    cache = Path(cache_path)
+    if cache.exists():
+        print(f'Loading and validating cached bridge from {cache}')
+        return load_validated_bridge_cache(cache)
 
     top_drugs = tox_labels_df.sort_values('n_reports', ascending=False).head(top_n)
-    print(f"Querying PubChem for top {top_n} most-reported drugs...")
-
+    print(f'Querying PubChem for top {len(top_drugs)} most-reported drugs...')
+    fetched_at = datetime.now(timezone.utc).isoformat()
     results = []
-    for i, row in enumerate(top_drugs.itertuples(), 1):
-        smiles = fetch_smiles_from_pubchem(str(row.drugname))
-        canonical = canonicalize(smiles) if smiles else None
+    for index, row in enumerate(top_drugs.itertuples(index=False), 1):
+        lookup = lookup_pubchem_smiles(str(row.drugname))
+        canonical = canonicalize(lookup.smiles)
         results.append({
             'drugname': row.drugname,
-            'raw_smiles': smiles,
+            'raw_smiles': lookup.smiles,
             'canonical_smiles': canonical,
             'toxicity_score': row.toxicity_score,
-            'n_reports': row.n_reports
+            'n_reports': row.n_reports,
+            'query_name': str(row.drugname),
+            'pubchem_query_url': lookup.query_url,
+            'pubchem_lookup_status': lookup.status,
+            'pubchem_lookup_attempts': lookup.attempts,
+            'pubchem_fetched_at_utc': fetched_at,
         })
-        if i % 50 == 0:
-            print(f"  Progress: {i}/{top_n} — {sum(1 for r in results if r['canonical_smiles'])} matched so far")
-        time.sleep(delay)
+        if index % 50 == 0:
+            matched = sum(result['canonical_smiles'] is not None for result in results)
+            print(f'  Progress: {index}/{len(top_drugs)}; {matched} structures matched so far')
+        if delay:
+            time.sleep(delay)
 
-    bridge_df = pd.DataFrame(results)
-    matched = bridge_df['canonical_smiles'].notna().sum()
-    print(f"\nBRIDGE COMPLETE: {matched}/{top_n} drug names successfully matched to real SMILES "
-          f"({matched/top_n*100:.1f}% match rate)")
+    bridge = validate_bridge_dataframe(pd.DataFrame(results))
+    summary, conflicts = audit_toxicity_bridge(bridge)
+    print(
+        'BRIDGE COMPLETE: '
+        f"{summary['rows_with_canonical_smiles']}/{len(bridge)} rows mapped; "
+        f"{summary['unique_canonical_structures']} unique structures; "
+        f"{summary['conflicting_canonical_structures']} unresolved score conflicts."
+    )
+    if not conflicts.empty:
+        print('Conflict report must be reviewed before toxicity-model retraining.')
 
-    bridge_df.to_csv(cache_path, index=False)
-    print(f"Cached to {cache_path} — future runs will load instantly instead of re-querying")
-    return bridge_df
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    bridge.to_csv(cache, index=False)
+    print(f'Cached validated bridge at {cache}')
+    return bridge
