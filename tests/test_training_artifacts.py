@@ -3,6 +3,7 @@ import os
 import tempfile
 import sys
 import numpy as np
+import pandas as pd
 from unittest.mock import MagicMock
 
 # Mock matplotlib and seaborn since they are not installed locally but used in Colab
@@ -17,7 +18,9 @@ from unittest.mock import MagicMock, patch
 with patch('torch.cuda.is_available', return_value=True):
     from src.training.train_full_pipeline_v2 import (
         calculate_metrics,
+        filter_graph_compatible_pairs,
         get_file_hash,
+        runtime_environment,
         safe_checkpoint_save,
         select_validation_threshold,
     )
@@ -76,3 +79,29 @@ def test_metrics_handle_evaluable_and_one_class_splits():
     )
     assert one_class_metrics['status'] == 'skipped_one_class_or_empty_split'
     assert one_class_metrics['auroc'] is None
+
+
+def test_graph_incompatible_pairs_are_removed_before_splitting_with_an_audit():
+    dataframe = pd.DataFrame({
+        'source': ['CCO', 'C', 'CCN'],
+        'target': ['CCN', 'CCO', 'not-a-smiles'],
+        'label': [1.0, 1.0, 0.0],
+    })
+
+    clean, exclusions = filter_graph_compatible_pairs(dataframe)
+
+    assert len(clean) == 1
+    assert clean.iloc[0]['source'] == 'CCO'
+    assert len(exclusions) == 2
+    assert set(exclusions['dataset_row_index']) == {'1', '2'}
+    assert 'invalid_or_single_atom_smiles' in set(exclusions['source_graph_status']).union(
+        set(exclusions['target_graph_status'])
+    )
+
+
+def test_runtime_environment_records_resolved_dependency_versions():
+    environment = runtime_environment()
+
+    assert environment['python_version']
+    assert 'torch' in environment['package_versions']
+    assert 'torch_geometric' in environment['package_versions']

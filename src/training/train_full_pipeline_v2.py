@@ -8,10 +8,13 @@ data, split manifests, checkpoint, predictions, and plots.
 from __future__ import annotations
 
 import hashlib
+from importlib.metadata import PackageNotFoundError, version as distribution_version
 import json
 import os
 from pathlib import Path
+import platform
 import random
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -104,6 +107,57 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f'Cannot JSON-encode {type(value).__name__}.')
 
 
+def _installed_distribution_version(distribution_name: str) -> str | None:
+    """Return an installed package version without making a run fail on metadata."""
+    try:
+        return distribution_version(distribution_name)
+    except PackageNotFoundError:
+        return None
+
+
+def runtime_environment() -> dict[str, Any]:
+    """Record the resolved Colab software and GPU environment for reproducibility."""
+    gpu_name = None
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+    package_names = {
+        'matplotlib': 'matplotlib',
+        'numpy': 'numpy',
+        'pandas': 'pandas',
+        'rdkit': 'rdkit',
+        'scikit_learn': 'scikit-learn',
+        'torch': 'torch',
+        'torch_geometric': 'torch-geometric',
+    }
+    return {
+        'python_version': platform.python_version(),
+        'python_implementation': platform.python_implementation(),
+        'platform': platform.platform(),
+        'cuda_available': torch.cuda.is_available(),
+        'cuda_version': torch.version.cuda,
+        'gpu_name': gpu_name,
+        'package_versions': {
+            name: _installed_distribution_version(distribution)
+            for name, distribution in package_names.items()
+        },
+    }
+
+
+def repository_git_commit() -> str | None:
+    """Return the source revision when training from a Git checkout."""
+    try:
+        completed = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return completed.stdout.strip() or None
+
+
 def write_json(path: str | Path, payload: dict[str, Any]) -> None:
     """Write an auditable JSON artifact with a stable UTF-8 encoding."""
     artifact_path = Path(path)
@@ -154,6 +208,8 @@ def build_run_manifest() -> dict[str, Any]:
         'run_id': RUN_ID,
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
         'device': str(DEVICE),
+        'repository_git_commit': repository_git_commit(),
+        'runtime_environment': runtime_environment(),
         'random_seed': SEED,
         'configuration': {
             'data_cap': DATA_CAP,
@@ -187,6 +243,59 @@ def save_split_manifests(
         }
     write_json(split_dir / 'split_manifest.json', manifest)
     return manifest
+
+
+def save_training_history(history: dict[str, list[float]], artifact_dir: Path) -> dict[str, Any]:
+    """Save the numeric source data behind the convergence figure."""
+    lengths = {len(values) for values in history.values()}
+    if len(lengths) != 1:
+        raise ValueError('Training history fields must have equal lengths.')
+    history_path = artifact_dir / 'training_history.csv'
+    pd.DataFrame(history).to_csv(history_path, index=False)
+    return {
+        'path': str(history_path),
+        'sha256': get_file_hash(history_path),
+        'epoch_count': next(iter(lengths), 0),
+    }
+
+
+def graph_compatibility_reason(smiles: Any) -> str | None:
+    """Use the production graph builder to identify unusable molecular inputs."""
+    if not isinstance(smiles, str) or not smiles.strip():
+        return 'missing_or_non_string_smiles'
+    return None if smiles_to_graph(smiles) is not None else 'invalid_or_single_atom_smiles'
+
+
+def filter_graph_compatible_pairs(
+    dataframe: pd.DataFrame,
+    source_col: str = 'source',
+    target_col: str = 'target',
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Exclude graph-incompatible pairs before splitting and retain an audit table."""
+    missing = {source_col, target_col}.difference(dataframe.columns)
+    if missing:
+        raise ValueError(f'Pair data is missing required columns: {sorted(missing)}.')
+
+    keep_rows: list[bool] = []
+    exclusions: list[dict[str, Any]] = []
+    audit_columns = ['dataset_row_index', *dataframe.columns, 'source_graph_status', 'target_graph_status']
+    for row_index, row in dataframe.iterrows():
+        source_reason = graph_compatibility_reason(row[source_col])
+        target_reason = graph_compatibility_reason(row[target_col])
+        source_status = source_reason or 'graph_compatible'
+        target_status = target_reason or 'graph_compatible'
+        keep_row = source_reason is None and target_reason is None
+        keep_rows.append(keep_row)
+        if not keep_row:
+            exclusions.append({
+                'dataset_row_index': str(row_index),
+                **row.to_dict(),
+                'source_graph_status': source_status,
+                'target_graph_status': target_status,
+            })
+
+    clean = dataframe.loc[keep_rows].copy().reset_index(drop=True)
+    return clean, pd.DataFrame(exclusions, columns=audit_columns)
 
 
 def load_toxicity_lookup(audit_dir: Path) -> tuple[dict[str, float], dict[str, Any]]:
@@ -531,7 +640,27 @@ def plot_toxicity_bridge_coverage(summary: dict[str, Any], figure_dir: Path) -> 
     _save_figure(figure, figure_dir / 'toxicity_bridge_coverage')
 
 
-def _prepare_positive_edges() -> pd.DataFrame:
+def model_summary(model: PxDDIModel) -> dict[str, Any]:
+    """Return a compact architecture and parameter summary for the run manifest."""
+    total_parameters = sum(parameter.numel() for parameter in model.parameters())
+    trainable_parameters = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
+    return {
+        'model_class': model.__class__.__name__,
+        'encoder_class': model.encoder.__class__.__name__,
+        'input_atom_features': NUM_ATOM_FEATURES,
+        'hidden_channels': HIDDEN_CHANNELS,
+        'use_chemberta': USE_CHEMBERTA,
+        'pair_representation': 'embedding_sum + absolute_embedding_difference + toxicity_sum + absolute_toxicity_difference',
+        'output_heads': ['interaction_risk', 'drug_a_toxicity', 'drug_b_toxicity'],
+        'total_parameters': int(total_parameters),
+        'trainable_parameters': int(trainable_parameters),
+    }
+
+
+def _prepare_positive_edges(audit_dir: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Deduplicate and validate positive pairs before negative sampling or splitting."""
     edges = pd.read_csv(TWOSIDES_EDGES)
     required_columns = {'source', 'target'}
     missing = required_columns.difference(edges.columns)
@@ -540,7 +669,32 @@ def _prepare_positive_edges() -> pd.DataFrame:
     positives = edges[['source', 'target']].copy()
     positives['label'] = 1.0
     positives = deduplicate_unordered_pairs(positives, 'source', 'target')
-    return positives.sample(n=min(DATA_CAP, len(positives)), random_state=SEED).reset_index(drop=True)
+    clean_positives, exclusions = filter_graph_compatible_pairs(positives)
+    if clean_positives.empty:
+        raise ValueError('No graph-compatible positive pairs remain after SMILES validation.')
+
+    exclusions_path = audit_dir / 'invalid_smiles_exclusions.csv'
+    exclusions.to_csv(exclusions_path, index=False)
+    sampled = clean_positives.sample(
+        n=min(DATA_CAP, len(clean_positives)), random_state=SEED
+    ).reset_index(drop=True)
+    summary = {
+        'raw_unique_positive_pairs': int(len(positives)),
+        'excluded_positive_pairs': int(len(exclusions)),
+        'clean_positive_pairs': int(len(clean_positives)),
+        'sampled_positive_pairs': int(len(sampled)),
+        'data_cap': DATA_CAP,
+        'exclusion_audit_path': str(exclusions_path),
+        'exclusion_audit_sha256': get_file_hash(exclusions_path),
+    }
+    write_json(audit_dir / 'input_quality_summary.json', summary)
+    print(
+        'Positive-pair input audit: '
+        f"{summary['raw_unique_positive_pairs']} unique pairs; "
+        f"{summary['excluded_positive_pairs']} excluded; "
+        f"{summary['sampled_positive_pairs']} used for sampling."
+    )
+    return sampled, summary
 
 
 def main() -> None:
@@ -560,10 +714,17 @@ def main() -> None:
     write_json(RUN_ARTIFACTS_DIR / 'run_manifest_initial.json', manifest)
 
     toxicity_lookup, toxicity_summary = load_toxicity_lookup(audit_dir)
-    positives = _prepare_positive_edges()
+    positives, input_quality_summary = _prepare_positive_edges(audit_dir)
     full_dataset = build_binary_pair_dataset(
         positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SEED
     )
+    dataset_summary = {
+        'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
+        'sampled_unreported_negative_pairs': int((full_dataset['label'] == 0.0).sum()),
+        'total_pair_rows_before_split': int(len(full_dataset)),
+        'negative_label_meaning': 'unreported_twosides_sampled',
+    }
+    write_json(audit_dir / 'dataset_summary.json', dataset_summary)
     splits = create_splits(
         full_dataset, drug_a_col='source', drug_b_col='target', seed=SEED
     )
@@ -576,6 +737,17 @@ def main() -> None:
         'S1': build_loader(splits['s1_test'], toxicity_lookup, shuffle=False),
         'S2': build_loader(splits['s2_test'], toxicity_lookup, shuffle=False),
     }
+    all_loaders = {'train': train_loader, 'validation': validation_loader, **test_loaders}
+    unexpected_skips = {
+        name: int(loader.dataset.skipped_count)
+        for name, loader in all_loaders.items()
+        if loader.dataset.skipped_count
+    }
+    if unexpected_skips:
+        raise RuntimeError(
+            'Graph validation changed between the pre-split audit and dataset construction: '
+            f'{unexpected_skips}. Review the input audit before training.'
+        )
     validation_labels = np.asarray([record['label'] for record in validation_loader.dataset.metadata])
     if len(validation_labels) == 0 or len(np.unique(validation_labels)) < 2:
         raise ValueError('Validation split is unusable after SMILES validation; adjust the data split.')
@@ -588,7 +760,15 @@ def main() -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
     scaler = torch.amp.GradScaler('cuda') if DEVICE.type == 'cuda' else None
-    history = {'epoch': [], 'loss': [], 'auroc': [], 'f1': []}
+    history = {
+        'epoch': [],
+        'loss': [],
+        'auroc': [],
+        'average_precision': [],
+        'f1': [],
+        'threshold': [],
+        'learning_rate': [],
+    }
     best_auroc = float('-inf')
 
     for epoch in range(1, EPOCHS + 1):
@@ -600,7 +780,10 @@ def main() -> None:
         history['epoch'].append(epoch)
         history['loss'].append(loss)
         history['auroc'].append(validation_metrics['auroc'])
+        history['average_precision'].append(validation_metrics['average_precision'])
         history['f1'].append(validation_metrics['f1'])
+        history['threshold'].append(threshold)
+        history['learning_rate'].append(float(optimizer.param_groups[0]['lr']))
         print(
             f'Epoch {epoch}/{EPOCHS}: loss={loss:.4f}; '
             f"validation AUROC={validation_metrics['auroc']:.4f}; "
@@ -619,6 +802,7 @@ def main() -> None:
                     'epoch': epoch,
                     'data_cap': DATA_CAP,
                     'seed': SEED,
+                    'threshold': threshold,
                 },
                 CHECKPOINT_PATH,
             )
@@ -626,11 +810,17 @@ def main() -> None:
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     validation_true, validation_predicted = collect_predictions(model, validation_loader)
-    frozen_threshold = select_validation_threshold(validation_true, validation_predicted)
+    saved_threshold = checkpoint.get('threshold')
+    frozen_threshold = float(
+        saved_threshold
+        if saved_threshold is not None
+        else select_validation_threshold(validation_true, validation_predicted)
+    )
     checkpoint['threshold'] = frozen_threshold
     checkpoint_hash = safe_checkpoint_save(checkpoint, CHECKPOINT_PATH)
 
     plot_training_curves(history, figure_dir)
+    history_summary = save_training_history(history, RUN_ARTIFACTS_DIR)
     results: dict[str, dict[str, Any]] = {}
     for name, loader in test_loaders.items():
         labels, predictions = collect_predictions(model, loader)
@@ -656,7 +846,11 @@ def main() -> None:
             'validation_auroc': checkpoint['auroc'],
             'validation_selected_threshold': frozen_threshold,
         },
+        'model_summary': model_summary(model),
+        'training_history': history_summary,
         'toxicity_bridge': toxicity_summary,
+        'input_quality': input_quality_summary,
+        'dataset': dataset_summary,
         'split_manifest': split_manifest,
         'results': results,
     })

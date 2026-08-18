@@ -1,9 +1,13 @@
-# Colab dependencies for PxDDI training
-# Note: PyTorch is intentionally excluded so Colab uses its native GPU-optimized version.
+# Google Colab dependencies for PxDDI training.
+#
+# PyTorch is intentionally excluded so Colab retains its GPU-optimised build.
+# Colab updates its Python version over time, so these are compatibility bounds
+# rather than obsolete exact pins. Every run records the resolved versions in
+# artifacts/run_<timestamp>/run_manifest.json.
 
-torch-geometric==2.5.3
-pandas==2.0.3
-numpy==1.25.2
-scikit-learn==1.2.2
-rdkit==2023.9.6
-matplotlib==3.7.1
+torch-geometric>=2.5.3,<3
+pandas>=2.2.3,<3
+numpy>=1.26.4,<3
+scikit-learn>=1.4.2,<2
+rdkit>=2024.3.5
+matplotlib>=3.8,<4

@@ -67,16 +67,18 @@ The default frontend origin is `http://localhost:3000`. Set
 
 ## Colab training
 
-Training is intentionally run in Google Colab with a GPU. Install the pinned
-non-PyTorch Colab packages from `requirements_colab.txt`, set
+Training is intentionally run in Google Colab with a GPU. Install the
+Colab-compatible non-PyTorch packages from `requirements_colab.txt`, set
 `PXDDI_DATA_BASE` to the Drive data directory when needed, and run
 `src/training/train_full_pipeline_v2.py`. ChemBERTa remains disabled.
 
 Each run creates `artifacts/run_<timestamp>/` in Drive containing an initial
-and final manifest, clean toxicity-label audit, exact split CSVs and hashes,
-checkpoint hash, prediction CSVs, metrics JSON, and PNG/PDF figures. The
-pipeline excludes structures with conflicting toxicity scores rather than
-choosing a score by CSV row order or averaging them.
+and final manifest, resolved package/GPU environment, source revision, model
+summary, numeric training-history CSV, clean toxicity-label and input-quality
+audits, exact split CSVs and hashes, checkpoint hash, prediction CSVs, metrics
+JSON, and PNG/PDF figures. The pipeline excludes structures with conflicting
+toxicity scores rather than choosing a score by CSV row order or averaging
+them, and removes graph-incompatible SMILES before splitting.
 
 `notebooks/pxddi_training_run.ipynb` is intentionally empty in this local
 repository because the live work is done in Colab. After the next audited run,
