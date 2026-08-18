@@ -177,6 +177,8 @@ def audit_and_resolve_duplicates(bridge_df):
     dup_mask = bridge_df.duplicated(subset='canonical_smiles', keep=False)
     if dup_mask.any():
         conflicts = bridge_df[dup_mask].sort_values('canonical_smiles')
+        import os
+        os.makedirs('checkpoints', exist_ok=True)
         conflicts.to_csv('checkpoints/toxicity_duplicate_audit.csv', index=False)
         print(f"AUDIT: {dup_mask.sum()} rows involved in {conflicts['canonical_smiles'].nunique()} "
               f"conflicting structures. Saved to toxicity_duplicate_audit.csv for manual review.")
