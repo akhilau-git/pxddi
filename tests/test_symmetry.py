@@ -32,7 +32,7 @@ TEST_PAIRS = [
 
 @pytest.fixture(scope='module')
 def model():
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=True)
     loaded_model = PxDDIModel(
         in_channels=checkpoint['in_channels'],
         hidden_channels=checkpoint['hidden_channels'],

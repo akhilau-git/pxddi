@@ -1,29 +1,87 @@
-# PxDDI: Patient-Context Drug-Drug Interaction System
+# PxDDI: Research Drug-Drug Interaction Prototype
 
-Research prototype implementing patient-context-conditioned, structure-based
-DDI risk prediction, connecting drug interaction, toxicity, and patient
-context signals — addressing a gap identified across a 26-paper literature
-review (see /docs/literature_review.md).
+PxDDI is a research prototype for structure-based drug-drug interaction (DDI)
+prediction. It combines a symmetric molecular graph model with a toxicity head
+and a patient-context architecture. It is **not for clinical use**.
 
-## Status: Research Prototype — NOT for clinical use.
+Patient context is intentionally disabled at inference: the repository does
+not contain linked patient, drug-pair, and outcome data needed to train that
+module safely.
 
-## Production model
-GNN-based dual-view encoder, trained on 200,000 real TWOSIDES pairs.
-- Transductive AUROC: 0.9735
-- S1 (unseen drug pairs) AUROC: 0.5021 — known limitation, see Model Card
-- S2 (one unseen drug) AUROC: 0.7474
+## Current deployed GNN artifact
 
-## Setup
-1. `pip install -r requirements.txt`
-2. Place trained checkpoint at `backend/checkpoints/pxddi_model.pt`
-3. Place toxicity bridge at `backend/checkpoints/toxicity_smiles_bridge.csv`
-4. `cd backend && uvicorn main:app --reload`
-5. Visit `http://127.0.0.1:8000/docs`
+The checkpoint at `backend/checkpoints/pxddi_model.pt` currently reports:
 
-## Training
-Run `src/training/train_full_pipeline_v2.py` in Google Colab (GPU required).
-See `/notebooks/pxddi_training_run.ipynb` for the exact executed run.
+- Best validation epoch: 193
+- Stored validation AUROC: 0.9485
+- Validation-selected decision threshold: 0.5453
+- Training cap: 200,000 rows
+
+These are checkpoint metadata, not external or clinical validation. The API
+also marks its risk estimate as uncalibrated.
+
+## Historical evaluation figures
+
+The following previously reported figures are retained for traceability, but
+cannot yet be independently reproduced from this repository because raw data,
+split manifests, prediction files, and completed Colab outputs are not stored
+here.
+
+| Split | AUROC | F1 |
+|---|---:|---:|
+| Transductive | 0.9735 | 0.9170 |
+| S1 (both unseen drugs) | 0.5021 | 0.3530 |
+| S2 (one unseen drug) | 0.7474 | 0.6387 |
+
+Do not treat these figures as current, reproducible evidence until the next
+audited Colab run produces versioned data, split manifests, metrics, and
+prediction artifacts.
+
+## Local setup
+
+Use CPython 3.10.11. Install development dependencies and run tests:
+
+```powershell
+C:\Python310\python.exe -m pip install -r requirements-dev.txt
+C:\Python310\python.exe -m pytest -q
+```
+
+Start the research API:
+
+```powershell
+C:\Python310\python.exe -m uvicorn backend.main:app --reload
+```
+
+Useful endpoints:
+
+- `GET /health` — process liveness and model metadata.
+- `GET /ready` — deployment readiness; fails if required toxicity coverage
+  data is unavailable.
+- `POST /predict` — research-only pair prediction.
+- `POST /explain` — slower embedding-level explanation.
+
+The default frontend origin is `http://localhost:3000`. Set
+`PXDDI_ALLOWED_ORIGINS` to a comma-separated allowlist for another deployment.
+
+## Colab training
+
+Training is intentionally run in Google Colab with a GPU. The training script
+is `src/training/train_full_pipeline_v2.py` and expects the project data in the
+configured Drive location.
+
+`notebooks/pxddi_training_run.ipynb` is intentionally empty in this local
+repository because the live work is done in Colab. After the next audited run,
+download and commit the executed notebook together with the configuration,
+data/split manifests, logs, metrics, plots, and checkpoint hash.
 
 ## Known limitations
-See MODEL_CARD.md for full disclosure of dataset, negative-sampling,
-and generalization limitations.
+
+- S1 generalization to two unseen drugs is currently near random.
+- Random unreported TWOSIDES pairs are not confirmed-safe negatives.
+- The FAERS toxicity bridge covers 339 unique structures and currently has
+  duplicate structures with conflicting source scores awaiting resolution.
+- The prediction score is uncalibrated and is not a clinical probability.
+- Patient context, external validation, clinical rules, and production
+  authentication are not implemented.
+
+See `MODEL_CARD.md` for full limitations and the current research scope.

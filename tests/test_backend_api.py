@@ -18,11 +18,29 @@ def test_health_reports_checkpoint_and_runtime_limits():
     assert response.status_code == 200
     payload = response.json()
     assert payload['status'] == 'ok'
+    assert payload['ready'] is True
     assert payload['model_loaded'] is True
     assert payload['patient_context_enabled'] is False
     assert len(payload['model_checkpoint_sha256']) == 64
     assert payload['max_molecule_atoms'] == main.MAX_MOLECULE_ATOMS
     assert payload['toxicity_bridge_error'] is None
+
+
+def test_ready_endpoint_requires_the_toxicity_bridge():
+    response = CLIENT.get('/ready')
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'ready'
+
+
+def test_ready_endpoint_reports_a_missing_toxicity_bridge(monkeypatch):
+    monkeypatch.setattr(main, 'KNOWN_TOXICITY_SMILES', set())
+    monkeypatch.setattr(main, 'TOXICITY_BRIDGE_ERROR', 'bridge fixture unavailable')
+
+    response = CLIENT.get('/ready')
+
+    assert response.status_code == 503
+    assert response.json()['detail'] == 'bridge fixture unavailable'
 
 
 def test_local_frontend_origin_is_allowed_by_cors():

@@ -82,9 +82,8 @@ app.add_middleware(
 )
 
 CHECKPOINT_PATH = BACKEND_DIR / 'checkpoints' / 'pxddi_model.pt'
-# The current trusted local checkpoint contains legacy NumPy scalar metadata.
-# Phase 3 will write a clean checkpoint that can use weights_only=True.
-checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
+# Checkpoint metadata contains only safe built-in types and tensors.
+checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=True)
 model = PxDDIModel(
     in_channels=checkpoint['in_channels'],
     hidden_channels=checkpoint['hidden_channels'],
@@ -183,6 +182,15 @@ def toxicity_response(smiles: str, score: float):
     }
 
 
+def readiness_error() -> str | None:
+    """Return a readiness failure when required toxicity-coverage data is unavailable."""
+    if KNOWN_TOXICITY_SMILES:
+        return None
+    return TOXICITY_BRIDGE_ERROR or (
+        'Toxicity bridge loaded without any usable canonical SMILES entries.'
+    )
+
+
 @app.post('/predict')
 def predict_ddi(req: DDIRequest):
     batch_a, batch_b = build_drug_batches(req)
@@ -243,8 +251,10 @@ def explain_ddi(req: DDIRequest):
 
 @app.get('/health')
 def health():
+    bridge_error = readiness_error()
     return {
         'status': 'ok',
+        'ready': bridge_error is None,
         'model_loaded': True,
         'model_type': 'GNN' if not checkpoint.get('use_chemberta', False) else 'ChemBERTa',
         'model_auroc': float(checkpoint.get('auroc')) if checkpoint.get('auroc') is not None else None,
@@ -252,11 +262,24 @@ def health():
         'model_checkpoint_sha256': CHECKPOINT_SHA256,
         'toxicity_bridge_loaded': len(KNOWN_TOXICITY_SMILES) > 0,
         'toxicity_bridge_size': len(KNOWN_TOXICITY_SMILES),
-        'toxicity_bridge_error': TOXICITY_BRIDGE_ERROR,
+        'toxicity_bridge_error': bridge_error,
         'decision_threshold': DECISION_THRESHOLD,
         'patient_context_enabled': False,
         'max_smiles_length': MAX_SMILES_LENGTH,
         'max_molecule_atoms': MAX_MOLECULE_ATOMS,
         'max_molecule_bonds': MAX_MOLECULE_BONDS,
         'max_concurrent_explanations': MAX_CONCURRENT_EXPLANATIONS,
+    }
+
+
+@app.get('/ready')
+def ready():
+    """Readiness endpoint used by deployment health checks."""
+    bridge_error = readiness_error()
+    if bridge_error is not None:
+        raise HTTPException(status_code=503, detail=bridge_error)
+    return {
+        'status': 'ready',
+        'model_checkpoint_sha256': CHECKPOINT_SHA256,
+        'toxicity_bridge_size': len(KNOWN_TOXICITY_SMILES),
     }

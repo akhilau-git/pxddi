@@ -1,38 +1,78 @@
 # PxDDI Model Card
 
 ## Intended use
-Research prototype demonstrating patient-context-conditioned DDI prediction.
-NOT validated for clinical decision-making.
+
+PxDDI is a research prototype for structure-based DDI prediction. It is not
+validated for clinical decision-making, prescribing, diagnosis, triage, or
+patient-specific treatment recommendations.
+
+## Current deployed artifact
+
+- Model: symmetric dual-view GAT encoder with DDI and toxicity heads.
+- Checkpoint: `backend/checkpoints/pxddi_model.pt`.
+- Stored validation AUROC: 0.9485.
+- Best validation epoch: 193.
+- Decision threshold selected from validation data: 0.5453.
+- Patient context: disabled at inference.
+
+The stored AUROC is checkpoint metadata. It is not external, temporal, or
+clinical validation.
 
 ## Training data
-- TWOSIDES (200,000 sampled real interaction pairs)
-- Negative sampling: random unreported pairs, labeled "no interaction
-  reported" — NOT confirmed safe. See Limitations.
-- FAERS-derived toxicity signal: 339 real drugs with structural matches
-  (via PubChem bridge), single quarter (2023Q4), not deduplicated at
-  case level.
 
-## Architecture
-Dual-view GAT encoder, 128 hidden dims, multi-task (DDI risk + toxicity).
+- TWOSIDES: 200,000 sampled rows in the current training configuration.
+- Negatives: randomly sampled unreported pairs. They mean "not reported," not
+  "confirmed safe."
+- FAERS toxicity signal: one quarter (2023Q4), based on severe-outcome report
+  fractions and mapped through PubChem structures.
+- Toxicity bridge: 339 unique canonical structures. Source rows include 58
+  duplicated structures with conflicting scores; those require an audited
+  resolution policy before the next training run.
 
-## Evaluation
-| Split | AUROC | F1 |
-|---|---|---|
-| Transductive | 0.9735 | 0.9170 |
-| S1 (both unseen) | 0.5021 | 0.3530 |
-| S2 (one unseen) | 0.7474 | 0.6387 |
+## Evaluation status
 
-## Known Limitations / Not Yet Implemented
-1. **S1 Generalization**: Performance is near-random — model cannot reliably predict interactions for entirely novel drug pairs.
-2. **Negative Labels**: Represent "not reported" in TWOSIDES, not "confirmed safe."
-3. **Patient-Context Module**: Exists architecturally but is NOT trained on linked patient-outcome data — disabled at inference.
-4. **Toxicity Coverage**: Limited to 339 drugs; missing = unknown, not zero risk.
-5. **Clinical Validation**: No external/temporal/clinical validation performed.
-6. **Symmetry**: Evaluated for symmetry and found to be highly order-sensitive (A+B != B+A). This is a known limitation.
-7. **Security**: Missing auth, CORS tightening, rate-limiting, and audit logs.
-8. **Clinical Rules Engine**: Not implemented.
-9. **Deployment Hardening**: Model server and ChemBERTa infrastructure not hardened for production scale.
+Historical figures in the repository are not currently reproducible because
+the raw datasets, split manifests, run logs, predictions, and completed Colab
+notebook are not committed. They must be regenerated and versioned before use
+in a report or comparison.
 
-## Ablation: ChemBERTa-2 encoder
-Tested as alternative encoder (50k pairs, 50 epochs). Did not improve
-S1 generalization (AUROC 0.4769 vs GNN's 0.5021). Not deployed.
+## Verified software behavior
+
+- **Symmetry:** fixed. The pair representation uses embedding sums and
+  absolute differences, so A+B and B+A are order-independent by construction.
+  Regression tests check the shipped GNN checkpoint on multiple pairs.
+- **Input validation:** invalid, single-atom, oversized, and over-complex
+  inputs are rejected by the API.
+- **Patient context:** accepted fields are explicitly not applied.
+- **Toxicity coverage:** API checks canonical SMILES rather than raw input.
+
+## Current limitations
+
+1. **S1 generalization:** prior reported performance for two unseen drugs is
+   near random; this limitation remains unresolved.
+2. **Negative labels:** unreported interaction pairs are not proven negatives.
+3. **Toxicity targets:** FAERS signals are observational, affected by reporting
+   bias, from a single quarter, and currently contain unresolved duplicate
+   structural mappings.
+4. **Patient context:** no linked patient-exposure-outcome training data is in
+   this project; the module must remain disabled.
+5. **Molecular representation:** graph features omit bond order,
+   stereochemistry, chirality, and other chemical detail.
+6. **Calibration:** risk and toxicity head outputs are not clinical
+   probabilities and have not been calibrated.
+7. **Validation:** no external, temporal, prospective, or clinical validation
+   has been performed.
+8. **Explanation:** `/explain` attributes molecular embeddings and applies a
+   functional-group heuristic; it is not a final pair-risk explanation or a
+   literature validation.
+9. **Security:** local CORS is restricted and explanation concurrency is
+   bounded, but authentication, global rate limiting, audit logging, TLS,
+   monitoring, and public-deployment controls are absent.
+10. **Deployment:** the API has readiness checks and a non-root container, but
+    actual Docker image execution, resource limits, pinned dependencies, and
+    operational monitoring remain pending.
+
+## ChemBERTa ablation
+
+ChemBERTa is retained as an undeployed ablation artifact. It is intentionally
+unchanged until a separate decision is made to archive it or fully support it.

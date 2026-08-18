@@ -1,13 +1,30 @@
-# Literature Review: DDI Prediction Models
+# Literature Review Status
 
-| Paper | Model | Transductive AUROC | S1 AUROC | S2 AUROC | Limitations |
-|-------|-------|--------------------|----------|----------|-------------|
-| 1 | DeepDDI | 0.95 | - | - | Transductive only, no cold-start |
-| 2 | SSI-DDI | 0.96 | 0.60 | 0.78 | Poor S1 generalization |
-| 3 | CASTER | 0.93 | 0.55 | 0.75 | Needs 2D structures |
-| 4 | MIRACLE | 0.96 | 0.58 | 0.81 | Graph-based, complex pre-processing |
-| 5 | GNN-DDI | 0.97 | 0.52 | 0.79 | Cold-start S1 remains unsolved |
-... (Condensed summary of 26-paper review pointing to cold-start and patient context gaps)
+This file is currently a working summary, not a completed 26-paper literature
+review. The repository must not claim that a fully sourced 26-paper review is
+available until every reference is recorded and checked.
 
-**Conclusion:**
-S1 generalization (predicting interactions for two novel drugs) remains an unsolved challenge across the field. Patient context is rarely incorporated into structural models. PxDDI addresses the patient context architectural gap while acknowledging the S1 limitation.
+## Current field-level conclusion
+
+Structure-based DDI models often perform strongly when both drugs were seen in
+training, while generalization to pairs of novel drugs remains difficult.
+Patient-level context is less commonly incorporated because linked patient,
+exposure, and outcome datasets are limited.
+
+## Required evidence for every included paper
+
+For each source, record:
+
+1. Full paper title and authors.
+2. Venue and publication year.
+3. DOI or stable official URL.
+4. Dataset and sample definition.
+5. Split definition, especially unseen-drug evaluation.
+6. Reported metrics and threshold policy.
+7. Directly relevant limitation.
+
+## Current action
+
+Do not use placeholder model names or unsourced AUROC values in a thesis,
+paper, or product claim. Build the final evidence table from the actual papers
+and retain a copy of the source metadata with the project.
