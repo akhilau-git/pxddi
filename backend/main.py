@@ -27,12 +27,14 @@ if __package__:
     from .toxicity_lookup import (
         KNOWN_TOXICITY_SMILES,
         TOXICITY_BRIDGE_ERROR,
+        TOXICITY_BRIDGE_SUMMARY,
         is_toxicity_known,
     )
 else:
     from toxicity_lookup import (
         KNOWN_TOXICITY_SMILES,
         TOXICITY_BRIDGE_ERROR,
+        TOXICITY_BRIDGE_SUMMARY,
         is_toxicity_known,
     )
 
@@ -263,6 +265,14 @@ def health():
         'toxicity_bridge_loaded': len(KNOWN_TOXICITY_SMILES) > 0,
         'toxicity_bridge_size': len(KNOWN_TOXICITY_SMILES),
         'toxicity_bridge_error': bridge_error,
+        'toxicity_bridge_source_rows': (
+            TOXICITY_BRIDGE_SUMMARY['source_rows']
+            if TOXICITY_BRIDGE_SUMMARY is not None else None
+        ),
+        'toxicity_bridge_conflicting_structures_excluded': (
+            TOXICITY_BRIDGE_SUMMARY['excluded_conflicting_structures']
+            if TOXICITY_BRIDGE_SUMMARY is not None else None
+        ),
         'decision_threshold': DECISION_THRESHOLD,
         'patient_context_enabled': False,
         'max_smiles_length': MAX_SMILES_LENGTH,

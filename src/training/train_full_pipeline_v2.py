@@ -1,333 +1,668 @@
-"""
-train_full_pipeline_v2.py — Final consolidated pipeline
+"""Reproducible Colab training pipeline for the research-only PxDDI GNN.
+
+This script intentionally keeps ChemBERTa disabled. It saves all run-specific
+artifacts to Google Drive so a later paper result can be traced to its input
+data, split manifests, checkpoint, predictions, and plots.
 """
 
-import torch
-import time
-import os
-import sys
-import json
+from __future__ import annotations
+
 import hashlib
+import json
+import os
+from pathlib import Path
 import random
-import numpy as np
+import sys
+import tempfile
 from datetime import datetime, timezone
+from typing import Any
 
-SEED = 42
-random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED); torch.cuda.manual_seed_all(SEED)
-DRIVE_BASE = os.environ.get('PXDDI_DATA_BASE', '/content/drive/MyDrive/pxddi-data/')
-
-sys.path.append(os.path.join(DRIVE_BASE, 'pxddi/src'))
-
+import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import roc_curve, auc, precision_recall_curve, confusion_matrix, matthews_corrcoef, roc_auc_score, f1_score
+import torch
+from matplotlib import pyplot as plt
+from sklearn.metrics import (
+    average_precision_score,
+    brier_score_loss,
+    confusion_matrix,
+    f1_score,
+    matthews_corrcoef,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
 from torch_geometric.data import Batch, Dataset
 from torch_geometric.loader import DataLoader
 
-from models.ddi_model import PxDDIModel
-from data_prep.prepare_twosides import smiles_to_graph, NUM_ATOM_FEATURES
-from data_prep.splits import build_binary_pair_dataset, create_splits
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+REPOSITORY_SRC = PROJECT_ROOT / 'src'
+if str(REPOSITORY_SRC) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_SRC))
+
+DRIVE_BASE = Path(os.environ.get('PXDDI_DATA_BASE', '/content/drive/MyDrive/pxddi-data'))
+DRIVE_SRC = DRIVE_BASE / 'pxddi' / 'src'
+if DRIVE_SRC.exists() and str(DRIVE_SRC) not in sys.path:
+    sys.path.insert(0, str(DRIVE_SRC))
+
+from data_prep.prepare_twosides import NUM_ATOM_FEATURES, smiles_to_graph
 from data_prep.pubchem_bridge import canonicalize, resolve_toxicity_bridge
+from data_prep.splits import build_binary_pair_dataset, create_splits, deduplicate_unordered_pairs
+from models.ddi_model import PxDDIModel
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Training on: {DEVICE}")
-if DEVICE.type != 'cuda':
-    print("WARNING: Not using CUDA!")
 
-scaler = torch.amp.GradScaler('cuda') if DEVICE.type == 'cuda' else None
+def _positive_int_from_environment(name: str, default: int) -> int:
+    value = int(os.environ.get(name, default))
+    if value <= 0:
+        raise ValueError(f'{name} must be a positive integer.')
+    return value
 
-TWOSIDES_EDGES = DRIVE_BASE + 'twosides/drug_drug_edges.csv'
-TOXICITY_BRIDGE = DRIVE_BASE + 'checkpoints/toxicity_smiles_bridge.csv'
+
+SEED = _positive_int_from_environment('PXDDI_SEED', 42)
+DATA_CAP = _positive_int_from_environment('PXDDI_DATA_CAP', 200000)
+EPOCHS = _positive_int_from_environment('PXDDI_EPOCHS', 200)
+HIDDEN_CHANNELS = _positive_int_from_environment('PXDDI_HIDDEN_CHANNELS', 128)
+BATCH_SIZE = _positive_int_from_environment('PXDDI_BATCH_SIZE', 128)
 USE_CHEMBERTA = False
-CHECKPOINT_PATH = DRIVE_BASE + ('checkpoints/pxddi_model_chemberta.pt' if USE_CHEMBERTA else 'checkpoints/pxddi_model.pt')
-RUN_ARTIFACTS_DIR = DRIVE_BASE + 'artifacts/run_' + datetime.now().strftime("%Y%m%d_%H%M%S")
 
-DATA_CAP = 200000
-EPOCHS = 200
-HIDDEN_CHANNELS = 128
+TWOSIDES_EDGES = DRIVE_BASE / 'twosides' / 'drug_drug_edges.csv'
+TOXICITY_BRIDGE = DRIVE_BASE / 'checkpoints' / 'toxicity_smiles_bridge.csv'
+CHECKPOINT_PATH = DRIVE_BASE / 'checkpoints' / 'pxddi_model.pt'
+RUN_ID = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+RUN_ARTIFACTS_DIR = DRIVE_BASE / 'artifacts' / f'run_{RUN_ID}'
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-history = {'epoch': [], 'loss': [], 'auroc': []}
 
-def save_checkpoint_safe(state_dict_bundle, path):
-    tmp_path = path + '.tmp'
-    torch.save(state_dict_bundle, tmp_path)
-    os.replace(tmp_path, path)  # atomic — no corrupted partial file on interrupt
-    with open(path, 'rb') as f:
-        checkpoint_hash = hashlib.sha256(f.read()).hexdigest()[:16]
-    print(f"Checkpoint saved. SHA256 (short): {checkpoint_hash}")
-    return checkpoint_hash
+def set_reproducibility(seed: int) -> None:
+    """Set every supported random seed without making GPU execution fail hard."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
-def get_preds_labels(model, loader):
-    model.eval(); preds, labels = [], []
-    with torch.no_grad():
-        for da, db, _, _, _, _, rl in loader:
-            da, db = da.to(DEVICE), db.to(DEVICE)
-            rp, _, _ = model(da, db)
-            preds.extend(torch.sigmoid(rp).cpu().numpy())
-            labels.extend(rl.numpy())
-    return np.array(labels), np.array(preds)
 
-def plot_roc_pr_confusion(name, labels, preds, threshold, plots_dir):
-    fpr, tpr, _ = roc_curve(labels, preds)
-    roc_auc = auc(fpr, tpr)
-    prec, rec, _ = precision_recall_curve(labels, preds)
-    pr_auc = auc(rec, prec)
-    pred_labels = (preds >= threshold).astype(int)
-    cm = confusion_matrix(labels, pred_labels)
-    mcc = matthews_corrcoef(labels, pred_labels)
+def get_file_hash(path: str | Path) -> str:
+    """Return a complete SHA-256 digest without loading a whole file into RAM."""
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    axes[0].plot(fpr, tpr, label=f'AUC={roc_auc:.3f}'); axes[0].plot([0,1],[0,1],'--',color='gray')
-    axes[0].set_title(f'{name} — ROC (n={len(labels)})'); axes[0].set_xlabel('FPR'); axes[0].set_ylabel('TPR'); axes[0].legend()
 
-    axes[1].plot(rec, prec, label=f'PR-AUC={pr_auc:.3f}')
-    axes[1].set_title(f'{name} — Precision-Recall'); axes[1].set_xlabel('Recall'); axes[1].set_ylabel('Precision'); axes[1].legend()
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f'Cannot JSON-encode {type(value).__name__}.')
 
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[2],
-                xticklabels=['No Interaction','Interaction'], yticklabels=['No Interaction','Interaction'])
-    axes[2].set_title(f'{name} — Confusion Matrix (threshold={threshold:.3f}, MCC={mcc:.3f})')
 
-    plt.tight_layout()
-    fname = plots_dir + f'{name.lower().replace(" ", "_")}_full_eval.png'
-    plt.savefig(fname, dpi=150)
-    print(f"Saved {fname}")
-    return {'auroc': roc_auc, 'pr_auc': pr_auc, 'mcc': mcc, 'confusion_matrix': cm.tolist()}
+def write_json(path: str | Path, payload: dict[str, Any]) -> None:
+    """Write an auditable JSON artifact with a stable UTF-8 encoding."""
+    artifact_path = Path(path)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    with artifact_path.open('w', encoding='utf-8') as destination:
+        json.dump(payload, destination, indent=2, sort_keys=True, default=_json_default)
 
-def plot_toxicity_bridge_coverage(total, matched, unique, conflicts, plots_dir):
-    stages = ['Source rows', 'PubChem matched', 'Unique structures', 'Conflicts resolved']
-    values = [total, matched, unique, conflicts]
-    plt.figure(figsize=(7,5))
-    plt.bar(stages, values, color=['#4C72B0','#55A868','#C44E52','#8172B2'])
-    plt.title('Toxicity Bridge Coverage Funnel')
-    plt.ylabel('Count')
-    for i, v in enumerate(values): plt.text(i, v+2, str(v), ha='center')
-    plt.tight_layout()
-    plt.savefig(plots_dir + 'toxicity_bridge_coverage.png', dpi=150)
-    print(f"Saved {plots_dir}toxicity_bridge_coverage.png")
 
-def get_toxicity(smiles, lookup, default=None):
-    canon = canonicalize(smiles)
-    return lookup.get(canon, default)
+def safe_checkpoint_save(state_dict_bundle: dict[str, Any], path: str | Path) -> str:
+    """Atomically save, safe-reload, and hash a checkpoint before replacing it."""
+    final_path = Path(path)
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{final_path.name}.', suffix='.tmp', dir=final_path.parent
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        torch.save(state_dict_bundle, temporary_path)
+        loaded = torch.load(temporary_path, map_location='cpu', weights_only=True)
+        if not isinstance(loaded, dict):
+            raise ValueError('Checkpoint validation failed: expected a dictionary.')
+        if set(loaded) != set(state_dict_bundle):
+            raise ValueError('Checkpoint validation failed: keys changed after saving.')
+        checkpoint_hash = get_file_hash(temporary_path)
+        os.replace(temporary_path, final_path)
+        return checkpoint_hash
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
-def load_toxicity_lookup():
+
+# Backward-compatible name used by earlier Colab cells and documentation.
+save_checkpoint_safe = safe_checkpoint_save
+
+
+def build_run_manifest() -> dict[str, Any]:
+    """Capture immutable inputs before any model fitting begins."""
+    required_paths = {
+        'twosides_edges': TWOSIDES_EDGES,
+        'toxicity_bridge': TOXICITY_BRIDGE,
+        'training_source': Path(__file__),
+    }
+    missing = [name for name, path in required_paths.items() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f'Missing required Colab inputs: {missing}.')
+    return {
+        'run_id': RUN_ID,
+        'created_at_utc': datetime.now(timezone.utc).isoformat(),
+        'device': str(DEVICE),
+        'random_seed': SEED,
+        'configuration': {
+            'data_cap': DATA_CAP,
+            'epochs': EPOCHS,
+            'hidden_channels': HIDDEN_CHANNELS,
+            'batch_size': BATCH_SIZE,
+            'use_chemberta': USE_CHEMBERTA,
+            'negative_label_meaning': 'unreported_twosides_sampled',
+            'toxicity_conflict_policy': 'exclude_conflicting_structures',
+        },
+        'input_sha256': {name: get_file_hash(path) for name, path in required_paths.items()},
+    }
+
+
+def save_split_manifests(
+    splits: dict[str, pd.DataFrame], artifact_dir: Path
+) -> dict[str, dict[str, Any]]:
+    """Save exact split tables and their hashes before training."""
+    split_dir = artifact_dir / 'splits'
+    split_dir.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, dict[str, Any]] = {}
+    for name, frame in splits.items():
+        split_path = split_dir / f'{name}.csv'
+        frame.to_csv(split_path, index=False)
+        label_counts = frame['label'].value_counts().to_dict() if 'label' in frame else {}
+        manifest[name] = {
+            'path': str(split_path),
+            'sha256': get_file_hash(split_path),
+            'rows': int(len(frame)),
+            'label_counts': {str(label): int(count) for label, count in label_counts.items()},
+        }
+    write_json(split_dir / 'split_manifest.json', manifest)
+    return manifest
+
+
+def load_toxicity_lookup(audit_dir: Path) -> tuple[dict[str, float], dict[str, Any]]:
+    """Save toxicity conflicts to the current run and return clean labels only."""
     bridge = pd.read_csv(TOXICITY_BRIDGE)
     resolved, summary, conflicts = resolve_toxicity_bridge(bridge)
-    
-    audit_dir = os.path.join(RUN_ARTIFACTS_DIR, 'audits')
-    os.makedirs(audit_dir, exist_ok=True)
-    conflicts.to_csv(os.path.join(audit_dir, 'toxicity_bridge_conflicts.csv'), index=False)
-    with open(os.path.join(audit_dir, 'toxicity_bridge_summary.json'), 'w') as f:
-        json.dump(summary, f, indent=2)
-    
-    global toxicity_summary
-    toxicity_summary = summary
-    return dict(zip(resolved['canonical_smiles'], resolved['toxicity_score']))
-
-def remove_reversed_duplicates(df, source_col='source', target_col='target'):
-    """Prevents leakage from A-B and B-A both appearing (possibly in
-    different splits)."""
-    df = df.copy()
-    before = len(df)
-    
-    # Vectorized sorting of pairs is vastly faster than apply() on millions of rows
-    min_col = np.minimum(df[source_col].astype(str), df[target_col].astype(str))
-    max_col = np.maximum(df[source_col].astype(str), df[target_col].astype(str))
-    
-    df = df.assign(__min=min_col, __max=max_col)
-    df = df.drop_duplicates(subset=['__min', '__max'])
-    df = df.drop(columns=['__min', '__max'])
-    
-    print(f"Removed {before - len(df)} reversed/duplicate pairs")
-    return df
-
-def add_negative_samples(df, source_col='source', target_col='target', neg_ratio=1.0, seed=42):
-    combined = build_binary_pair_dataset(
-        df,
-        source_col=source_col,
-        target_col=target_col,
-        neg_ratio=neg_ratio,
-        seed=seed,
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    conflicts.to_csv(audit_dir / 'toxicity_bridge_conflicts.csv', index=False)
+    summary = {
+        **summary,
+        'conflict_policy': 'exclude_conflicting_structures',
+        'source_bridge_sha256': get_file_hash(TOXICITY_BRIDGE),
+        'conflict_report_path': str(audit_dir / 'toxicity_bridge_conflicts.csv'),
+    }
+    write_json(audit_dir / 'toxicity_bridge_summary.json', summary)
+    print(
+        'Toxicity bridge: '
+        f"{summary['source_rows']} source rows; "
+        f"{summary['resolved_unique_canonical_structures']} clean structures; "
+        f"{summary['excluded_conflicting_structures']} conflicts excluded."
     )
-    positives = int((combined['label'] == 1).sum())
-    negatives = int((combined['label'] == 0).sum())
-    print(f'Final dataset: {len(combined)} unique unordered pairs ({positives} pos, {negatives} neg)')
-    return combined
+    return dict(zip(resolved['canonical_smiles'], resolved['toxicity_score'])), summary
+
 
 class PxDDIDataset(Dataset):
-    def __init__(self, df, tox_lookup, source_col='source', target_col='target', label_col='label'):
-        super().__init__()
-        records = []
-        skipped = 0
-        total = len(df)
-        for i, row in enumerate(df.itertuples(), 1):
-            source, target, label = getattr(row, source_col), getattr(row, target_col), getattr(row, label_col)
-            ga = smiles_to_graph(source)
-            gb = smiles_to_graph(target)
-            if ga is None or gb is None:
-                skipped += 1
-                continue
-            tox_a = get_toxicity(source, tox_lookup)
-            tox_b = get_toxicity(target, tox_lookup)
-            tox_a_known = float(tox_a is not None)
-            tox_b_known = float(tox_b is not None)
-            tox_a = tox_a if tox_a is not None else 0.0
-            tox_b = tox_b if tox_b is not None else 0.0
-            records.append((ga, gb, tox_a, tox_b, tox_a_known, tox_b_known, label))
-            if i % 5000 == 0:
-                print(f"    ...processed {i}/{total} rows")
-        print(f"Built dataset: {len(records)} valid pairs, {skipped} skipped")
-        self.records = records
+    """Graph pairs plus provenance retained for later prediction artifacts."""
 
-    def len(self): return len(self.records)
-    def get(self, idx): return self.records[idx]
+    def __init__(
+        self,
+        dataframe: pd.DataFrame,
+        toxicity_lookup: dict[str, float],
+        source_col: str = 'source',
+        target_col: str = 'target',
+        label_col: str = 'label',
+    ) -> None:
+        super().__init__()
+        self.records = []
+        self.metadata: list[dict[str, Any]] = []
+        self.skipped_count = 0
+        for row in dataframe.itertuples(index=False):
+            source = getattr(row, source_col)
+            target = getattr(row, target_col)
+            label = float(getattr(row, label_col))
+            graph_a = smiles_to_graph(source)
+            graph_b = smiles_to_graph(target)
+            if graph_a is None or graph_b is None:
+                self.skipped_count += 1
+                continue
+            toxicity_a = toxicity_lookup.get(canonicalize(source))
+            toxicity_b = toxicity_lookup.get(canonicalize(target))
+            toxicity_a_known = float(toxicity_a is not None)
+            toxicity_b_known = float(toxicity_b is not None)
+            self.records.append(
+                (
+                    graph_a,
+                    graph_b,
+                    0.0 if toxicity_a is None else float(toxicity_a),
+                    0.0 if toxicity_b is None else float(toxicity_b),
+                    toxicity_a_known,
+                    toxicity_b_known,
+                    label,
+                )
+            )
+            self.metadata.append(
+                {
+                    'source': source,
+                    'target': target,
+                    'label': label,
+                    'label_evidence': getattr(row, 'label_evidence', 'unknown'),
+                }
+            )
+        print(f'Built dataset: {len(self.records)} valid pairs; {self.skipped_count} skipped.')
+
+    def len(self) -> int:
+        return len(self.records)
+
+    def get(self, index: int):
+        return self.records[index]
+
 
 def collate_fn(batch):
-    ga = [b[0] for b in batch]
-    gb = [b[1] for b in batch]
-    ta = torch.tensor([b[2] for b in batch], dtype=torch.float)
-    tb = torch.tensor([b[3] for b in batch], dtype=torch.float)
-    tak = torch.tensor([b[4] for b in batch], dtype=torch.float)
-    tbk = torch.tensor([b[5] for b in batch], dtype=torch.float)
-    lb = torch.tensor([b[6] for b in batch], dtype=torch.float)
-    return Batch.from_data_list(ga), Batch.from_data_list(gb), ta, tb, tak, tbk, lb
+    graph_a = [item[0] for item in batch]
+    graph_b = [item[1] for item in batch]
+    toxicity_a = torch.tensor([item[2] for item in batch], dtype=torch.float)
+    toxicity_b = torch.tensor([item[3] for item in batch], dtype=torch.float)
+    toxicity_a_known = torch.tensor([item[4] for item in batch], dtype=torch.float)
+    toxicity_b_known = torch.tensor([item[5] for item in batch], dtype=torch.float)
+    labels = torch.tensor([item[6] for item in batch], dtype=torch.float)
+    return (
+        Batch.from_data_list(graph_a),
+        Batch.from_data_list(graph_b),
+        toxicity_a,
+        toxicity_b,
+        toxicity_a_known,
+        toxicity_b_known,
+        labels,
+    )
 
-def build_loader(df, tox_lookup, batch_size=32, shuffle=True):
-    ds = PxDDIDataset(df, tox_lookup)
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
 
-def multi_task_loss(rp, tap, tbp, rl, tal, tbl, tak, tbk):
-    bce = torch.nn.BCEWithLogitsLoss(reduction='none')
-    ddi_loss = bce(rp, rl).mean()
-    tox_a_loss = (bce(tap, tal) * tak).sum() / (tak.sum() + 1e-8)
-    tox_b_loss = (bce(tbp, tbl) * tbk).sum() / (tbk.sum() + 1e-8)
-    return ddi_loss + 0.3 * (tox_a_loss + tox_b_loss)
+def build_loader(
+    dataframe: pd.DataFrame,
+    toxicity_lookup: dict[str, float],
+    batch_size: int = BATCH_SIZE,
+    shuffle: bool = True,
+) -> DataLoader:
+    dataset = PxDDIDataset(dataframe, toxicity_lookup)
+    generator = torch.Generator()
+    generator.manual_seed(SEED)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        collate_fn=collate_fn,
+        generator=generator if shuffle else None,
+    )
 
-def train_one_epoch(model, loader, opt):
-    model.train(); total = 0
-    for da, db, tal, tbl, tak, tbk, rl in loader:
-        da, db = da.to(DEVICE), db.to(DEVICE)
-        tal, tbl, tak, tbk, rl = tal.to(DEVICE), tbl.to(DEVICE), tak.to(DEVICE), tbk.to(DEVICE), rl.to(DEVICE)
-        opt.zero_grad()
+
+def multi_task_loss(risk_prediction, toxicity_a_prediction, toxicity_b_prediction, risk_label, toxicity_a_label, toxicity_b_label, toxicity_a_known, toxicity_b_known):
+    binary_cross_entropy = torch.nn.BCEWithLogitsLoss(reduction='none')
+    ddi_loss = binary_cross_entropy(risk_prediction, risk_label).mean()
+    toxicity_a_loss = (
+        binary_cross_entropy(toxicity_a_prediction, toxicity_a_label) * toxicity_a_known
+    ).sum() / (toxicity_a_known.sum() + 1e-8)
+    toxicity_b_loss = (
+        binary_cross_entropy(toxicity_b_prediction, toxicity_b_label) * toxicity_b_known
+    ).sum() / (toxicity_b_known.sum() + 1e-8)
+    return ddi_loss + 0.3 * (toxicity_a_loss + toxicity_b_loss)
+
+
+def train_one_epoch(model, loader, optimizer, scaler) -> float:
+    if len(loader) == 0:
+        raise ValueError('Training loader is empty after SMILES validation.')
+    model.train()
+    total_loss = 0.0
+    for graph_a, graph_b, toxicity_a, toxicity_b, toxicity_a_known, toxicity_b_known, labels in loader:
+        graph_a, graph_b = graph_a.to(DEVICE), graph_b.to(DEVICE)
+        toxicity_a = toxicity_a.to(DEVICE)
+        toxicity_b = toxicity_b.to(DEVICE)
+        toxicity_a_known = toxicity_a_known.to(DEVICE)
+        toxicity_b_known = toxicity_b_known.to(DEVICE)
+        labels = labels.to(DEVICE)
+        optimizer.zero_grad()
         if scaler is not None:
             with torch.amp.autocast('cuda'):
-                rp, tap, tbp = model(da, db)
-                loss = multi_task_loss(rp, tap, tbp, rl, tal, tbl, tak, tbk)
-            scaled_loss = scaler.scale(loss)
-            scaled_loss.backward()
-            scaler.step(opt); scaler.update()
+                risk, prediction_a, prediction_b = model(graph_a, graph_b)
+                loss = multi_task_loss(
+                    risk, prediction_a, prediction_b, labels,
+                    toxicity_a, toxicity_b, toxicity_a_known, toxicity_b_known,
+                )
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
         else:
-            rp, tap, tbp = model(da, db)
-            loss = multi_task_loss(rp, tap, tbp, rl, tal, tbl, tak, tbk)
+            risk, prediction_a, prediction_b = model(graph_a, graph_b)
+            loss = multi_task_loss(
+                risk, prediction_a, prediction_b, labels,
+                toxicity_a, toxicity_b, toxicity_a_known, toxicity_b_known,
+            )
             loss.backward()
-            opt.step()
-        total += loss.item()
-    return total / len(loader)
+            optimizer.step()
+        total_loss += float(loss.item())
+    return total_loss / len(loader)
 
-if __name__ == "__main__":
-    os.makedirs(RUN_ARTIFACTS_DIR, exist_ok=True)
-    
-    print("STEP 1: Loading toxicity lookup...")
-    tox_lookup = load_toxicity_lookup()
 
-    print(f"\nSTEP 2: Loading TWOSIDES edges (capped at {DATA_CAP})...")
+def collect_predictions(model, loader) -> tuple[np.ndarray, np.ndarray]:
+    model.eval()
+    predictions, labels = [], []
+    with torch.no_grad():
+        for graph_a, graph_b, _, _, _, _, batch_labels in loader:
+            graph_a, graph_b = graph_a.to(DEVICE), graph_b.to(DEVICE)
+            risk, _, _ = model(graph_a, graph_b)
+            predictions.extend(torch.sigmoid(risk).cpu().numpy())
+            labels.extend(batch_labels.numpy())
+    return np.asarray(labels, dtype=int), np.asarray(predictions, dtype=float)
+
+
+def select_validation_threshold(labels: np.ndarray, predictions: np.ndarray) -> float:
+    if len(labels) == 0 or len(np.unique(labels)) < 2:
+        raise ValueError('Validation split must contain both classes to select a threshold.')
+    false_positive_rate, true_positive_rate, thresholds = roc_curve(labels, predictions)
+    return float(thresholds[np.argmax(true_positive_rate - false_positive_rate)])
+
+
+def calculate_metrics(
+    labels: np.ndarray,
+    predictions: np.ndarray,
+    threshold: float,
+) -> dict[str, Any]:
+    """Calculate metrics without pretending a one-class split is evaluable."""
+    predicted_labels = (predictions >= threshold).astype(int)
+    matrix = confusion_matrix(labels, predicted_labels, labels=[0, 1])
+    true_negative, false_positive, false_negative, true_positive = matrix.ravel()
+    result: dict[str, Any] = {
+        'sample_count': int(len(labels)),
+        'positive_count': int((labels == 1).sum()),
+        'negative_count': int((labels == 0).sum()),
+        'threshold': float(threshold),
+        'confusion_matrix': matrix.tolist(),
+        'f1': float(f1_score(labels, predicted_labels, zero_division=0)) if len(labels) else None,
+        'precision': float(precision_score(labels, predicted_labels, zero_division=0)) if len(labels) else None,
+        'recall': float(recall_score(labels, predicted_labels, zero_division=0)) if len(labels) else None,
+        'specificity': float(true_negative / (true_negative + false_positive))
+        if true_negative + false_positive else None,
+        'mcc': float(matthews_corrcoef(labels, predicted_labels))
+        if len(np.unique(labels)) > 1 else None,
+        'brier_score_uncalibrated': float(brier_score_loss(labels, predictions)) if len(labels) else None,
+    }
+    if len(np.unique(labels)) < 2:
+        result.update({
+            'status': 'skipped_one_class_or_empty_split',
+            'auroc': None,
+            'average_precision': None,
+        })
+        return result
+    result.update({
+        'status': 'evaluated',
+        'auroc': float(roc_auc_score(labels, predictions)),
+        'average_precision': float(average_precision_score(labels, predictions)),
+    })
+    return result
+
+
+def save_prediction_artifact(
+    name: str,
+    loader: DataLoader,
+    labels: np.ndarray,
+    predictions: np.ndarray,
+    threshold: float,
+    prediction_dir: Path,
+) -> Path:
+    metadata = loader.dataset.metadata
+    if len(metadata) != len(labels):
+        raise RuntimeError('Prediction provenance does not match the evaluated dataset.')
+    table = pd.DataFrame(metadata)
+    table['label'] = labels
+    table['prediction_score'] = predictions
+    table['threshold'] = threshold
+    table['predicted_label'] = (predictions >= threshold).astype(int)
+    prediction_path = prediction_dir / f'{name.lower().replace(" ", "_")}_predictions.csv'
+    table.to_csv(prediction_path, index=False)
+    return prediction_path
+
+
+def _save_figure(figure, destination: Path) -> None:
+    figure.savefig(destination.with_suffix('.png'), dpi=180, bbox_inches='tight')
+    figure.savefig(destination.with_suffix('.pdf'), bbox_inches='tight')
+    plt.close(figure)
+
+
+def plot_training_curves(history: dict[str, list[float]], figure_dir: Path) -> None:
+    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    axes[0].plot(history['epoch'], history['loss'], color='#0072B2', label='Training loss')
+    axes[0].set(title='Training loss', xlabel='Epoch', ylabel='Loss')
+    axes[0].grid(alpha=0.25)
+    axes[1].plot(history['epoch'], history['auroc'], color='#D55E00', label='Validation AUROC')
+    axes[1].plot(history['epoch'], history['f1'], color='#009E73', label='Validation F1')
+    axes[1].set(title='Validation performance', xlabel='Epoch', ylabel='Score', ylim=(0, 1))
+    axes[1].legend()
+    axes[1].grid(alpha=0.25)
+    figure.tight_layout()
+    _save_figure(figure, figure_dir / 'training_curves')
+
+
+def plot_evaluation(
+    name: str,
+    labels: np.ndarray,
+    predictions: np.ndarray,
+    metrics: dict[str, Any],
+    figure_dir: Path,
+) -> None:
+    figure, axes = plt.subplots(1, 3, figsize=(17, 4.8))
+    if metrics['status'] == 'evaluated':
+        false_positive_rate, true_positive_rate, _ = roc_curve(labels, predictions)
+        precision, recall, _ = precision_recall_curve(labels, predictions)
+        axes[0].plot(false_positive_rate, true_positive_rate, color='#0072B2')
+        axes[0].plot([0, 1], [0, 1], linestyle='--', color='#777777')
+        axes[0].set(
+            title=f'{name}: ROC (AUROC={metrics["auroc"]:.3f})',
+            xlabel='False positive rate', ylabel='True positive rate', xlim=(0, 1), ylim=(0, 1),
+        )
+        axes[1].plot(recall, precision, color='#D55E00')
+        axes[1].set(
+            title=f'{name}: PR (AP={metrics["average_precision"]:.3f})',
+            xlabel='Recall', ylabel='Precision', xlim=(0, 1), ylim=(0, 1),
+        )
+    else:
+        message = 'Skipped: split has fewer than two classes.'
+        for axis in axes[:2]:
+            axis.text(0.5, 0.5, message, ha='center', va='center', wrap=True)
+            axis.set_axis_off()
+
+    matrix = np.asarray(metrics['confusion_matrix'])
+    image = axes[2].imshow(matrix, cmap='Blues')
+    for row in range(2):
+        for column in range(2):
+            axes[2].text(column, row, str(matrix[row, column]), ha='center', va='center')
+    axes[2].set(
+        title=f'{name}: confusion matrix\nthreshold={metrics["threshold"]:.3f}',
+        xlabel='Predicted label', ylabel='True label',
+        xticks=[0, 1], yticks=[0, 1],
+        xticklabels=['Unreported', 'Reported'], yticklabels=['Unreported', 'Reported'],
+    )
+    figure.colorbar(image, ax=axes[2], fraction=0.046, pad=0.04)
+    figure.tight_layout()
+    _save_figure(figure, figure_dir / f'{name.lower().replace(" ", "_")}_evaluation')
+
+
+def plot_benchmark_comparison(results: dict[str, dict[str, Any]], figure_dir: Path) -> None:
+    names = list(results)
+    metric_names = [('auroc', 'AUROC'), ('average_precision', 'Average precision'), ('f1', 'F1')]
+    x = np.arange(len(names))
+    width = 0.24
+    figure, axis = plt.subplots(figsize=(10, 5))
+    for index, (key, label) in enumerate(metric_names):
+        values = [results[name][key] if results[name][key] is not None else np.nan for name in names]
+        axis.bar(x + (index - 1) * width, values, width, label=label)
+    axis.set(
+        title='PxDDI evaluation by split', xlabel='Evaluation split', ylabel='Score',
+        xticks=x, xticklabels=names, ylim=(0, 1),
+    )
+    axis.legend()
+    axis.grid(axis='y', alpha=0.25)
+    figure.tight_layout()
+    _save_figure(figure, figure_dir / 'benchmark_comparison')
+
+
+def plot_toxicity_bridge_coverage(summary: dict[str, Any], figure_dir: Path) -> None:
+    labels = ['Source rows', 'Mapped rows', 'Unique structures', 'Clean structures']
+    values = [
+        summary['source_rows'],
+        summary['rows_with_canonical_smiles'],
+        summary['unique_canonical_structures'],
+        summary['resolved_unique_canonical_structures'],
+    ]
+    figure, axis = plt.subplots(figsize=(8, 4.8))
+    bars = axis.bar(labels, values, color=['#0072B2', '#56B4E9', '#E69F00', '#009E73'])
+    for bar, value in zip(bars, values):
+        axis.text(bar.get_x() + bar.get_width() / 2, value, str(value), ha='center', va='bottom')
+    axis.set(title='Toxicity bridge coverage after conflict exclusion', ylabel='Structure count')
+    axis.grid(axis='y', alpha=0.25)
+    figure.tight_layout()
+    _save_figure(figure, figure_dir / 'toxicity_bridge_coverage')
+
+
+def _prepare_positive_edges() -> pd.DataFrame:
     edges = pd.read_csv(TWOSIDES_EDGES)
-    edges = remove_reversed_duplicates(edges) # Prevent leakage
-    edges = edges.sample(n=min(DATA_CAP, len(edges)), random_state=SEED)
-    full_df = add_negative_samples(edges, neg_ratio=1.0, seed=SEED)
+    required_columns = {'source', 'target'}
+    missing = required_columns.difference(edges.columns)
+    if missing:
+        raise ValueError(f'TWOSIDES edges are missing required columns: {sorted(missing)}.')
+    positives = edges[['source', 'target']].copy()
+    positives['label'] = 1.0
+    positives = deduplicate_unordered_pairs(positives, 'source', 'target')
+    return positives.sample(n=min(DATA_CAP, len(positives)), random_state=SEED).reset_index(drop=True)
 
-    print("\nSTEP 3: Creating cold-start splits...")
-    splits = create_splits(full_df, drug_a_col='source', drug_b_col='target', seed=SEED)
 
-    print("\nSTEP 4: Building DataLoaders...")
-    train_loader = build_loader(splits['transductive_train'], tox_lookup, batch_size=128)
-    val_loader = build_loader(splits['validation'], tox_lookup, batch_size=128, shuffle=False)
-    test_loader = build_loader(splits['transductive_test'], tox_lookup, batch_size=128, shuffle=False)
-    s1_loader = build_loader(splits['s1_test'], tox_lookup, batch_size=128, shuffle=False)
-    s2_loader = build_loader(splits['s2_test'], tox_lookup, batch_size=128, shuffle=False)
+def main() -> None:
+    set_reproducibility(SEED)
+    print(f'Training on: {DEVICE}')
+    if DEVICE.type != 'cuda':
+        print('Warning: CUDA is unavailable; Colab GPU is recommended for this run.')
 
-    print("\nSTEP 5: Training...")
-    model = PxDDIModel(in_channels=NUM_ATOM_FEATURES, hidden_channels=HIDDEN_CHANNELS, use_chemberta=USE_CHEMBERTA).to(DEVICE)
+    RUN_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=False)
+    figure_dir = RUN_ARTIFACTS_DIR / 'figures'
+    prediction_dir = RUN_ARTIFACTS_DIR / 'predictions'
+    audit_dir = RUN_ARTIFACTS_DIR / 'audits'
+    figure_dir.mkdir()
+    prediction_dir.mkdir()
+
+    manifest = build_run_manifest()
+    write_json(RUN_ARTIFACTS_DIR / 'run_manifest_initial.json', manifest)
+
+    toxicity_lookup, toxicity_summary = load_toxicity_lookup(audit_dir)
+    positives = _prepare_positive_edges()
+    full_dataset = build_binary_pair_dataset(
+        positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SEED
+    )
+    splits = create_splits(
+        full_dataset, drug_a_col='source', drug_b_col='target', seed=SEED
+    )
+    split_manifest = save_split_manifests(splits, RUN_ARTIFACTS_DIR)
+
+    train_loader = build_loader(splits['transductive_train'], toxicity_lookup, shuffle=True)
+    validation_loader = build_loader(splits['validation'], toxicity_lookup, shuffle=False)
+    test_loaders = {
+        'Transductive': build_loader(splits['transductive_test'], toxicity_lookup, shuffle=False),
+        'S1': build_loader(splits['s1_test'], toxicity_lookup, shuffle=False),
+        'S2': build_loader(splits['s2_test'], toxicity_lookup, shuffle=False),
+    }
+    validation_labels = np.asarray([record['label'] for record in validation_loader.dataset.metadata])
+    if len(validation_labels) == 0 or len(np.unique(validation_labels)) < 2:
+        raise ValueError('Validation split is unusable after SMILES validation; adjust the data split.')
+
+    model = PxDDIModel(
+        in_channels=NUM_ATOM_FEATURES,
+        hidden_channels=HIDDEN_CHANNELS,
+        use_chemberta=USE_CHEMBERTA,
+    ).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
+    scaler = torch.amp.GradScaler('cuda') if DEVICE.type == 'cuda' else None
+    history = {'epoch': [], 'loss': [], 'auroc': [], 'f1': []}
+    best_auroc = float('-inf')
 
-    best_auroc = 0
-    for epoch in range(EPOCHS):
-        t0 = time.time()
-        loss = train_one_epoch(model, train_loader, optimizer)
-        lr_scheduler.step()
-        
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f"\nEpoch {epoch+1}/{EPOCHS} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {time.time()-t0:.1f}s")
-        labels, preds = get_preds_labels(model, val_loader)
-        
-        if len(set(labels)) > 1:
-            val_auroc = roc_auc_score(labels, preds)
-            
-            # Restore rich printout
-            pos_count = int(sum(labels))
-            neg_count = len(labels) - pos_count
-            
-            pred_labels_05 = [1 if p > 0.5 else 0 for p in preds]
-            f1_05 = f1_score(labels, pred_labels_05, zero_division=0)
-            
-            fpr, tpr, thresholds = roc_curve(labels, preds)
-            optimal_thresh = thresholds[(tpr - fpr).argmax()]
-            pred_labels_opt = [1 if p > optimal_thresh else 0 for p in preds]
-            f1_opt = f1_score(labels, pred_labels_opt, zero_division=0)
-            
-            print(f"  [validation] set size: {len(labels)} (pos={pos_count}, neg={neg_count})")
-            print(f"  [validation] AUROC: {val_auroc:.4f} | F1 (0.5 threshold): {f1_05:.4f} | F1 (optimal {optimal_thresh:.3f}): {f1_opt:.4f}")
-            
-            history['epoch'].append(epoch + 1)
-            history['loss'].append(loss)
-            history['auroc'].append(val_auroc)
-            
-            if val_auroc > best_auroc:
-                best_auroc = val_auroc
-                save_checkpoint_safe({
+    for epoch in range(1, EPOCHS + 1):
+        loss = train_one_epoch(model, train_loader, optimizer, scaler)
+        scheduler.step()
+        validation_true, validation_predicted = collect_predictions(model, validation_loader)
+        threshold = select_validation_threshold(validation_true, validation_predicted)
+        validation_metrics = calculate_metrics(validation_true, validation_predicted, threshold)
+        history['epoch'].append(epoch)
+        history['loss'].append(loss)
+        history['auroc'].append(validation_metrics['auroc'])
+        history['f1'].append(validation_metrics['f1'])
+        print(
+            f'Epoch {epoch}/{EPOCHS}: loss={loss:.4f}; '
+            f"validation AUROC={validation_metrics['auroc']:.4f}; "
+            f"F1={validation_metrics['f1']:.4f}; "
+            f'LR={optimizer.param_groups[0]["lr"]:.6f}'
+        )
+        if validation_metrics['auroc'] > best_auroc:
+            best_auroc = validation_metrics['auroc']
+            safe_checkpoint_save(
+                {
                     'model_state_dict': model.state_dict(),
                     'hidden_channels': HIDDEN_CHANNELS,
                     'in_channels': NUM_ATOM_FEATURES,
                     'use_chemberta': USE_CHEMBERTA,
-                    'auroc': float(val_auroc),
-                    'epoch': epoch + 1,
+                    'auroc': float(best_auroc),
+                    'epoch': epoch,
                     'data_cap': DATA_CAP,
-                }, CHECKPOINT_PATH)
-                print(f"  -> New best model saved (VALIDATION AUROC {best_auroc:.4f})")
+                    'seed': SEED,
+                },
+                CHECKPOINT_PATH,
+            )
 
-    print("\n=== FINAL BENCHMARK ===")
-    best_checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
-    model.load_state_dict(best_checkpoint['model_state_dict'])
-    print(f"Loaded best checkpoint: epoch={best_checkpoint['epoch']}")
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=True)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    validation_true, validation_predicted = collect_predictions(model, validation_loader)
+    frozen_threshold = select_validation_threshold(validation_true, validation_predicted)
+    checkpoint['threshold'] = frozen_threshold
+    checkpoint_hash = safe_checkpoint_save(checkpoint, CHECKPOINT_PATH)
 
-    # Find threshold on validation
-    val_labels, val_preds = get_preds_labels(model, val_loader)
-    fpr, tpr, thresholds = roc_curve(val_labels, val_preds)
-    FROZEN_THRESHOLD = thresholds[(tpr - fpr).argmax()]
-    print(f"Threshold selected on VALIDATION set: {FROZEN_THRESHOLD:.4f}")
-    
-    # Add to checkpoint
-    best_checkpoint['threshold'] = float(FROZEN_THRESHOLD)
-    save_checkpoint_safe(best_checkpoint, CHECKPOINT_PATH)
-    
-    # Generate final plots using the requested suite
-    PLOTS_DIR = DRIVE_BASE + 'plots/'
-    os.makedirs(PLOTS_DIR, exist_ok=True)
+    plot_training_curves(history, figure_dir)
+    results: dict[str, dict[str, Any]] = {}
+    for name, loader in test_loaders.items():
+        labels, predictions = collect_predictions(model, loader)
+        metrics = calculate_metrics(labels, predictions, frozen_threshold)
+        prediction_path = save_prediction_artifact(
+            name, loader, labels, predictions, frozen_threshold, prediction_dir
+        )
+        metrics['prediction_path'] = str(prediction_path)
+        metrics['prediction_sha256'] = get_file_hash(prediction_path)
+        metrics['skipped_invalid_smiles'] = int(loader.dataset.skipped_count)
+        results[name] = metrics
+        plot_evaluation(name, labels, predictions, metrics, figure_dir)
+    plot_benchmark_comparison(results, figure_dir)
+    plot_toxicity_bridge_coverage(toxicity_summary, figure_dir)
+    write_json(RUN_ARTIFACTS_DIR / 'results_summary.json', results)
 
-    results_summary = {}
-    for name, loader in [("Transductive", test_loader), ("S1", s1_loader), ("S2", s2_loader)]:
-        labels, preds = get_preds_labels(model, loader)
-        results_summary[name] = plot_roc_pr_confusion(name, labels, preds, FROZEN_THRESHOLD, PLOTS_DIR)
+    manifest.update({
+        'completed_at_utc': datetime.now(timezone.utc).isoformat(),
+        'checkpoint': {
+            'path': str(CHECKPOINT_PATH),
+            'sha256': checkpoint_hash,
+            'epoch': checkpoint['epoch'],
+            'validation_auroc': checkpoint['auroc'],
+            'validation_selected_threshold': frozen_threshold,
+        },
+        'toxicity_bridge': toxicity_summary,
+        'split_manifest': split_manifest,
+        'results': results,
+    })
+    write_json(RUN_ARTIFACTS_DIR / 'run_manifest.json', manifest)
+    print(f'Run artifacts saved to: {RUN_ARTIFACTS_DIR}')
 
-    plot_toxicity_bridge_coverage(
-        total=toxicity_summary['source_rows'], 
-        matched=toxicity_summary['rows_with_canonical_smiles'], 
-        unique=toxicity_summary['unique_canonical_structures'], 
-        conflicts=toxicity_summary['conflicting_canonical_structures'], 
-        plots_dir=PLOTS_DIR
-    )
 
-    with open(PLOTS_DIR + 'results_summary.json', 'w') as f:
-        json.dump(results_summary, f, indent=2)
-    print("\nFull results summary saved as JSON — use directly in your paper's benchmark table.")
+if __name__ == '__main__':
+    main()

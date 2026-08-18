@@ -8,7 +8,7 @@ Patient context is intentionally disabled at inference: the repository does
 not contain linked patient, drug-pair, and outcome data needed to train that
 module safely.
 
-## Current deployed GNN artifact
+## Committed reference GNN artifact
 
 The checkpoint at `backend/checkpoints/pxddi_model.pt` currently reports:
 
@@ -17,8 +17,10 @@ The checkpoint at `backend/checkpoints/pxddi_model.pt` currently reports:
 - Validation-selected decision threshold: 0.5453
 - Training cap: 200,000 rows
 
-These are checkpoint metadata, not external or clinical validation. The API
-also marks its risk estimate as uncalibrated.
+These are metadata for the committed reference artifact, not external or
+clinical validation. A locally replaced or newly trained checkpoint must be
+described by its own Colab `run_manifest.json`, not by copying these figures.
+The API also marks its risk estimate as uncalibrated.
 
 ## Historical evaluation figures
 
@@ -65,9 +67,16 @@ The default frontend origin is `http://localhost:3000`. Set
 
 ## Colab training
 
-Training is intentionally run in Google Colab with a GPU. The training script
-is `src/training/train_full_pipeline_v2.py` and expects the project data in the
-configured Drive location.
+Training is intentionally run in Google Colab with a GPU. Install the pinned
+non-PyTorch Colab packages from `requirements_colab.txt`, set
+`PXDDI_DATA_BASE` to the Drive data directory when needed, and run
+`src/training/train_full_pipeline_v2.py`. ChemBERTa remains disabled.
+
+Each run creates `artifacts/run_<timestamp>/` in Drive containing an initial
+and final manifest, clean toxicity-label audit, exact split CSVs and hashes,
+checkpoint hash, prediction CSVs, metrics JSON, and PNG/PDF figures. The
+pipeline excludes structures with conflicting toxicity scores rather than
+choosing a score by CSV row order or averaging them.
 
 `notebooks/pxddi_training_run.ipynb` is intentionally empty in this local
 repository because the live work is done in Colab. After the next audited run,
@@ -78,8 +87,9 @@ data/split manifests, logs, metrics, plots, and checkpoint hash.
 
 - S1 generalization to two unseen drugs is currently near random.
 - Random unreported TWOSIDES pairs are not confirmed-safe negatives.
-- The FAERS toxicity bridge covers 339 unique structures and currently has
-  duplicate structures with conflicting source scores awaiting resolution.
+- The raw FAERS toxicity bridge covers 339 unique structures; 58 have
+  conflicting source scores. The next audited training run excludes those
+  conflicts, leaving 281 clean toxicity-label structures and a CSV audit file.
 - The prediction score is uncalibrated and is not a clinical probability.
 - Patient context, external validation, clinical rules, and production
   authentication are not implemented.

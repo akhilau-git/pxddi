@@ -173,31 +173,26 @@ def audit_toxicity_bridge(bridge: pd.DataFrame) -> tuple[dict[str, int], pd.Data
     return summary, conflicts
 
 
-def audit_and_resolve_duplicates(bridge_df):
-    dup_mask = bridge_df.duplicated(subset='canonical_smiles', keep=False)
-    if dup_mask.any():
-        conflicts = bridge_df[dup_mask].sort_values('canonical_smiles')
-        import os
-        os.makedirs('checkpoints', exist_ok=True)
-        conflicts.to_csv('checkpoints/toxicity_duplicate_audit.csv', index=False)
-        print(f"AUDIT: {dup_mask.sum()} rows involved in {conflicts['canonical_smiles'].nunique()} "
-              f"conflicting structures. Saved to toxicity_duplicate_audit.csv for manual review.")
-    # Documented rule: use the entry with the MOST reports (most statistically reliable), not a blind average
-    bridge_df = bridge_df.sort_values('n_reports', ascending=False).drop_duplicates(subset='canonical_smiles', keep='first')
-    print(f"Resolved via 'highest n_reports wins' rule: {len(bridge_df)} final unique structures")
-    return bridge_df
-
 def resolve_toxicity_bridge(bridge: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int], pd.DataFrame]:
-    """Shim to retain interface while using the user-provided duplicate resolver."""
+    """Apply the conservative duplicate policy for toxicity supervision.
+
+    Exact duplicate labels collapse to a single representative structure.
+    Structures with conflicting source scores are excluded from supervision;
+    callers receive the conflict table and must save it as a run artifact for
+    review. No choice is made based on report count or CSV row order.
+    """
     validated = validate_bridge_dataframe(bridge)
     summary, conflicts = audit_toxicity_bridge(validated)
-    
     matched = validated.dropna(subset=['canonical_smiles']).copy()
     matched['canonical_smiles'] = matched['canonical_smiles'].astype(str).str.strip()
     matched = matched[matched['canonical_smiles'] != '']
-    
-    resolved = audit_and_resolve_duplicates(matched)
-    
+    conflicting_structures = set(conflicts['canonical_smiles'])
+    resolved = matched[
+        ~matched['canonical_smiles'].isin(conflicting_structures)
+    ].sort_values(
+        ['canonical_smiles', 'n_reports', 'drugname'],
+        ascending=[True, False, True],
+    ).drop_duplicates(subset='canonical_smiles', keep='first')
     summary['resolved_unique_canonical_structures'] = int(len(resolved))
     summary['excluded_conflicting_structures'] = int(len(conflicts))
     return resolved.reset_index(drop=True), summary, conflicts

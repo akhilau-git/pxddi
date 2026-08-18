@@ -11,25 +11,35 @@ import pandas as pd
 SRC_PATH = Path(__file__).resolve().parents[1] / 'src'
 if str(SRC_PATH) not in sys.path:
     sys.path.append(str(SRC_PATH))
-from data_prep.pubchem_bridge import canonicalize
+from data_prep.pubchem_bridge import canonicalize, resolve_toxicity_bridge
 
-def load_known_toxicity_smiles(bridge_csv_path: Path) -> tuple[set[str], str | None]:
-    """Load bridge coverage while preserving a diagnostic for the health route."""
+def load_known_toxicity_smiles(
+    bridge_csv_path: Path,
+) -> tuple[set[str], str | None, dict[str, int] | None]:
+    """Load clean toxicity-label coverage and preserve health diagnostics.
+
+    A structure with conflicting FAERS-derived source scores is intentionally
+    excluded from the usable training-label set. The API must not describe it
+    as a clean toxicity label merely because it appears somewhere in the raw
+    bridge CSV.
+    """
     try:
         bridge = pd.read_csv(bridge_csv_path)
         if 'canonical_smiles' not in bridge.columns:
             raise ValueError("toxicity bridge is missing the 'canonical_smiles' column")
-        bridge = bridge.dropna(subset=['canonical_smiles'])
-        return set(bridge['canonical_smiles'].astype(str)), None
+        resolved, summary, _ = resolve_toxicity_bridge(bridge)
+        return set(resolved['canonical_smiles'].astype(str)), None, summary
     except (OSError, ValueError, KeyError, pd.errors.ParserError) as error:
         message = f'Could not load toxicity bridge: {error}'
         print(f'Warning: {message}')
-        return set(), message
+        return set(), message, None
 
 CHECKPOINTS_DIR = Path(__file__).resolve().parent / 'checkpoints'
-KNOWN_TOXICITY_SMILES, TOXICITY_BRIDGE_ERROR = load_known_toxicity_smiles(
-    CHECKPOINTS_DIR / 'toxicity_smiles_bridge.csv'
-)
+(
+    KNOWN_TOXICITY_SMILES,
+    TOXICITY_BRIDGE_ERROR,
+    TOXICITY_BRIDGE_SUMMARY,
+) = load_known_toxicity_smiles(CHECKPOINTS_DIR / 'toxicity_smiles_bridge.csv')
 
 
 def is_toxicity_known(smiles: str, known_canonical_smiles=None) -> bool:

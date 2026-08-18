@@ -138,8 +138,13 @@ def build_binary_pair_dataset(
             f'at most {available_pairs} are available.'
         )
 
+    # Sorting removes Python hash-order variation before the seeded shuffle,
+    # making the generated dataset repeatable across Colab processes.
     negatives = pd.DataFrame(
-        [{source_col: source, target_col: target} for source, target in negative_keys]
+        [
+            {source_col: source, target_col: target}
+            for source, target in sorted(negative_keys)
+        ]
     )
     negatives['label'] = 0.0
     negatives['label_evidence'] = 'unreported_twosides_sampled'

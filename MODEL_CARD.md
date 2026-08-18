@@ -6,7 +6,7 @@ PxDDI is a research prototype for structure-based DDI prediction. It is not
 validated for clinical decision-making, prescribing, diagnosis, triage, or
 patient-specific treatment recommendations.
 
-## Current deployed artifact
+## Committed reference artifact
 
 - Model: symmetric dual-view GAT encoder with DDI and toxicity heads.
 - Checkpoint: `backend/checkpoints/pxddi_model.pt`.
@@ -16,7 +16,9 @@ patient-specific treatment recommendations.
 - Patient context: disabled at inference.
 
 The stored AUROC is checkpoint metadata. It is not external, temporal, or
-clinical validation.
+clinical validation. A later local or Colab checkpoint must be accompanied by
+its own run manifest, split files, predictions, and checkpoint hash before it
+replaces this reference in project documentation.
 
 ## Training data
 
@@ -26,8 +28,10 @@ clinical validation.
 - FAERS toxicity signal: one quarter (2023Q4), based on severe-outcome report
   fractions and mapped through PubChem structures.
 - Toxicity bridge: 339 unique canonical structures. Source rows include 58
-  duplicated structures with conflicting scores; those require an audited
-  resolution policy before the next training run.
+  duplicated structures with conflicting scores. The reproducible training
+  pipeline excludes those structures from toxicity supervision rather than
+  guessing a score, leaving 281 clean structures and saving the conflict table
+  as a run artifact.
 
 ## Evaluation status
 
@@ -52,8 +56,9 @@ in a report or comparison.
    near random; this limitation remains unresolved.
 2. **Negative labels:** unreported interaction pairs are not proven negatives.
 3. **Toxicity targets:** FAERS signals are observational, affected by reporting
-   bias, from a single quarter, and currently contain unresolved duplicate
-   structural mappings.
+   bias, and from a single quarter. Conflicting structural mappings are now
+   excluded conservatively, but still require scientific audit before broader
+   claims are made.
 4. **Patient context:** no linked patient-exposure-outcome training data is in
    this project; the module must remain disabled.
 5. **Molecular representation:** graph features omit bond order,

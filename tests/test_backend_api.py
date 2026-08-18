@@ -24,6 +24,10 @@ def test_health_reports_checkpoint_and_runtime_limits():
     assert len(payload['model_checkpoint_sha256']) == 64
     assert payload['max_molecule_atoms'] == main.MAX_MOLECULE_ATOMS
     assert payload['toxicity_bridge_error'] is None
+    assert payload['toxicity_bridge_size'] == len(main.KNOWN_TOXICITY_SMILES)
+    assert payload['toxicity_bridge_conflicting_structures_excluded'] == (
+        main.TOXICITY_BRIDGE_SUMMARY['excluded_conflicting_structures']
+    )
 
 
 def test_ready_endpoint_requires_the_toxicity_bridge():
