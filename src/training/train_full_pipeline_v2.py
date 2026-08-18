@@ -21,7 +21,7 @@ sys.path.append(os.path.join(DRIVE_BASE, 'pxddi/src'))
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import roc_curve, auc, precision_recall_curve, confusion_matrix, matthews_corrcoef
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, confusion_matrix, matthews_corrcoef, roc_auc_score, f1_score
 from torch_geometric.data import Batch, Dataset
 from torch_geometric.loader import DataLoader
 
@@ -262,8 +262,23 @@ if __name__ == "__main__":
         labels, preds = get_preds_labels(model, val_loader)
         
         if len(set(labels)) > 1:
-            from sklearn.metrics import roc_auc_score
             val_auroc = roc_auc_score(labels, preds)
+            
+            # Restore rich printout
+            pos_count = int(sum(labels))
+            neg_count = len(labels) - pos_count
+            
+            pred_labels_05 = [1 if p > 0.5 else 0 for p in preds]
+            f1_05 = f1_score(labels, pred_labels_05, zero_division=0)
+            
+            fpr, tpr, thresholds = roc_curve(labels, preds)
+            optimal_thresh = thresholds[(tpr - fpr).argmax()]
+            pred_labels_opt = [1 if p > optimal_thresh else 0 for p in preds]
+            f1_opt = f1_score(labels, pred_labels_opt, zero_division=0)
+            
+            print(f"  [validation] set size: {len(labels)} (pos={pos_count}, neg={neg_count})")
+            print(f"  [validation] AUROC: {val_auroc:.4f} | F1 (0.5 threshold): {f1_05:.4f} | F1 (optimal {optimal_thresh:.3f}): {f1_opt:.4f}")
+            
             history['epoch'].append(epoch + 1)
             history['loss'].append(loss)
             history['auroc'].append(val_auroc)
