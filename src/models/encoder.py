@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch_geometric.nn import GATConv, global_mean_pool
+from torch_geometric.nn import GATConv, GATv2Conv, global_mean_pool
 
 class MolecularEncoder(nn.Module):
     def __init__(self, in_channels, hidden_channels=64, heads=2):
@@ -10,6 +10,29 @@ class MolecularEncoder(nn.Module):
     def forward(self, x, edge_index, batch):
         x = self.gat1(x, edge_index).relu()
         x = self.gat2(x, edge_index).relu()
+        return global_mean_pool(x, batch)
+
+
+class EdgeAwareMolecularEncoder(nn.Module):
+    """GATv2 encoder that consumes bond order, stereo, and ring edge features."""
+    def __init__(self, in_channels, edge_channels, hidden_channels=64, heads=2):
+        super().__init__()
+        self.gat1 = GATv2Conv(
+            in_channels,
+            hidden_channels,
+            heads=heads,
+            edge_dim=edge_channels,
+        )
+        self.gat2 = GATv2Conv(
+            hidden_channels * heads,
+            hidden_channels,
+            heads=1,
+            edge_dim=edge_channels,
+        )
+
+    def forward(self, x, edge_index, edge_attr, batch):
+        x = self.gat1(x, edge_index, edge_attr).relu()
+        x = self.gat2(x, edge_index, edge_attr).relu()
         return global_mean_pool(x, batch)
 
 class MolecularEncoderChemBERTa(nn.Module):

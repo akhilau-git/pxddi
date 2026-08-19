@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import platform
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,7 @@ import numpy as np
 import pandas as pd
 import torch
 from matplotlib import pyplot as plt
+from sklearn.calibration import calibration_curve
 from sklearn.metrics import (
     average_precision_score,
     brier_score_loss,
@@ -50,10 +52,27 @@ DRIVE_SRC = DRIVE_BASE / 'pxddi' / 'src'
 if DRIVE_SRC.exists() and str(DRIVE_SRC) not in sys.path:
     sys.path.insert(0, str(DRIVE_SRC))
 
-from data_prep.prepare_twosides import NUM_ATOM_FEATURES, smiles_to_graph
+from data_prep.prepare_twosides import (
+    FEATURE_SCHEMA_LEGACY,
+    FEATURE_SCHEMA_RICH,
+    LEGACY_NUM_ATOM_FEATURES,
+    NUM_BOND_FEATURES,
+    RICH_NUM_ATOM_FEATURES,
+    graph_compatibility_reason as source_graph_compatibility_reason,
+    smiles_to_graph,
+)
 from data_prep.pubchem_bridge import canonicalize, resolve_toxicity_bridge
 from data_prep.splits import build_binary_pair_dataset, create_splits, deduplicate_unordered_pairs
-from models.ddi_model import PxDDIModel
+from models.ddi_model import (
+    MODEL_ARCHITECTURE_EDGE_AWARE,
+    MODEL_ARCHITECTURE_LEGACY,
+    PxDDIModel,
+)
+from models.calibration import (
+    apply_calibrator,
+    expected_calibration_error,
+    fit_platt_calibrator,
+)
 
 
 def _positive_int_from_environment(name: str, default: int) -> int:
@@ -63,18 +82,61 @@ def _positive_int_from_environment(name: str, default: int) -> int:
     return value
 
 
+def _boolean_from_environment(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {'1', 'true', 'yes'}:
+        return True
+    if normalized in {'0', 'false', 'no'}:
+        return False
+    raise ValueError(f'{name} must be one of true/false, yes/no, or 1/0.')
+
+
 SEED = _positive_int_from_environment('PXDDI_SEED', 42)
 DATA_CAP = _positive_int_from_environment('PXDDI_DATA_CAP', 200000)
 EPOCHS = _positive_int_from_environment('PXDDI_EPOCHS', 200)
 HIDDEN_CHANNELS = _positive_int_from_environment('PXDDI_HIDDEN_CHANNELS', 128)
 BATCH_SIZE = _positive_int_from_environment('PXDDI_BATCH_SIZE', 128)
 USE_CHEMBERTA = False
+MODEL_ARCHITECTURE = os.environ.get(
+    'PXDDI_MODEL_ARCHITECTURE', MODEL_ARCHITECTURE_EDGE_AWARE
+)
+if MODEL_ARCHITECTURE not in {MODEL_ARCHITECTURE_LEGACY, MODEL_ARCHITECTURE_EDGE_AWARE}:
+    raise ValueError(f'Unsupported PXDDI_MODEL_ARCHITECTURE: {MODEL_ARCHITECTURE}.')
+FEATURE_SCHEMA = (
+    FEATURE_SCHEMA_RICH
+    if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE
+    else FEATURE_SCHEMA_LEGACY
+)
+INPUT_FEATURE_DIM = (
+    RICH_NUM_ATOM_FEATURES
+    if FEATURE_SCHEMA == FEATURE_SCHEMA_RICH
+    else LEGACY_NUM_ATOM_FEATURES
+)
+USE_TOXICITY_PAIR_FEATURES = _boolean_from_environment(
+    'PXDDI_USE_TOXICITY_PAIR_FEATURES', True
+)
+TOXICITY_LOSS_WEIGHT = float(os.environ.get('PXDDI_TOXICITY_LOSS_WEIGHT', '0.3'))
+if TOXICITY_LOSS_WEIGHT < 0:
+    raise ValueError('PXDDI_TOXICITY_LOSS_WEIGHT must be non-negative.')
 
 TWOSIDES_EDGES = DRIVE_BASE / 'twosides' / 'drug_drug_edges.csv'
 TOXICITY_BRIDGE = DRIVE_BASE / 'checkpoints' / 'toxicity_smiles_bridge.csv'
-CHECKPOINT_PATH = DRIVE_BASE / 'checkpoints' / 'pxddi_model.pt'
+DEFAULT_CHECKPOINT_PATH = (
+    DRIVE_BASE / 'checkpoints' / 'candidates' / 'pxddi_edge_aware_candidate.pt'
+    if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE
+    else DRIVE_BASE / 'checkpoints' / 'pxddi_model.pt'
+)
+CHECKPOINT_PATH = Path(os.environ.get('PXDDI_CHECKPOINT_PATH', DEFAULT_CHECKPOINT_PATH))
 RUN_ID = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-RUN_ARTIFACTS_DIR = DRIVE_BASE / 'artifacts' / f'run_{RUN_ID}'
+ARTIFACTS_BASE = Path(os.environ.get('PXDDI_ARTIFACTS_BASE', DRIVE_BASE / 'artifacts'))
+RUN_ARTIFACTS_DIR = ARTIFACTS_BASE / f'run_{RUN_ID}'
+LATEST_RESULTS_DIR = Path(
+    os.environ.get('PXDDI_LATEST_RESULTS_DIR', DRIVE_BASE / 'latest_results')
+)
+PUBLISH_LATEST_RESULTS = _boolean_from_environment('PXDDI_PUBLISH_LATEST_RESULTS', True)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -217,6 +279,14 @@ def build_run_manifest() -> dict[str, Any]:
             'hidden_channels': HIDDEN_CHANNELS,
             'batch_size': BATCH_SIZE,
             'use_chemberta': USE_CHEMBERTA,
+            'model_architecture': MODEL_ARCHITECTURE,
+            'feature_schema': FEATURE_SCHEMA,
+            'use_toxicity_pair_features': USE_TOXICITY_PAIR_FEATURES,
+            'toxicity_loss_weight': TOXICITY_LOSS_WEIGHT,
+            'edge_feature_dim': (
+                NUM_BOND_FEATURES
+                if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE else None
+            ),
             'negative_label_meaning': 'unreported_twosides_sampled',
             'toxicity_conflict_policy': 'exclude_conflicting_structures',
         },
@@ -259,11 +329,66 @@ def save_training_history(history: dict[str, list[float]], artifact_dir: Path) -
     }
 
 
+def publish_latest_results(
+    run_artifacts_dir: Path,
+    latest_results_dir: Path = LATEST_RESULTS_DIR,
+) -> Path:
+    """Refresh one easy-to-find latest-results folder after a completed run.
+
+    Timestamped run folders remain immutable evidence. This lightweight mirror
+    deliberately overwrites only the current figures and summary files, so a
+    Colab user can always open one stable folder for the latest output.
+    """
+    run_dir = Path(run_artifacts_dir)
+    latest_dir = Path(latest_results_dir)
+    required_files = (
+        Path('run_manifest_initial.json'),
+        Path('run_manifest.json'),
+        Path('results_summary.json'),
+        Path('training_history.csv'),
+        Path('audits/toxicity_bridge_conflicts.csv'),
+        Path('audits/toxicity_bridge_summary.json'),
+        Path('audits/invalid_smiles_exclusions.csv'),
+        Path('audits/input_quality_summary.json'),
+        Path('audits/dataset_summary.json'),
+        Path('audits/counterion_curation_candidates.csv'),
+    )
+    missing = [str(relative) for relative in required_files if not (run_dir / relative).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f'Cannot publish incomplete run artifacts; missing: {missing}.'
+        )
+
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    copied_files: list[str] = []
+    for relative in required_files:
+        source = run_dir / relative
+        destination = latest_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        copied_files.append(str(relative))
+
+    figure_dir = run_dir / 'figures'
+    for source in sorted(figure_dir.rglob('*')):
+        if source.is_file():
+            relative = source.relative_to(run_dir)
+            destination = latest_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            copied_files.append(str(relative))
+
+    write_json(latest_dir / 'latest_run.json', {
+        'source_run_directory': str(run_dir),
+        'source_run_id': run_dir.name,
+        'refreshed_at_utc': datetime.now(timezone.utc).isoformat(),
+        'mirrored_files': copied_files,
+    })
+    return latest_dir
+
+
 def graph_compatibility_reason(smiles: Any) -> str | None:
-    """Use the production graph builder to identify unusable molecular inputs."""
-    if not isinstance(smiles, str) or not smiles.strip():
-        return 'missing_or_non_string_smiles'
-    return None if smiles_to_graph(smiles) is not None else 'invalid_or_single_atom_smiles'
+    """Use the shared molecular parser to identify unusable training inputs."""
+    return source_graph_compatibility_reason(smiles)
 
 
 def filter_graph_compatible_pairs(
@@ -298,6 +423,56 @@ def filter_graph_compatible_pairs(
     return clean, pd.DataFrame(exclusions, columns=audit_columns)
 
 
+def save_counterion_curation_candidates(exclusions: pd.DataFrame, audit_dir: Path) -> dict[str, Any]:
+    """Create a review queue; never guess a parent drug for an isolated ion."""
+    counterion_columns = ['source_graph_status', 'target_graph_status']
+    candidates: list[dict[str, Any]] = []
+    for side in ('source', 'target'):
+        status_column = f'{side}_graph_status'
+        if status_column not in exclusions:
+            continue
+        subset = exclusions[
+            exclusions[status_column] == 'counterion_or_inorganic_only_structure'
+        ]
+        for structure, count in subset[side].value_counts().items():
+            candidates.append({
+                'raw_structure': structure,
+                'occurrence_count': int(count),
+                'observed_as': side,
+                'audit_reason': 'counterion_or_inorganic_only_structure',
+                'recommended_action': 'exclude_until_authoritative_parent_drug_mapping_is_reviewed',
+                'curation_decision': 'pending_manual_review',
+                'authoritative_source': '',
+                'approved_parent_smiles': '',
+                'review_notes': '',
+            })
+    candidate_columns = [
+        'raw_structure',
+        'occurrence_count',
+        'observed_as',
+        'audit_reason',
+        'recommended_action',
+        'curation_decision',
+        'authoritative_source',
+        'approved_parent_smiles',
+        'review_notes',
+    ]
+    candidates_path = audit_dir / 'counterion_curation_candidates.csv'
+    pd.DataFrame(candidates, columns=candidate_columns).to_csv(candidates_path, index=False)
+    return {
+        'counterion_only_pair_exclusions': int(
+            (
+                exclusions[counterion_columns]
+                == 'counterion_or_inorganic_only_structure'
+            ).any(axis=1).sum()
+        ) if not exclusions.empty else 0,
+        'unique_counterion_or_inorganic_structures': int(len(candidates)),
+        'curation_candidates_path': str(candidates_path),
+        'curation_candidates_sha256': get_file_hash(candidates_path),
+        'automatic_parent_mapping_applied': False,
+    }
+
+
 def load_toxicity_lookup(audit_dir: Path) -> tuple[dict[str, float], dict[str, Any]]:
     """Save toxicity conflicts to the current run and return clean labels only."""
     bridge = pd.read_csv(TOXICITY_BRIDGE)
@@ -320,6 +495,37 @@ def load_toxicity_lookup(audit_dir: Path) -> tuple[dict[str, float], dict[str, A
     return dict(zip(resolved['canonical_smiles'], resolved['toxicity_score'])), summary
 
 
+class GraphCache:
+    """Reuse immutable SMILES graphs across train/validation/test loaders."""
+    def __init__(self, feature_schema: str) -> None:
+        self.feature_schema = feature_schema
+        self._graphs: dict[str, Any] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, smiles: str):
+        key = smiles.strip() if isinstance(smiles, str) else str(smiles)
+        if key in self._graphs:
+            self.hits += 1
+            graph = self._graphs[key]
+        else:
+            self.misses += 1
+            graph = smiles_to_graph(key, feature_schema=self.feature_schema)
+            self._graphs[key] = graph
+        return graph.clone() if graph is not None else None
+
+    def summary(self) -> dict[str, Any]:
+        requests = self.hits + self.misses
+        return {
+            'feature_schema': self.feature_schema,
+            'unique_smiles_cached': len(self._graphs),
+            'graph_requests': requests,
+            'cache_hits': self.hits,
+            'cache_misses': self.misses,
+            'cache_hit_rate': self.hits / requests if requests else None,
+        }
+
+
 class PxDDIDataset(Dataset):
     """Graph pairs plus provenance retained for later prediction artifacts."""
 
@@ -330,17 +536,19 @@ class PxDDIDataset(Dataset):
         source_col: str = 'source',
         target_col: str = 'target',
         label_col: str = 'label',
+        graph_cache: GraphCache | None = None,
     ) -> None:
         super().__init__()
         self.records = []
         self.metadata: list[dict[str, Any]] = []
         self.skipped_count = 0
+        self.graph_cache = graph_cache or GraphCache(FEATURE_SCHEMA)
         for row in dataframe.itertuples(index=False):
             source = getattr(row, source_col)
             target = getattr(row, target_col)
             label = float(getattr(row, label_col))
-            graph_a = smiles_to_graph(source)
-            graph_b = smiles_to_graph(target)
+            graph_a = self.graph_cache.get(source)
+            graph_b = self.graph_cache.get(target)
             if graph_a is None or graph_b is None:
                 self.skipped_count += 1
                 continue
@@ -400,8 +608,9 @@ def build_loader(
     toxicity_lookup: dict[str, float],
     batch_size: int = BATCH_SIZE,
     shuffle: bool = True,
+    graph_cache: GraphCache | None = None,
 ) -> DataLoader:
-    dataset = PxDDIDataset(dataframe, toxicity_lookup)
+    dataset = PxDDIDataset(dataframe, toxicity_lookup, graph_cache=graph_cache)
     generator = torch.Generator()
     generator.manual_seed(SEED)
     return DataLoader(
@@ -413,7 +622,17 @@ def build_loader(
     )
 
 
-def multi_task_loss(risk_prediction, toxicity_a_prediction, toxicity_b_prediction, risk_label, toxicity_a_label, toxicity_b_label, toxicity_a_known, toxicity_b_known):
+def multi_task_loss(
+    risk_prediction,
+    toxicity_a_prediction,
+    toxicity_b_prediction,
+    risk_label,
+    toxicity_a_label,
+    toxicity_b_label,
+    toxicity_a_known,
+    toxicity_b_known,
+    toxicity_loss_weight: float = TOXICITY_LOSS_WEIGHT,
+):
     binary_cross_entropy = torch.nn.BCEWithLogitsLoss(reduction='none')
     ddi_loss = binary_cross_entropy(risk_prediction, risk_label).mean()
     toxicity_a_loss = (
@@ -422,7 +641,7 @@ def multi_task_loss(risk_prediction, toxicity_a_prediction, toxicity_b_predictio
     toxicity_b_loss = (
         binary_cross_entropy(toxicity_b_prediction, toxicity_b_label) * toxicity_b_known
     ).sum() / (toxicity_b_known.sum() + 1e-8)
-    return ddi_loss + 0.3 * (toxicity_a_loss + toxicity_b_loss)
+    return ddi_loss + toxicity_loss_weight * (toxicity_a_loss + toxicity_b_loss)
 
 
 def train_one_epoch(model, loader, optimizer, scaler) -> float:
@@ -483,8 +702,13 @@ def calculate_metrics(
     labels: np.ndarray,
     predictions: np.ndarray,
     threshold: float,
+    raw_predictions: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Calculate metrics without pretending a one-class split is evaluable."""
+    """Calculate ranking, decision, and calibration metrics for one split."""
+    if raw_predictions is None:
+        raw_predictions = predictions
+    if len(raw_predictions) != len(predictions):
+        raise ValueError('Raw and final predictions must have equal length.')
     predicted_labels = (predictions >= threshold).astype(int)
     matrix = confusion_matrix(labels, predicted_labels, labels=[0, 1])
     true_negative, false_positive, false_negative, true_positive = matrix.ravel()
@@ -501,7 +725,10 @@ def calculate_metrics(
         if true_negative + false_positive else None,
         'mcc': float(matthews_corrcoef(labels, predicted_labels))
         if len(np.unique(labels)) > 1 else None,
-        'brier_score_uncalibrated': float(brier_score_loss(labels, predictions)) if len(labels) else None,
+        'brier_score_raw': float(brier_score_loss(labels, raw_predictions)) if len(labels) else None,
+        'brier_score_calibrated': float(brier_score_loss(labels, predictions)) if len(labels) else None,
+        'ece_raw': expected_calibration_error(labels, raw_predictions),
+        'ece_calibrated': expected_calibration_error(labels, predictions),
     }
     if len(np.unique(labels)) < 2:
         result.update({
@@ -522,18 +749,24 @@ def save_prediction_artifact(
     name: str,
     loader: DataLoader,
     labels: np.ndarray,
-    predictions: np.ndarray,
+    raw_predictions: np.ndarray,
+    calibrated_predictions: np.ndarray,
     threshold: float,
     prediction_dir: Path,
+    calibration: dict[str, Any],
 ) -> Path:
     metadata = loader.dataset.metadata
     if len(metadata) != len(labels):
         raise RuntimeError('Prediction provenance does not match the evaluated dataset.')
     table = pd.DataFrame(metadata)
     table['label'] = labels
-    table['prediction_score'] = predictions
+    table['raw_prediction_score'] = raw_predictions
+    table['calibrated_prediction_score'] = calibrated_predictions
+    table['prediction_score'] = calibrated_predictions
+    table['calibration_status'] = calibration.get('status', 'not_fitted')
+    table['calibration_method'] = calibration.get('method')
     table['threshold'] = threshold
-    table['predicted_label'] = (predictions >= threshold).astype(int)
+    table['predicted_label'] = (calibrated_predictions >= threshold).astype(int)
     prediction_path = prediction_dir / f'{name.lower().replace(" ", "_")}_predictions.csv'
     table.to_csv(prediction_path, index=False)
     return prediction_path
@@ -565,8 +798,9 @@ def plot_evaluation(
     predictions: np.ndarray,
     metrics: dict[str, Any],
     figure_dir: Path,
+    raw_predictions: np.ndarray | None = None,
 ) -> None:
-    figure, axes = plt.subplots(1, 3, figsize=(17, 4.8))
+    figure, axes = plt.subplots(1, 4, figsize=(22, 4.8))
     if metrics['status'] == 'evaluated':
         false_positive_rate, true_positive_rate, _ = roc_curve(labels, predictions)
         precision, recall, _ = precision_recall_curve(labels, predictions)
@@ -583,7 +817,7 @@ def plot_evaluation(
         )
     else:
         message = 'Skipped: split has fewer than two classes.'
-        for axis in axes[:2]:
+        for axis in axes[:3]:
             axis.text(0.5, 0.5, message, ha='center', va='center', wrap=True)
             axis.set_axis_off()
 
@@ -599,6 +833,32 @@ def plot_evaluation(
         xticklabels=['Unreported', 'Reported'], yticklabels=['Unreported', 'Reported'],
     )
     figure.colorbar(image, ax=axes[2], fraction=0.046, pad=0.04)
+    if metrics['status'] == 'evaluated':
+        fraction_positive, mean_predicted = calibration_curve(labels, predictions, n_bins=10)
+        axes[3].plot(mean_predicted, fraction_positive, marker='o', label='Final score')
+        if raw_predictions is not None:
+            raw_fraction_positive, raw_mean_predicted = calibration_curve(
+                labels, raw_predictions, n_bins=10
+            )
+            axes[3].plot(
+                raw_mean_predicted,
+                raw_fraction_positive,
+                marker='o',
+                linestyle='--',
+                label='Raw score',
+            )
+        axes[3].plot([0, 1], [0, 1], linestyle=':', color='#777777', label='Ideal')
+        axes[3].set(
+            title=f'{name}: calibration',
+            xlabel='Mean predicted score',
+            ylabel='Observed reported-pair fraction',
+            xlim=(0, 1),
+            ylim=(0, 1),
+        )
+        axes[3].legend()
+        axes[3].grid(alpha=0.25)
+    else:
+        axes[3].set_axis_off()
     figure.tight_layout()
     _save_figure(figure, figure_dir / f'{name.lower().replace(" ", "_")}_evaluation')
 
@@ -649,10 +909,21 @@ def model_summary(model: PxDDIModel) -> dict[str, Any]:
     return {
         'model_class': model.__class__.__name__,
         'encoder_class': model.encoder.__class__.__name__,
-        'input_atom_features': NUM_ATOM_FEATURES,
+        'model_architecture': MODEL_ARCHITECTURE,
+        'feature_schema': FEATURE_SCHEMA,
+        'input_atom_features': INPUT_FEATURE_DIM,
+        'edge_feature_dim': (
+            NUM_BOND_FEATURES
+            if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE else None
+        ),
         'hidden_channels': HIDDEN_CHANNELS,
         'use_chemberta': USE_CHEMBERTA,
-        'pair_representation': 'embedding_sum + absolute_embedding_difference + toxicity_sum + absolute_toxicity_difference',
+        'pair_representation': (
+            'embedding_sum + absolute_embedding_difference + toxicity_sum + absolute_toxicity_difference'
+            if USE_TOXICITY_PAIR_FEATURES
+            else 'embedding_sum + absolute_embedding_difference'
+        ),
+        'use_toxicity_pair_features': USE_TOXICITY_PAIR_FEATURES,
         'output_heads': ['interaction_risk', 'drug_a_toxicity', 'drug_b_toxicity'],
         'total_parameters': int(total_parameters),
         'trainable_parameters': int(trainable_parameters),
@@ -675,6 +946,7 @@ def _prepare_positive_edges(audit_dir: Path) -> tuple[pd.DataFrame, dict[str, An
 
     exclusions_path = audit_dir / 'invalid_smiles_exclusions.csv'
     exclusions.to_csv(exclusions_path, index=False)
+    curation_summary = save_counterion_curation_candidates(exclusions, audit_dir)
     sampled = clean_positives.sample(
         n=min(DATA_CAP, len(clean_positives)), random_state=SEED
     ).reset_index(drop=True)
@@ -686,6 +958,7 @@ def _prepare_positive_edges(audit_dir: Path) -> tuple[pd.DataFrame, dict[str, An
         'data_cap': DATA_CAP,
         'exclusion_audit_path': str(exclusions_path),
         'exclusion_audit_sha256': get_file_hash(exclusions_path),
+        'counterion_curation': curation_summary,
     }
     write_json(audit_dir / 'input_quality_summary.json', summary)
     print(
@@ -730,12 +1003,23 @@ def main() -> None:
     )
     split_manifest = save_split_manifests(splits, RUN_ARTIFACTS_DIR)
 
-    train_loader = build_loader(splits['transductive_train'], toxicity_lookup, shuffle=True)
-    validation_loader = build_loader(splits['validation'], toxicity_lookup, shuffle=False)
+    graph_cache = GraphCache(FEATURE_SCHEMA)
+    train_loader = build_loader(
+        splits['transductive_train'], toxicity_lookup, shuffle=True, graph_cache=graph_cache
+    )
+    validation_loader = build_loader(
+        splits['validation'], toxicity_lookup, shuffle=False, graph_cache=graph_cache
+    )
     test_loaders = {
-        'Transductive': build_loader(splits['transductive_test'], toxicity_lookup, shuffle=False),
-        'S1': build_loader(splits['s1_test'], toxicity_lookup, shuffle=False),
-        'S2': build_loader(splits['s2_test'], toxicity_lookup, shuffle=False),
+        'Transductive': build_loader(
+            splits['transductive_test'], toxicity_lookup, shuffle=False, graph_cache=graph_cache
+        ),
+        'S1': build_loader(
+            splits['s1_test'], toxicity_lookup, shuffle=False, graph_cache=graph_cache
+        ),
+        'S2': build_loader(
+            splits['s2_test'], toxicity_lookup, shuffle=False, graph_cache=graph_cache
+        ),
     }
     all_loaders = {'train': train_loader, 'validation': validation_loader, **test_loaders}
     unexpected_skips = {
@@ -753,9 +1037,15 @@ def main() -> None:
         raise ValueError('Validation split is unusable after SMILES validation; adjust the data split.')
 
     model = PxDDIModel(
-        in_channels=NUM_ATOM_FEATURES,
+        in_channels=INPUT_FEATURE_DIM,
         hidden_channels=HIDDEN_CHANNELS,
         use_chemberta=USE_CHEMBERTA,
+        architecture_version=MODEL_ARCHITECTURE,
+        edge_feature_dim=(
+            NUM_BOND_FEATURES
+            if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE else None
+        ),
+        use_toxicity_pair_features=USE_TOXICITY_PAIR_FEATURES,
     ).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
@@ -796,7 +1086,15 @@ def main() -> None:
                 {
                     'model_state_dict': model.state_dict(),
                     'hidden_channels': HIDDEN_CHANNELS,
-                    'in_channels': NUM_ATOM_FEATURES,
+                    'in_channels': INPUT_FEATURE_DIM,
+                    'architecture_version': MODEL_ARCHITECTURE,
+                    'feature_schema': FEATURE_SCHEMA,
+                    'edge_feature_dim': (
+                        NUM_BOND_FEATURES
+                        if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE else None
+                    ),
+                    'use_toxicity_pair_features': USE_TOXICITY_PAIR_FEATURES,
+                    'toxicity_loss_weight': TOXICITY_LOSS_WEIGHT,
                     'use_chemberta': USE_CHEMBERTA,
                     'auroc': float(best_auroc),
                     'epoch': epoch,
@@ -809,30 +1107,52 @@ def main() -> None:
 
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
-    validation_true, validation_predicted = collect_predictions(model, validation_loader)
-    saved_threshold = checkpoint.get('threshold')
-    frozen_threshold = float(
-        saved_threshold
-        if saved_threshold is not None
-        else select_validation_threshold(validation_true, validation_predicted)
+    validation_true, validation_raw_predictions = collect_predictions(model, validation_loader)
+    calibration = fit_platt_calibrator(validation_true, validation_raw_predictions)
+    validation_calibrated_predictions = apply_calibrator(
+        validation_raw_predictions, calibration
+    )
+    frozen_threshold = select_validation_threshold(
+        validation_true, validation_calibrated_predictions
     )
     checkpoint['threshold'] = frozen_threshold
+    checkpoint['calibration'] = calibration
     checkpoint_hash = safe_checkpoint_save(checkpoint, CHECKPOINT_PATH)
 
     plot_training_curves(history, figure_dir)
     history_summary = save_training_history(history, RUN_ARTIFACTS_DIR)
     results: dict[str, dict[str, Any]] = {}
     for name, loader in test_loaders.items():
-        labels, predictions = collect_predictions(model, loader)
-        metrics = calculate_metrics(labels, predictions, frozen_threshold)
+        labels, raw_predictions = collect_predictions(model, loader)
+        calibrated_predictions = apply_calibrator(raw_predictions, calibration)
+        metrics = calculate_metrics(
+            labels,
+            calibrated_predictions,
+            frozen_threshold,
+            raw_predictions=raw_predictions,
+        )
         prediction_path = save_prediction_artifact(
-            name, loader, labels, predictions, frozen_threshold, prediction_dir
+            name,
+            loader,
+            labels,
+            raw_predictions,
+            calibrated_predictions,
+            frozen_threshold,
+            prediction_dir,
+            calibration,
         )
         metrics['prediction_path'] = str(prediction_path)
         metrics['prediction_sha256'] = get_file_hash(prediction_path)
         metrics['skipped_invalid_smiles'] = int(loader.dataset.skipped_count)
         results[name] = metrics
-        plot_evaluation(name, labels, predictions, metrics, figure_dir)
+        plot_evaluation(
+            name,
+            labels,
+            calibrated_predictions,
+            metrics,
+            figure_dir,
+            raw_predictions=raw_predictions,
+        )
     plot_benchmark_comparison(results, figure_dir)
     plot_toxicity_bridge_coverage(toxicity_summary, figure_dir)
     write_json(RUN_ARTIFACTS_DIR / 'results_summary.json', results)
@@ -846,16 +1166,22 @@ def main() -> None:
             'validation_auroc': checkpoint['auroc'],
             'validation_selected_threshold': frozen_threshold,
         },
+        'calibration': calibration,
         'model_summary': model_summary(model),
         'training_history': history_summary,
         'toxicity_bridge': toxicity_summary,
         'input_quality': input_quality_summary,
         'dataset': dataset_summary,
+        'graph_cache': graph_cache.summary(),
         'split_manifest': split_manifest,
         'results': results,
+        'latest_results_directory': str(LATEST_RESULTS_DIR) if PUBLISH_LATEST_RESULTS else None,
     })
     write_json(RUN_ARTIFACTS_DIR / 'run_manifest.json', manifest)
     print(f'Run artifacts saved to: {RUN_ARTIFACTS_DIR}')
+    if PUBLISH_LATEST_RESULTS:
+        latest_results_dir = publish_latest_results(RUN_ARTIFACTS_DIR)
+        print(f'Latest results refreshed at: {latest_results_dir}')
 
 
 if __name__ == '__main__':

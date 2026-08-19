@@ -20,7 +20,9 @@ with patch('torch.cuda.is_available', return_value=True):
         calculate_metrics,
         filter_graph_compatible_pairs,
         get_file_hash,
+        publish_latest_results,
         runtime_environment,
+        save_counterion_curation_candidates,
         safe_checkpoint_save,
         select_validation_threshold,
     )
@@ -94,9 +96,11 @@ def test_graph_incompatible_pairs_are_removed_before_splitting_with_an_audit():
     assert clean.iloc[0]['source'] == 'CCO'
     assert len(exclusions) == 2
     assert set(exclusions['dataset_row_index']) == {'1', '2'}
-    assert 'invalid_or_single_atom_smiles' in set(exclusions['source_graph_status']).union(
+    statuses = set(exclusions['source_graph_status']).union(
         set(exclusions['target_graph_status'])
     )
+    assert 'single_atom_or_disconnected_structure' in statuses
+    assert 'invalid_smiles' in statuses
 
 
 def test_runtime_environment_records_resolved_dependency_versions():
@@ -105,3 +109,53 @@ def test_runtime_environment_records_resolved_dependency_versions():
     assert environment['python_version']
     assert 'torch' in environment['package_versions']
     assert 'torch_geometric' in environment['package_versions']
+
+
+def test_publish_latest_results_overwrites_the_easy_to_find_result_copy(tmp_path):
+    run_dir = tmp_path / 'run_1'
+    audit_dir = run_dir / 'audits'
+    figure_dir = run_dir / 'figures'
+    audit_dir.mkdir(parents=True)
+    figure_dir.mkdir()
+    for relative in (
+        'run_manifest_initial.json',
+        'run_manifest.json',
+        'results_summary.json',
+        'training_history.csv',
+        'audits/toxicity_bridge_conflicts.csv',
+        'audits/toxicity_bridge_summary.json',
+        'audits/invalid_smiles_exclusions.csv',
+        'audits/input_quality_summary.json',
+        'audits/dataset_summary.json',
+        'audits/counterion_curation_candidates.csv',
+    ):
+        path = run_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'first:{relative}', encoding='utf-8')
+    (figure_dir / 'training_curves.png').write_bytes(b'first figure')
+
+    latest_dir = tmp_path / 'latest_results'
+    publish_latest_results(run_dir, latest_dir)
+
+    assert (latest_dir / 'figures/training_curves.png').read_bytes() == b'first figure'
+    (figure_dir / 'training_curves.png').write_bytes(b'new figure')
+    publish_latest_results(run_dir, latest_dir)
+
+    assert (latest_dir / 'figures/training_curves.png').read_bytes() == b'new figure'
+    assert (latest_dir / 'latest_run.json').is_file()
+
+
+def test_counterion_curation_queue_requires_manual_review(tmp_path):
+    exclusions = pd.DataFrame({
+        'source': ['[Na+].[Cl-]', 'CCO'],
+        'target': ['CCN', '[Ca+2]'],
+        'source_graph_status': ['counterion_or_inorganic_only_structure', 'graph_compatible'],
+        'target_graph_status': ['graph_compatible', 'counterion_or_inorganic_only_structure'],
+    })
+
+    summary = save_counterion_curation_candidates(exclusions, tmp_path)
+    candidates = pd.read_csv(tmp_path / 'counterion_curation_candidates.csv')
+
+    assert summary['automatic_parent_mapping_applied'] is False
+    assert summary['unique_counterion_or_inorganic_structures'] == 2
+    assert set(candidates['curation_decision']) == {'pending_manual_review'}

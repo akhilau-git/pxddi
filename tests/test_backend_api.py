@@ -84,6 +84,8 @@ def test_prediction_reports_label_coverage_and_disabled_patient_context():
     payload = response.json()
     assert payload['patient_context_applied'] is False
     assert 'uncalibrated' in payload['interaction_risk_note']
+    assert 'not evidence that the pair is safe' in payload['interaction_label_note']
+    assert payload['score_calibration']['status'] == 'uncalibrated'
     assert payload['drug_a_toxicity']['known'] is True
     assert payload['drug_a_toxicity']['training_label_available'] is True
     assert 'FAERS-derived' in payload['drug_a_toxicity']['coverage_note']

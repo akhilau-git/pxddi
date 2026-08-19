@@ -71,6 +71,11 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Run outputs and local checkpoint backups live in Drive/local storage, not Git.
+backend/artifacts/
+backend/checkpoints/*_before_*.pt
+backend/checkpoints/*_run_*.pt
+
 # IDE / Editor
 .idea/
 .vscode/

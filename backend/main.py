@@ -19,7 +19,8 @@ SRC_PATH = BACKEND_DIR.parent / 'src'
 if str(SRC_PATH) not in sys.path:
     sys.path.append(str(SRC_PATH))
 
-from models.ddi_model import PxDDIModel
+from models.ddi_model import model_from_checkpoint
+from models.calibration import apply_calibrator
 from models.explainability import full_explanation_pipeline
 from data_prep.prepare_twosides import smiles_to_graph
 
@@ -86,15 +87,12 @@ app.add_middleware(
 CHECKPOINT_PATH = BACKEND_DIR / 'checkpoints' / 'pxddi_model.pt'
 # Checkpoint metadata contains only safe built-in types and tensors.
 checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=True)
-model = PxDDIModel(
-    in_channels=checkpoint['in_channels'],
-    hidden_channels=checkpoint['hidden_channels'],
-    use_chemberta=checkpoint.get('use_chemberta', False),
-)
+model = model_from_checkpoint(checkpoint)
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
 
 DECISION_THRESHOLD = float(checkpoint.get('threshold', 0.5))
+CALIBRATION = checkpoint.get('calibration')
 CHECKPOINT_SHA256 = file_sha256(CHECKPOINT_PATH)
 EXPLANATION_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_EXPLANATIONS)
 
@@ -184,6 +182,26 @@ def toxicity_response(smiles: str, score: float):
     }
 
 
+def risk_calibration_response() -> dict:
+    """Describe whether the loaded checkpoint supplies a saved calibration map."""
+    if CALIBRATION and CALIBRATION.get('status') == 'fitted':
+        return {
+            'status': 'internally_calibrated',
+            'method': CALIBRATION.get('method'),
+            'fitted_on': CALIBRATION.get('fitted_on'),
+            'note': (
+                'Calibration was fitted on the internal validation split only. It is not '
+                'evidence of calibrated cold-start, external, or clinical performance.'
+            ),
+        }
+    return {
+        'status': 'uncalibrated',
+        'method': None,
+        'fitted_on': None,
+        'note': 'This checkpoint is uncalibrated; no saved calibration map is available.',
+    }
+
+
 def readiness_error() -> str | None:
     """Return a readiness failure when required toxicity-coverage data is unavailable."""
     if KNOWN_TOXICITY_SMILES:
@@ -207,13 +225,22 @@ def predict_ddi(req: DDIRequest):
     with torch.no_grad():
         risk, tox_a, tox_b = model(batch_a, batch_b, patient=None)
 
-    risk_score = float(torch.sigmoid(risk))
+    raw_risk_score = float(torch.sigmoid(risk))
+    risk_score = float(apply_calibrator([raw_risk_score], CALIBRATION)[0])
+    calibration_response = risk_calibration_response()
     return {
         'disclaimer': 'Research prototype output. Not clinical advice. Not FDA/regulatory reviewed.',
         'interaction_risk_estimate': risk_score,
+        'interaction_risk_score_raw': raw_risk_score,
         'interaction_risk_note': (
-            'This is an uncalibrated research-model estimate, not a clinical probability.'
+            'This is a research-model estimate, not a clinical probability. '
+            + calibration_response['note']
         ),
+        'interaction_label_note': (
+            'The research task distinguishes reported TWOSIDES pairs from sampled '
+            'unreported pairs. An unreported pair is not evidence that the pair is safe.'
+        ),
+        'score_calibration': calibration_response,
         'interaction_predicted': risk_score >= DECISION_THRESHOLD,
         'decision_threshold_used': DECISION_THRESHOLD,
         'patient_context_applied': False,
@@ -259,6 +286,8 @@ def health():
         'ready': bridge_error is None,
         'model_loaded': True,
         'model_type': 'GNN' if not checkpoint.get('use_chemberta', False) else 'ChemBERTa',
+        'model_architecture': checkpoint.get('architecture_version', 'legacy_gat_v1'),
+        'score_calibration_status': risk_calibration_response()['status'],
         'model_auroc': float(checkpoint.get('auroc')) if checkpoint.get('auroc') is not None else None,
         'model_epoch': int(checkpoint['epoch']) if checkpoint.get('epoch') is not None else None,
         'model_checkpoint_sha256': CHECKPOINT_SHA256,

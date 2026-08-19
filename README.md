@@ -80,6 +80,31 @@ JSON, and PNG/PDF figures. The pipeline excludes structures with conflicting
 toxicity scores rather than choosing a score by CSV row order or averaging
 them, and removes graph-incompatible SMILES before splitting.
 
+After a successful run, `latest_results/` in the Drive data folder is refreshed
+with the newest figures, manifests, summaries, training history, and audits.
+This gives one stable location for the current results; the timestamped run
+folders remain as reproducibility evidence and are not deleted automatically.
+
+### Candidate-model evaluation
+
+The deployed `backend/checkpoints/pxddi_model.pt` remains the audited legacy
+GAT checkpoint. New training defaults to an **edge-aware candidate** checkpoint
+at `checkpoints/candidates/pxddi_edge_aware_candidate.pt`; it does not replace
+the deployed model automatically. The candidate uses richer atom features and
+bond order, stereo, chirality, conjugation, aromaticity, and ring features.
+
+Run one candidate first, inspect its Transductive/S1/S2 metrics and calibration
+artifacts, then decide whether it should replace the legacy model. For a
+controlled baseline/ablation study, run
+`src/training/run_experiment_suite.py`. Its screening preset compares four
+configurations once; its paper preset repeats them over multiple seeds and
+saves seed-level bootstrap confidence intervals. Neither mode promotes a model
+automatically.
+
+External validation is supported by `src/training/evaluate_external_dataset.py`
+only after you supply an independently sourced, documented dataset and its
+provenance metadata. The repository does not download or fabricate such data.
+
 `notebooks/pxddi_training_run.ipynb` is intentionally empty in this local
 repository because the live work is done in Colab. After the next audited run,
 download and commit the executed notebook together with the configuration,
@@ -92,7 +117,9 @@ data/split manifests, logs, metrics, plots, and checkpoint hash.
 - The raw FAERS toxicity bridge covers 339 unique structures; 58 have
   conflicting source scores. The next audited training run excludes those
   conflicts, leaving 281 clean toxicity-label structures and a CSV audit file.
-- The prediction score is uncalibrated and is not a clinical probability.
+- The deployed legacy checkpoint is uncalibrated. Candidate checkpoints may
+  include validation-fitted calibration, but that is not evidence of calibrated
+  cold-start, external, or clinical performance.
 - Patient context, external validation, clinical rules, and production
   authentication are not implemented.
 

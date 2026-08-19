@@ -63,8 +63,10 @@ in a report or comparison.
    this project; the module must remain disabled.
 5. **Molecular representation:** graph features omit bond order,
    stereochemistry, chirality, and other chemical detail.
-6. **Calibration:** risk and toxicity head outputs are not clinical
-   probabilities and have not been calibrated.
+6. **Calibration:** the deployed legacy checkpoint is uncalibrated. Candidate
+   checkpoints can store a calibration mapping fitted only on the internal
+   validation split, which must not be presented as calibrated cold-start,
+   external, or clinical performance.
 7. **Validation:** no external, temporal, prospective, or clinical validation
    has been performed.
 8. **Explanation:** `/explain` attributes molecular embeddings and applies a
@@ -76,6 +78,23 @@ in a report or comparison.
 10. **Deployment:** the API has readiness checks and a non-root container, but
     actual Docker image execution, resource limits, pinned dependencies, and
     operational monitoring remain pending.
+
+## Candidate model and evaluation workflow
+
+The current deployed artifact uses the legacy 13-feature GAT schema. New
+candidate training uses an edge-aware GATv2 schema with atom and bond features
+for bond type, bond stereo, atom chirality, hybridization, charge, ring status,
+and aromaticity. Candidate checkpoints are stored separately and must not
+replace the deployed artifact until a controlled comparison reports all of:
+
+- Transductive, S1, and S2 metrics.
+- Raw and validation-calibrated Brier/ECE values.
+- Ablation/baseline comparison.
+- Repeated-seed uncertainty intervals when making comparative claims.
+
+The training audit produces a counterion-candidate review table. It does not
+invent parent mappings for isolated ions or salts: an authoritative source and
+manual review are required before any mapping is approved.
 
 ## ChemBERTa ablation
 
