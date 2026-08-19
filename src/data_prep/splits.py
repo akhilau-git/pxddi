@@ -36,12 +36,22 @@ def _canonicalize_pair_columns(
         )
 
     normalized = dataframe.copy()
-    pairs = [
-        canonical_pair(drug_a, drug_b)
-        for drug_a, drug_b in zip(normalized[drug_a_col], normalized[drug_b_col])
-    ]
-    normalized[drug_a_col] = [pair[0] for pair in pairs]
-    normalized[drug_b_col] = [pair[1] for pair in pairs]
+    left = normalized[drug_a_col]
+    right = normalized[drug_b_col]
+    if (left.isna() | right.isna()).any():
+        raise ValueError('Drug-pair values must not be missing.')
+
+    # TWOSIDES uses molecular strings.  Converting whole columns and comparing
+    # them at once avoids 200,000 Python-level ``canonical_pair`` calls during
+    # the pre-split audit, which made Colab appear to hang before training.
+    left_text = left.astype(str)
+    right_text = right.astype(str)
+    if (left_text.eq('') | right_text.eq('')).any():
+        raise ValueError('Drug-pair values must not be empty.')
+
+    left_first = left_text.le(right_text)
+    normalized[drug_a_col] = left_text.where(left_first, right_text)
+    normalized[drug_b_col] = right_text.where(left_first, left_text)
     return normalized
 
 

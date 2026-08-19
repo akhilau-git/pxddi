@@ -2,6 +2,8 @@ import pytest
 import pandas as pd
 import numpy as np
 
+import src.data_prep.splits as splits_module
+
 from src.data_prep.splits import (
     canonical_pair,
     deduplicate_unordered_pairs,
@@ -45,6 +47,26 @@ def test_deduplicate_unordered_pairs_keeps_first():
     # The pairs should be canonicalized
     assert list(dedup['source'].values) == ['DrugA', 'DrugC']
     assert list(dedup['target'].values) == ['DrugB', 'DrugD']
+
+
+def test_deduplicate_unordered_pairs_uses_vectorized_canonicalization(monkeypatch):
+    """Large Colab inputs must not invoke the scalar helper once per row."""
+    dataframe = pd.DataFrame({
+        'source': ['DrugB', 'DrugA', 'DrugD'],
+        'target': ['DrugA', 'DrugB', 'DrugC'],
+        'label': [1.0, 1.0, 1.0],
+    })
+
+    def scalar_helper_must_not_run(*_args, **_kwargs):
+        raise AssertionError('pair canonicalization must be vectorized')
+
+    monkeypatch.setattr(splits_module, 'canonical_pair', scalar_helper_must_not_run)
+    result = splits_module.deduplicate_unordered_pairs(dataframe, 'source', 'target')
+
+    assert result.to_dict('records') == [
+        {'source': 'DrugA', 'target': 'DrugB', 'label': 1.0},
+        {'source': 'DrugC', 'target': 'DrugD', 'label': 1.0},
+    ]
 
 def test_build_binary_pair_dataset_negative_no_match():
     """Test that negative samples never match positive pairs in either direction."""
