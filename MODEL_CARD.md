@@ -10,9 +10,9 @@ patient-specific treatment recommendations.
 
 - Model: symmetric dual-view GAT encoder with DDI and toxicity heads.
 - Checkpoint: `backend/checkpoints/pxddi_model.pt`.
-- Stored validation AUROC: 0.9485.
-- Best validation epoch: 193.
-- Decision threshold selected from validation data: 0.5453.
+- Stored validation AUROC: 0.8972.
+- Best validation epoch: 195.
+- Decision threshold selected from validation data: 0.4404.
 - Patient context: disabled at inference.
 
 The stored AUROC is checkpoint metadata. It is not external, temporal, or
@@ -71,7 +71,9 @@ in a report or comparison.
    has been performed.
 8. **Explanation:** `/explain` attributes molecular embeddings and applies a
    functional-group heuristic; it is not a final pair-risk explanation or a
-   literature validation.
+   literature validation. It is intentionally unavailable if an edge-aware
+   candidate is ever promoted, until a compatible explanation method is
+   implemented and evaluated.
 9. **Security:** local CORS is restricted and explanation concurrency is
    bounded, but authentication, global rate limiting, audit logging, TLS,
    monitoring, and public-deployment controls are absent.

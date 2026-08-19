@@ -19,7 +19,7 @@ SRC_PATH = BACKEND_DIR.parent / 'src'
 if str(SRC_PATH) not in sys.path:
     sys.path.append(str(SRC_PATH))
 
-from models.ddi_model import model_from_checkpoint
+from models.ddi_model import MODEL_ARCHITECTURE_EDGE_AWARE, model_from_checkpoint
 from models.calibration import apply_calibrator
 from models.explainability import full_explanation_pipeline
 from data_prep.prepare_twosides import smiles_to_graph
@@ -202,6 +202,28 @@ def risk_calibration_response() -> dict:
     }
 
 
+def explanation_response() -> dict:
+    """Describe whether this architecture has a compatible explanation path."""
+    if getattr(model, 'architecture_version', None) == MODEL_ARCHITECTURE_EDGE_AWARE:
+        return {
+            'available': False,
+            'endpoint': None,
+            'note': (
+                'The edge-aware candidate has no validated API explanation method yet. '
+                'Do not interpret an embedding attribution from the legacy method as an '
+                'edge-aware pair-risk explanation.'
+            ),
+        }
+    return {
+        'available': True,
+        'endpoint': '/explain (separate, slower endpoint)',
+        'note': (
+            'Available only as a legacy embedding attribution. It is not a validated '
+            'pair-risk explanation.'
+        ),
+    }
+
+
 def readiness_error() -> str | None:
     """Return a readiness failure when required toxicity-coverage data is unavailable."""
     if KNOWN_TOXICITY_SMILES:
@@ -228,6 +250,7 @@ def predict_ddi(req: DDIRequest):
     raw_risk_score = float(torch.sigmoid(risk))
     risk_score = float(apply_calibrator([raw_risk_score], CALIBRATION)[0])
     calibration_response = risk_calibration_response()
+    explanation = explanation_response()
     return {
         'disclaimer': 'Research prototype output. Not clinical advice. Not FDA/regulatory reviewed.',
         'interaction_risk_estimate': risk_score,
@@ -247,13 +270,22 @@ def predict_ddi(req: DDIRequest):
         'patient_context_note': patient_context_note,
         'drug_a_toxicity': toxicity_response(req.smiles_a, float(tox_a)),
         'drug_b_toxicity': toxicity_response(req.smiles_b, float(tox_b)),
-        'explanation_available_at': '/explain (separate, slower endpoint)',
+        'explanation_available_at': explanation['endpoint'],
+        'explanation_note': explanation['note'],
     }
 
 
 @app.post('/explain')
 def explain_ddi(req: DDIRequest):
     """Run the expensive embedding explanation with bounded local concurrency."""
+    if not explanation_response()['available']:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                'The edge-aware candidate has no validated API explanation method yet. '
+                'This endpoint remains available only for the legacy GAT architecture.'
+            ),
+        )
     batch_a, batch_b = build_drug_batches(req)
     if not EXPLANATION_SEMAPHORE.acquire(blocking=False):
         raise HTTPException(
@@ -288,6 +320,7 @@ def health():
         'model_type': 'GNN' if not checkpoint.get('use_chemberta', False) else 'ChemBERTa',
         'model_architecture': checkpoint.get('architecture_version', 'legacy_gat_v1'),
         'score_calibration_status': risk_calibration_response()['status'],
+        'explanation_status': 'available' if explanation_response()['available'] else 'not_available',
         'model_auroc': float(checkpoint.get('auroc')) if checkpoint.get('auroc') is not None else None,
         'model_epoch': int(checkpoint['epoch']) if checkpoint.get('epoch') is not None else None,
         'model_checkpoint_sha256': CHECKPOINT_SHA256,

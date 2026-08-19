@@ -12,9 +12,9 @@ module safely.
 
 The checkpoint at `backend/checkpoints/pxddi_model.pt` currently reports:
 
-- Best validation epoch: 193
-- Stored validation AUROC: 0.9485
-- Validation-selected decision threshold: 0.5453
+- Best validation epoch: 195
+- Stored validation AUROC: 0.8972
+- Validation-selected decision threshold: 0.4404
 - Training cap: 200,000 rows
 
 These are metadata for the committed reference artifact, not external or

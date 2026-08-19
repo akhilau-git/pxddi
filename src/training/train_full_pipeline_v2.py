@@ -426,7 +426,7 @@ def filter_graph_compatible_pairs(
 def save_counterion_curation_candidates(exclusions: pd.DataFrame, audit_dir: Path) -> dict[str, Any]:
     """Create a review queue; never guess a parent drug for an isolated ion."""
     counterion_columns = ['source_graph_status', 'target_graph_status']
-    candidates: list[dict[str, Any]] = []
+    occurrences: dict[str, dict[str, Any]] = {}
     for side in ('source', 'target'):
         status_column = f'{side}_graph_status'
         if status_column not in exclusions:
@@ -435,10 +435,10 @@ def save_counterion_curation_candidates(exclusions: pd.DataFrame, audit_dir: Pat
             exclusions[status_column] == 'counterion_or_inorganic_only_structure'
         ]
         for structure, count in subset[side].value_counts().items():
-            candidates.append({
+            candidate = occurrences.setdefault(str(structure), {
                 'raw_structure': structure,
-                'occurrence_count': int(count),
-                'observed_as': side,
+                'occurrence_count': 0,
+                'observed_as': set(),
                 'audit_reason': 'counterion_or_inorganic_only_structure',
                 'recommended_action': 'exclude_until_authoritative_parent_drug_mapping_is_reviewed',
                 'curation_decision': 'pending_manual_review',
@@ -446,6 +446,12 @@ def save_counterion_curation_candidates(exclusions: pd.DataFrame, audit_dir: Pat
                 'approved_parent_smiles': '',
                 'review_notes': '',
             })
+            candidate['occurrence_count'] += int(count)
+            candidate['observed_as'].add(side)
+    candidates = []
+    for candidate in occurrences.values():
+        candidate['observed_as'] = '|'.join(sorted(candidate['observed_as']))
+        candidates.append(candidate)
     candidate_columns = [
         'raw_structure',
         'occurrence_count',

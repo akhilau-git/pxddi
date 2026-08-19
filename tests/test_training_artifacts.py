@@ -159,3 +159,19 @@ def test_counterion_curation_queue_requires_manual_review(tmp_path):
     assert summary['automatic_parent_mapping_applied'] is False
     assert summary['unique_counterion_or_inorganic_structures'] == 2
     assert set(candidates['curation_decision']) == {'pending_manual_review'}
+
+
+def test_counterion_curation_merges_the_same_structure_seen_on_both_sides(tmp_path):
+    exclusions = pd.DataFrame({
+        'source': ['[Na+].[Cl-]', 'CCO'],
+        'target': ['CCN', '[Na+].[Cl-]'],
+        'source_graph_status': ['counterion_or_inorganic_only_structure', 'graph_compatible'],
+        'target_graph_status': ['graph_compatible', 'counterion_or_inorganic_only_structure'],
+    })
+
+    summary = save_counterion_curation_candidates(exclusions, tmp_path)
+    candidates = pd.read_csv(tmp_path / 'counterion_curation_candidates.csv')
+
+    assert summary['unique_counterion_or_inorganic_structures'] == 1
+    assert candidates.iloc[0]['occurrence_count'] == 2
+    assert candidates.iloc[0]['observed_as'] == 'source|target'

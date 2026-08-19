@@ -89,6 +89,7 @@ def test_prediction_reports_label_coverage_and_disabled_patient_context():
     assert payload['drug_a_toxicity']['known'] is True
     assert payload['drug_a_toxicity']['training_label_available'] is True
     assert 'FAERS-derived' in payload['drug_a_toxicity']['coverage_note']
+    assert payload['explanation_available_at'] == '/explain (separate, slower endpoint)'
 
 
 def test_invalid_or_single_atom_smiles_returns_422():
@@ -120,3 +121,16 @@ def test_second_explanation_request_is_rejected_while_one_is_active():
         main.EXPLANATION_SEMAPHORE.release()
 
     assert response.status_code == 429
+
+
+def test_edge_aware_candidate_does_not_advertise_legacy_explanations(monkeypatch):
+    monkeypatch.setattr(main.model, 'architecture_version', main.MODEL_ARCHITECTURE_EDGE_AWARE)
+
+    explanation = CLIENT.post(
+        '/explain',
+        json={'smiles_a': ASPIRIN, 'smiles_b': ACETAMINOPHEN},
+    )
+    health = CLIENT.get('/health')
+
+    assert explanation.status_code == 501
+    assert health.json()['explanation_status'] == 'not_available'
