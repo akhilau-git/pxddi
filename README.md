@@ -115,8 +115,12 @@ Run one candidate first, inspect its Transductive/S1/S2 metrics and calibration
 artifacts, then decide whether it should replace the legacy model. For a
 controlled baseline/ablation study, run
 `src/training/run_experiment_suite.py`. Its screening preset compares four
-configurations once; its paper preset repeats them over multiple seeds and
-saves seed-level bootstrap confidence intervals. Neither mode promotes a model
+configurations once. Its paper preset repeats the directly comparable legacy
+and edge-aware multi-task models across five seeds, verifies that each matched
+seed used the same TWOSIDES input and exact split hashes, and saves paired
+bootstrap confidence intervals. A screening result is directional evidence
+only; it is not statistical proof. Use `PXDDI_EXPERIMENT_NAMES` to select a
+deliberate alternative set of configurations. Neither mode promotes a model
 automatically.
 
 External validation is supported by `src/training/evaluate_external_dataset.py`

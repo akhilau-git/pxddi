@@ -8,6 +8,7 @@ post-review action after the study results are inspected.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRAINING_SCRIPT = PROJECT_ROOT / 'src' / 'training' / 'train_full_pipeline_v2.py'
 DRIVE_BASE = Path(os.environ.get('PXDDI_DATA_BASE', '/content/drive/MyDrive/pxddi-data'))
 PRESET = os.environ.get('PXDDI_EXPERIMENT_PRESET', 'screening').strip().lower()
+REFERENCE_EXPERIMENT = os.environ.get(
+    'PXDDI_EXPERIMENT_REFERENCE', 'legacy_gat_multitask'
+).strip()
+SPLIT_NAMES = ('transductive_train', 'validation', 'transductive_test', 's1_test', 's2_test')
+METRIC_NAMES = ('auroc', 'average_precision', 'f1', 'mcc', 'brier_score_calibrated')
 
 EXPERIMENTS = (
     {
@@ -66,10 +72,41 @@ def experiment_settings() -> tuple[list[int], int]:
             os.environ.get('PXDDI_EXPERIMENT_EPOCHS', '120')
         )
     if PRESET == 'paper':
-        return _parse_seeds(os.environ.get('PXDDI_EXPERIMENT_SEEDS', '11,23,37')), int(
+        return _parse_seeds(os.environ.get('PXDDI_EXPERIMENT_SEEDS', '11,23,37,53,71')), int(
             os.environ.get('PXDDI_EXPERIMENT_EPOCHS', '200')
         )
     raise ValueError("PXDDI_EXPERIMENT_PRESET must be 'screening' or 'paper'.")
+
+
+def selected_experiments(requested_names: str | None = None) -> tuple[dict[str, Any], ...]:
+    """Choose an explicit set of configurations for a fair, bounded study.
+
+    Screening runs every ablation once.  The paper preset repeats the two
+    directly comparable multi-task models by default, avoiding an unnecessarily
+    expensive 20-run Colab job after the ablation question has been answered.
+    ``PXDDI_EXPERIMENT_NAMES`` can always request a deliberate alternative.
+    """
+    by_name = {experiment['name']: experiment for experiment in EXPERIMENTS}
+    value = requested_names
+    if value is None:
+        value = os.environ.get('PXDDI_EXPERIMENT_NAMES')
+    if value is None or not value.strip():
+        names = (
+            tuple(by_name)
+            if PRESET == 'screening'
+            else ('legacy_gat_multitask', 'edge_aware_multitask')
+        )
+    else:
+        names = tuple(name.strip() for name in value.split(',') if name.strip())
+    unknown = [name for name in names if name not in by_name]
+    if unknown:
+        raise ValueError(
+            f'PXDDI_EXPERIMENT_NAMES contains unknown experiments: {unknown}. '
+            f'Available: {sorted(by_name)}.'
+        )
+    if not names:
+        raise ValueError('At least one experiment must be selected.')
+    return tuple(by_name[name] for name in names)
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -97,6 +134,53 @@ def bootstrap_mean_confidence_interval(
     }
 
 
+def paired_bootstrap_difference_confidence_interval(
+    reference_values: list[float],
+    candidate_values: list[float],
+    seed: int = 0,
+    resamples: int = 10000,
+) -> dict[str, float | int] | None:
+    """Return a paired 95% CI for candidate minus reference across matched seeds."""
+    if len(reference_values) != len(candidate_values):
+        raise ValueError('Paired comparisons require the same number of matched seeds.')
+    if len(reference_values) < 2:
+        return None
+    differences = np.asarray(candidate_values, dtype=float) - np.asarray(reference_values, dtype=float)
+    generator = np.random.default_rng(seed)
+    sampled_means = generator.choice(
+        differences, size=(resamples, len(differences)), replace=True
+    ).mean(axis=1)
+    return {
+        'matched_seed_count': int(len(differences)),
+        'mean_difference_candidate_minus_reference': float(differences.mean()),
+        'standard_deviation': float(differences.std(ddof=1)),
+        'ci_95_lower': float(np.percentile(sampled_means, 2.5)),
+        'ci_95_upper': float(np.percentile(sampled_means, 97.5)),
+    }
+
+
+def split_manifest_signature(manifest: dict[str, Any]) -> str:
+    """Hash only the split evidence needed to establish a fair comparison."""
+    split_manifest = manifest.get('split_manifest')
+    if not isinstance(split_manifest, dict):
+        raise ValueError('Run manifest is missing its split_manifest.')
+    missing = set(SPLIT_NAMES).difference(split_manifest)
+    if missing:
+        raise ValueError(f'Run manifest is missing split evidence for: {sorted(missing)}.')
+    evidence = {
+        name: {
+            'sha256': split_manifest[name].get('sha256'),
+            'rows': split_manifest[name].get('rows'),
+            'label_counts': split_manifest[name].get('label_counts'),
+        }
+        for name in SPLIT_NAMES
+    }
+    if any(not details['sha256'] for details in evidence.values()):
+        raise ValueError('Run manifest has a split with no SHA-256 hash.')
+    encoded = json.dumps(evidence, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def find_completed_run(artifact_base: Path) -> Path:
     runs = sorted(
         (path for path in artifact_base.glob('run_*') if (path / 'run_manifest.json').is_file()),
@@ -110,6 +194,10 @@ def find_completed_run(artifact_base: Path) -> Path:
 
 def collect_metric_rows(experiment_name: str, seed: int, run_dir: Path) -> list[dict[str, Any]]:
     manifest = json.loads((run_dir / 'run_manifest.json').read_text(encoding='utf-8'))
+    split_signature = split_manifest_signature(manifest)
+    input_hash = manifest.get('input_sha256', {}).get('twosides_edges')
+    if not input_hash:
+        raise ValueError('Run manifest is missing the TWOSIDES input SHA-256 hash.')
     rows = []
     for split_name, metrics in manifest['results'].items():
         rows.append({
@@ -118,15 +206,86 @@ def collect_metric_rows(experiment_name: str, seed: int, run_dir: Path) -> list[
             'split': split_name,
             'run_directory': str(run_dir),
             'checkpoint_sha256': manifest['checkpoint']['sha256'],
+            'twosides_input_sha256': input_hash,
+            'split_manifest_signature': split_signature,
+            'negative_label_meaning': manifest['configuration']['negative_label_meaning'],
             'model_architecture': manifest['configuration']['model_architecture'],
             'use_toxicity_pair_features': manifest['configuration']['use_toxicity_pair_features'],
             'toxicity_loss_weight': manifest['configuration']['toxicity_loss_weight'],
             **{
                 key: metrics.get(key)
-                for key in ('auroc', 'average_precision', 'f1', 'mcc', 'brier_score_raw', 'brier_score_calibrated')
+                for key in (*METRIC_NAMES, 'brier_score_raw')
             },
         })
     return rows
+
+
+def validate_study_comparability(table: pd.DataFrame) -> None:
+    """Refuse cross-model comparisons unless every model used the same split per seed."""
+    required = {
+        'experiment', 'seed', 'split', 'twosides_input_sha256',
+        'split_manifest_signature', 'negative_label_meaning',
+    }
+    missing = required.difference(table.columns)
+    if missing:
+        raise ValueError(f'Experiment table is missing comparability columns: {sorted(missing)}.')
+    duplicated = table.duplicated(subset=['experiment', 'seed', 'split'], keep=False)
+    if duplicated.any():
+        raise ValueError('Experiment table contains duplicate experiment/seed/split rows.')
+    for seed, seed_rows in table.groupby('seed'):
+        for column in (
+            'twosides_input_sha256', 'split_manifest_signature', 'negative_label_meaning'
+        ):
+            values = seed_rows[column].dropna().unique()
+            if len(values) != 1:
+                raise ValueError(
+                    f'Experiment comparisons for seed {seed} are invalid: {column} differs '
+                    'between configurations.'
+                )
+
+
+def paired_comparison_summary(
+    table: pd.DataFrame,
+    reference_experiment: str,
+) -> dict[str, Any]:
+    """Summarize matched-seed differences without overstating single-run results."""
+    available = set(table['experiment'])
+    if reference_experiment not in available:
+        raise ValueError(
+            f'Reference experiment {reference_experiment!r} was not run. '
+            f'Available: {sorted(available)}.'
+        )
+    comparison_rows: list[dict[str, Any]] = []
+    reference = table[table['experiment'] == reference_experiment]
+    for experiment in sorted(available.difference({reference_experiment})):
+        candidate = table[table['experiment'] == experiment]
+        for split in sorted(set(reference['split']).intersection(candidate['split'])):
+            reference_split = reference[reference['split'] == split].set_index('seed')
+            candidate_split = candidate[candidate['split'] == split].set_index('seed')
+            shared_seeds = sorted(set(reference_split.index).intersection(candidate_split.index))
+            for metric in METRIC_NAMES:
+                paired = pd.DataFrame({
+                    'reference': pd.to_numeric(reference_split.loc[shared_seeds, metric], errors='coerce'),
+                    'candidate': pd.to_numeric(candidate_split.loc[shared_seeds, metric], errors='coerce'),
+                }).dropna()
+                comparison_rows.append({
+                    'reference_experiment': reference_experiment,
+                    'candidate_experiment': experiment,
+                    'split': split,
+                    'metric': metric,
+                    'matched_seeds': [int(seed) for seed in paired.index.tolist()],
+                    'statistics': paired_bootstrap_difference_confidence_interval(
+                        paired['reference'].tolist(), paired['candidate'].tolist()
+                    ),
+                })
+    return {
+        'reference_experiment': reference_experiment,
+        'warning': (
+            'A confidence interval is reported only with two or more matched seeds. '
+            'Screening results are directional evidence, not statistical proof.'
+        ),
+        'comparisons': comparison_rows,
+    }
 
 
 def save_comparison_plot(table: pd.DataFrame, destination: Path) -> None:
@@ -170,6 +329,17 @@ def save_comparison_plot(table: pd.DataFrame, destination: Path) -> None:
 
 def main() -> None:
     seeds, epochs = experiment_settings()
+    experiments = selected_experiments()
+    experiment_names = {experiment['name'] for experiment in experiments}
+    reference_experiment = REFERENCE_EXPERIMENT
+    if reference_experiment not in experiment_names:
+        if len(experiments) == 1:
+            reference_experiment = experiments[0]['name']
+        else:
+            raise ValueError(
+                f'PXDDI_EXPERIMENT_REFERENCE={reference_experiment!r} is not selected. '
+                f'Selected experiments: {sorted(experiment_names)}.'
+            )
     study_id = datetime.now(timezone.utc).strftime('study_%Y%m%dT%H%M%SZ')
     study_dir = DRIVE_BASE / 'experiments' / study_id
     study_dir.mkdir(parents=True, exist_ok=False)
@@ -178,7 +348,8 @@ def main() -> None:
         'preset': PRESET,
         'seeds': seeds,
         'epochs_per_run': epochs,
-        'experiments': EXPERIMENTS,
+        'experiments': experiments,
+        'reference_experiment': reference_experiment,
         'promotion_policy': (
             'No candidate is promoted to checkpoints/pxddi_model.pt by this suite. '
             'Review S1/S2, calibration, and repeated-seed results first.'
@@ -186,7 +357,7 @@ def main() -> None:
     })
 
     rows: list[dict[str, Any]] = []
-    for experiment in EXPERIMENTS:
+    for experiment in experiments:
         for seed in seeds:
             run_root = study_dir / experiment['name'] / f'seed_{seed}'
             artifact_base = run_root / 'artifacts'
@@ -208,6 +379,7 @@ def main() -> None:
             rows.extend(collect_metric_rows(experiment['name'], seed, run_dir))
 
     table = pd.DataFrame(rows)
+    validate_study_comparability(table)
     table.to_csv(study_dir / 'experiment_results.csv', index=False)
     summary: dict[str, Any] = {}
     for experiment_name, experiment_table in table.groupby('experiment'):
@@ -215,9 +387,13 @@ def main() -> None:
         for split_name, split_table in experiment_table.groupby('split'):
             summary[experiment_name][split_name] = {
                 metric: bootstrap_mean_confidence_interval(split_table[metric].dropna().tolist())
-                for metric in ('auroc', 'average_precision', 'f1', 'mcc', 'brier_score_calibrated')
+                for metric in METRIC_NAMES
             }
     write_json(study_dir / 'study_summary.json', summary)
+    write_json(
+        study_dir / 'paired_comparisons.json',
+        paired_comparison_summary(table, reference_experiment),
+    )
     save_comparison_plot(table, study_dir / 'experiment_comparison')
     print(f'Experiment study saved to: {study_dir}')
 
