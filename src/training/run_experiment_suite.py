@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy.stats import wilcoxon
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -33,7 +34,10 @@ REFERENCE_EXPERIMENT = os.environ.get(
     'PXDDI_EXPERIMENT_REFERENCE', 'legacy_gat_multitask'
 ).strip()
 SPLIT_NAMES = ('transductive_train', 'validation', 'transductive_test', 's1_test', 's2_test')
-METRIC_NAMES = ('auroc', 'average_precision', 'f1', 'mcc', 'brier_score_calibrated')
+METRIC_NAMES = (
+    'auroc', 'average_precision', 'f1', 'mcc', 'balanced_accuracy',
+    'brier_score_calibrated',
+)
 
 EXPERIMENTS = (
     {
@@ -220,6 +224,76 @@ def paired_bootstrap_difference_confidence_interval(
     }
 
 
+def paired_wilcoxon_signed_rank_test(
+    reference_values: list[float],
+    candidate_values: list[float],
+) -> dict[str, Any]:
+    """Run a conservative matched-seed test only when it has enough seeds.
+
+    Five seeds is the minimum configured paper study.  With so few independent
+    training seeds, the test is supplementary evidence alongside the paired
+    effect-size interval, not a substitute for an external validation study.
+    """
+    if len(reference_values) != len(candidate_values):
+        raise ValueError('Wilcoxon comparisons require matched seed counts.')
+    if len(reference_values) < 5:
+        return {
+            'status': 'not_run_fewer_than_five_matched_seeds',
+            'test': 'two_sided_wilcoxon_signed_rank',
+            'matched_seed_count': int(len(reference_values)),
+            'p_value_raw': None,
+        }
+    differences = np.asarray(candidate_values, dtype=float) - np.asarray(reference_values, dtype=float)
+    if np.allclose(differences, 0.0):
+        return {
+            'status': 'all_matched_differences_zero',
+            'test': 'two_sided_wilcoxon_signed_rank',
+            'matched_seed_count': int(len(differences)),
+            'statistic': 0.0,
+            'p_value_raw': 1.0,
+        }
+    try:
+        result = wilcoxon(candidate_values, reference_values, alternative='two-sided', method='auto')
+    except ValueError as error:
+        return {
+            'status': 'not_run_invalid_matched_differences',
+            'test': 'two_sided_wilcoxon_signed_rank',
+            'matched_seed_count': int(len(differences)),
+            'p_value_raw': None,
+            'reason': str(error),
+        }
+    return {
+        'status': 'evaluated',
+        'test': 'two_sided_wilcoxon_signed_rank',
+        'matched_seed_count': int(len(differences)),
+        'statistic': float(result.statistic),
+        'p_value_raw': float(result.pvalue),
+        'interpretation_warning': (
+            'This test compares only matched random seeds on one fixed benchmark. '
+            'It does not establish external or clinical superiority.'
+        ),
+    }
+
+
+def holm_adjust_p_values(comparison_rows: list[dict[str, Any]]) -> None:
+    """Apply Holm correction across every valid study comparison in place."""
+    eligible = [
+        row for row in comparison_rows
+        if row.get('statistical_test', {}).get('p_value_raw') is not None
+    ]
+    ordered = sorted(
+        eligible,
+        key=lambda row: row['statistical_test']['p_value_raw'],
+    )
+    adjusted_so_far = 0.0
+    total = len(ordered)
+    for index, row in enumerate(ordered):
+        raw_p_value = float(row['statistical_test']['p_value_raw'])
+        adjusted_so_far = max(adjusted_so_far, (total - index) * raw_p_value)
+        row['statistical_test']['p_value_holm_adjusted'] = float(min(1.0, adjusted_so_far))
+        row['statistical_test']['multiple_testing_correction'] = 'holm_family_wise_error_rate'
+
+
 def split_manifest_signature(manifest: dict[str, Any]) -> str:
     """Hash only the split evidence needed to establish a fair comparison."""
     split_manifest = manifest.get('split_manifest')
@@ -325,6 +399,8 @@ def paired_comparison_summary(
             candidate_split = candidate[candidate['split'] == split].set_index('seed')
             shared_seeds = sorted(set(reference_split.index).intersection(candidate_split.index))
             for metric in METRIC_NAMES:
+                if metric not in reference_split or metric not in candidate_split:
+                    continue
                 paired = pd.DataFrame({
                     'reference': pd.to_numeric(reference_split.loc[shared_seeds, metric], errors='coerce'),
                     'candidate': pd.to_numeric(candidate_split.loc[shared_seeds, metric], errors='coerce'),
@@ -338,12 +414,18 @@ def paired_comparison_summary(
                     'statistics': paired_bootstrap_difference_confidence_interval(
                         paired['reference'].tolist(), paired['candidate'].tolist()
                     ),
+                    'statistical_test': paired_wilcoxon_signed_rank_test(
+                        paired['reference'].tolist(), paired['candidate'].tolist()
+                    ),
                 })
+    holm_adjust_p_values(comparison_rows)
     return {
         'reference_experiment': reference_experiment,
         'warning': (
             'A confidence interval is reported only with two or more matched seeds. '
-            'Screening results are directional evidence, not statistical proof.'
+            'Wilcoxon tests run only with at least five matched seeds, then Holm '
+            'correction controls the study-wide family-wise error rate. Screening '
+            'results remain directional evidence, not statistical proof.'
         ),
         'comparisons': comparison_rows,
     }

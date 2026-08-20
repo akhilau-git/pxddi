@@ -10,11 +10,13 @@ turn an internal attention weight into chemical evidence.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from rdkit import Chem
+from rdkit.Chem.Draw import rdMolDraw2D
 from torch_geometric.data import Batch, Data
 
 try:  # Training runs import ``models`` from src; tests import ``src.models``.
@@ -248,6 +250,47 @@ def _top_cross_attention_pairs(
     ]
 
 
+def _motif_atom_sets(smiles: str) -> dict[str, list[int]]:
+    """Return the union of atoms for every configured motif present in a drug."""
+    return {
+        name: sorted({atom_index for match in matches for atom_index in match})
+        for name, matches in motif_substructure_matches(smiles).items()
+        if matches
+    }
+
+
+def _top_cross_attention_motif_pairs(
+    weights: torch.Tensor,
+    source_smiles: str,
+    target_smiles: str,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Aggregate atom attention over configured SMARTS motif pairs.
+
+    The result summarizes the candidate's internal atom-attention matrix over
+    named motif atom sets.  It is an association view for audit purposes, not
+    an observed pharmacological or causal drug-drug mechanism.
+    """
+    source_motifs = _motif_atom_sets(source_smiles)
+    target_motifs = _motif_atom_sets(target_smiles)
+    associations = []
+    for source_name, source_atoms in source_motifs.items():
+        for target_name, target_atoms in target_motifs.items():
+            association_weights = weights[source_atoms][:, target_atoms]
+            associations.append({
+                'source_motif': source_name,
+                'source_atom_indices': source_atoms,
+                'target_motif': target_name,
+                'target_atom_indices': target_atoms,
+                'mean_attention_weight': float(association_weights.mean().item()),
+                'total_attention_weight': float(association_weights.sum().item()),
+            })
+    return sorted(
+        associations,
+        key=lambda entry: (-entry['mean_attention_weight'], entry['source_motif'], entry['target_motif']),
+    )[:top_k]
+
+
 def _cross_attention_associations(
     model,
     graph_a: Data,
@@ -284,6 +327,23 @@ def _cross_attention_associations(
         'drug_b_to_drug_a': _top_cross_attention_pairs(
             b_to_a[0], symbols_b, symbols_a, top_k
         ),
+        'configured_motif_associations': {
+            'available': True,
+            'aggregation': (
+                'Mean and total of the pair-isolated atom-attention weights over '
+                'atoms matched by each configured SMARTS motif.'
+            ),
+            'interpretation_warning': (
+                'Configured motif associations summarize internal attention only. '
+                'They are not validated DDI mechanisms or chemical plausibility evidence.'
+            ),
+            'drug_a_to_drug_b': _top_cross_attention_motif_pairs(
+                a_to_b[0], smiles_a, smiles_b, top_k
+            ),
+            'drug_b_to_drug_a': _top_cross_attention_motif_pairs(
+                b_to_a[0], smiles_b, smiles_a, top_k
+            ),
+        },
     }
 
 
@@ -292,6 +352,53 @@ def _canonical_smiles(smiles: str) -> str | None:
     if molecule is None:
         return None
     return Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
+
+
+def render_occlusion_svg(
+    smiles: str,
+    atom_occlusions: list[dict[str, Any]],
+    bond_occlusions: list[dict[str, Any]],
+    destination: str | Path,
+) -> None:
+    """Render a self-contained SVG of the selected local occlusion results.
+
+    Orange means masking locally lowered the raw model score; blue means
+    masking locally raised it.  Colours indicate score sensitivity, never a
+    toxicophore or a causal pharmacological mechanism.
+    """
+    molecule = Chem.MolFromSmiles(smiles)
+    if molecule is None:
+        raise ValueError(f'Cannot draw invalid SMILES {smiles!r}.')
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    atom_colours: dict[int, tuple[float, float, float]] = {}
+    for entry in atom_occlusions:
+        index = int(entry['atom_index'])
+        change = float(entry['raw_probability_change'])
+        atom_colours[index] = (0.90, 0.45, 0.05) if change >= 0 else (0.10, 0.45, 0.75)
+    bond_colours: dict[int, tuple[float, float, float]] = {}
+    for entry in bond_occlusions:
+        first, second = entry['bond_atom_indices']
+        bond = molecule.GetBondBetweenAtoms(int(first), int(second))
+        if bond is None:
+            continue
+        change = float(entry['raw_probability_change'])
+        bond_colours[bond.GetIdx()] = (
+            (0.90, 0.45, 0.05) if change >= 0 else (0.10, 0.45, 0.75)
+        )
+    drawer = rdMolDraw2D.MolDraw2DSVG(560, 320)
+    options = drawer.drawOptions()
+    options.addAtomIndices = True
+    rdMolDraw2D.PrepareAndDrawMolecule(
+        drawer,
+        molecule,
+        highlightAtoms=list(atom_colours),
+        highlightAtomColors=atom_colours,
+        highlightBonds=list(bond_colours),
+        highlightBondColors=bond_colours,
+    )
+    drawer.FinishDrawing()
+    destination.write_text(drawer.GetDrawingText(), encoding='utf-8')
 
 
 def _canonical_reencoding_stability(

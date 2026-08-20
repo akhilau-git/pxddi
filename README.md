@@ -138,13 +138,26 @@ For each example it records raw-score changes after masking one atom, bond
 feature, or (where applicable) SMARTS motif; top-atom fidelity/sufficiency
 checks; A–B versus B–A score symmetry; and canonical-SMILES re-encoding score
 stability. The cross-attention candidate additionally records its strongest
-pair-isolated atom-to-atom attention associations.
+pair-isolated atom-to-atom attention associations and configured SMARTS-motif
+A↔B association summaries. Matching SVG molecule figures are saved beside the
+JSON: orange means masking locally reduced the raw model score and blue means
+it increased it. These colours show model sensitivity only, not a toxicophore
+or causal mechanism.
 
 This is intentionally disabled by default, because masking each component is
 slower than ordinary inference. It is an offline research audit, not a backend
 endpoint, and its output must not be described as causal chemical evidence or
 clinical explanation. The latest-results mirror also copies the explanation
 and prediction files from a completed run for easy inspection.
+
+To evaluate repeated-seed explanation stability rather than selecting a
+visually preferred run, create matching candidate explanation artifacts for at
+least two seeds, then run
+`src/training/analyze_explanation_stability.py` with
+`PXDDI_EXPLANATION_ARTIFACTS` set to their comma-separated JSON paths. The
+report measures overlap of top atoms, motifs, and cross-drug motif associations
+only for pairs explained by every supplied run, together with raw-score
+variation. It reports agreement; it does not prove a causal explanation.
 
 ### Uncertainty and structural-domain audit
 
@@ -163,6 +176,38 @@ assumption may fail under the S1/S2 distribution shifts, and molecular
 similarity does not measure novelty of a DDI pair or prove reliability. An OOD
 flag tells the reviewer to inspect or abstain; an unflagged result is still not
 validated or safe.
+
+### Fixed-split ensemble and safe abstention
+
+`src/training/run_fixed_split_ensemble.py` implements the Phase 6 research
+ensemble. It trains **three to five** same-architecture members with different
+model seeds but one fixed data/split seed, verifies their data and row-level
+prediction provenance, averages their raw scores, and then fits a fresh
+ensemble calibration, threshold, and conformal rule on disjoint validation
+roles. It never overwrites or serves `backend/checkpoints/pxddi_model.pt`.
+
+The ensemble prediction CSV stores every member score, its standard deviation,
+conformal set, structural-domain flag, and a transparent abstention status. A
+pair is marked `insufficient_evidence_for_reliable_unseen_drug_prediction`
+when the conformal set is ambiguous/empty, members disagree beyond the chosen
+research threshold, or either drug is outside the nearest-training-drug
+structural domain. This is a review/abstention rule—not a clinical guarantee.
+
+For a later Colab run, point `PXDDI_DATA_BASE` at the shared input-data folder
+and `PXDDI_RESULTS_BASE` / `PXDDI_ENSEMBLES_BASE` at writable folders in your
+own Drive, then run for example:
+
+```bash
+PXDDI_ENSEMBLE_ARCHITECTURE=cross_attention_edge_aware_gat_v1 \
+PXDDI_ENSEMBLE_SEEDS=11,23,37 \
+PXDDI_ENSEMBLE_SPLIT_SEED=42 \
+PXDDI_ENSEMBLE_EPOCHS=200 \
+python src/training/run_fixed_split_ensemble.py
+```
+
+Member candidates must be trained again through this command. Older runs used
+one seed for both data splitting and model initialization, so they are not
+valid fixed-split ensemble members.
 
 Candidate training applies validation-AUROC early stopping after at least 40
 epochs, with a default patience of 30 non-improving epochs. Set

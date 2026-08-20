@@ -86,8 +86,8 @@ in a report or comparison.
    literature validation. An optional, offline candidate audit now performs
    single-component atom/bond/motif occlusion on a bounded evaluation subset,
    with local fidelity/sufficiency, score-symmetry, and canonical-reencoding
-   checks. Cross-attention weights are also exported only as internal
-   associations. None of these outputs are causal mechanisms, chemical proof,
+   checks. Cross-attention atom and configured-SMARTS motif associations are
+   also exported only as internal associations. None of these outputs are causal mechanisms, chemical proof,
    or clinically validated explanations. Candidate models remain unavailable
    through `/explain` unless a separately reviewed API-compatible method is
    implemented and evaluated.
@@ -137,14 +137,36 @@ For a trained nonlegacy candidate, setting
 `PXDDI_RUN_CANDIDATE_EXPLANATIONS=1` writes a bounded offline occlusion audit
 under the immutable run artifact directory. It uses raw (not calibrated) model
 probabilities, stores the selected evaluation examples and all stated warnings,
-and does not alter the candidate checkpoint, legacy checkpoint, or API. It is
+and renders matching indexed SVG molecular figures. It does not alter the
+candidate checkpoint, legacy checkpoint, or API. It is
 evidence about local model behaviour only; a separate stability study and
 expert chemical review are still needed before it could support scientific
 interpretation.
 
+`analyze_explanation_stability.py` can compare shared explained pairs across
+two or more candidate seeds. It reports top-atom, motif, and cross-motif
+association overlap plus raw-score variation; this is an agreement audit, not
+validation of an explanation or chemical mechanism.
+
 The training audit produces a counterion-candidate review table. It does not
 invent parent mappings for isolated ions or salts: an authoritative source and
 manual review are required before any mapping is approved.
+
+## Fixed-split ensemble and abstention workflow
+
+The Phase 6 ensemble launcher trains three to five independently initialized
+members on the same audited data sample and exact split, then averages only
+their verified raw prediction rows. It refuses to combine members with a
+different source-data hash, split-manifest evidence, architecture, loss
+configuration, or row provenance. A fresh ensemble calibrator, threshold, and
+conformal rule use disjoint post-training validation partitions.
+
+The resulting prediction artifact supplies member-score standard deviation,
+conformal ambiguity, structural-domain distance, and an explicit abstention
+status. It is deliberately offline and cannot replace, alter, or be served as
+the deployed legacy checkpoint. The disagreement threshold is a transparent
+research setting—not a calibrated clinical threshold—and must be assessed on
+the actual S1/S2 results before any research claim.
 
 ## ChemBERTa ablation
 

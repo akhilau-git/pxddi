@@ -3,6 +3,7 @@ torch-geometric
 pandas
 numpy
 scikit-learn
+scipy
 rdkit
 fastapi
 uvicorn

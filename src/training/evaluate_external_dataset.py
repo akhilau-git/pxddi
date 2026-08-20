@@ -15,14 +15,14 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.metrics import average_precision_score, brier_score_loss, confusion_matrix, roc_auc_score
 from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
 
 from src.data_prep.build_dataloader import parse_binary_label
 from src.data_prep.prepare_twosides import FEATURE_SCHEMA_LEGACY, smiles_to_graph
-from src.models.calibration import apply_calibrator, expected_calibration_error
+from src.models.calibration import apply_calibrator
 from src.models.ddi_model import architecture_requires_motif_features, model_from_checkpoint
+from src.evaluation.ddi_metrics import bootstrap_confidence_intervals, calculate_binary_metrics
 
 
 REQUIRED_METADATA_FIELDS = {
@@ -107,6 +107,9 @@ def main() -> None:
         'PXDDI_EXTERNAL_ARTIFACTS_DIR',
         '/content/drive/MyDrive/pxddi-data/external_evaluations',
     )) / datetime.now(timezone.utc).strftime('external_%Y%m%dT%H%M%SZ')
+    bootstrap_resamples = int(os.environ.get('PXDDI_EXTERNAL_BOOTSTRAP_RESAMPLES', '1000'))
+    if bootstrap_resamples < 0:
+        raise ValueError('PXDDI_EXTERNAL_BOOTSTRAP_RESAMPLES must be zero or positive.')
     output_dir.mkdir(parents=True, exist_ok=False)
 
     metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
@@ -135,21 +138,18 @@ def main() -> None:
     final_scores = apply_calibrator(raw_array, checkpoint.get('calibration'))
     threshold = float(checkpoint.get('threshold', 0.5))
     predicted_labels = (final_scores >= threshold).astype(int)
-    matrix = confusion_matrix(labels_array, predicted_labels, labels=[0, 1]).tolist()
-    metrics = {
-        'sample_count': int(len(labels_array)),
-        'positive_count': int(labels_array.sum()),
-        'negative_count': int((labels_array == 0).sum()),
-        'auroc': float(roc_auc_score(labels_array, final_scores)) if len(np.unique(labels_array)) == 2 else None,
-        'average_precision': float(average_precision_score(labels_array, final_scores)) if len(np.unique(labels_array)) == 2 else None,
-        'brier_score_raw': float(brier_score_loss(labels_array, raw_array)),
-        'brier_score_calibrated': float(brier_score_loss(labels_array, final_scores)),
-        'ece_raw': expected_calibration_error(labels_array, raw_array),
-        'ece_calibrated': expected_calibration_error(labels_array, final_scores),
-        'threshold': threshold,
-        'confusion_matrix': matrix,
-        'excluded_graph_incompatible_rows': int(len(excluded)),
-    }
+    metrics = calculate_binary_metrics(
+        labels_array, final_scores, threshold, raw_predictions=raw_array
+    )
+    metrics['test_set_bootstrap_95ci'] = bootstrap_confidence_intervals(
+        labels_array,
+        final_scores,
+        threshold,
+        raw_predictions=raw_array,
+        resamples=bootstrap_resamples,
+        seed=0,
+    )
+    metrics['excluded_graph_incompatible_rows'] = int(len(excluded))
     excluded.to_csv(output_dir / 'graph_incompatible_exclusions.csv', index=False)
     pd.DataFrame({
         'label': labels_array,

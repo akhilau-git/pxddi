@@ -12,6 +12,7 @@ from src.data_prep.prepare_twosides import (
 from src.models.candidate_explainability import (
     EXPLANATION_METHOD,
     explain_pair_with_occlusion,
+    render_occlusion_svg,
     select_representative_indices,
 )
 from src.models.ddi_model import (
@@ -58,7 +59,8 @@ def test_occlusion_explanation_reports_raw_score_and_quality_checks():
 
 
 def test_cross_attention_artifact_exposes_pair_isolated_associations_only():
-    graph_a, graph_b = _rich_graph('CCO'), _rich_graph('CCN')
+    graph_a = _rich_graph('CC(=O)OC1=CC=CC=C1C(=O)O')  # aspirin
+    graph_b = _rich_graph('CC(=O)NC1=CC=C(O)C=C1')  # acetaminophen
     model = PxDDIModel(
         in_channels=RICH_NUM_ATOM_FEATURES,
         hidden_channels=8,
@@ -67,7 +69,12 @@ def test_cross_attention_artifact_exposes_pair_isolated_associations_only():
     ).eval()
 
     explanation = explain_pair_with_occlusion(
-        model, graph_a, graph_b, 'CCO', 'CCN', top_k=2
+        model,
+        graph_a,
+        graph_b,
+        'CC(=O)OC1=CC=CC=C1C(=O)O',
+        'CC(=O)NC1=CC=C(O)C=C1',
+        top_k=2,
     )
     associations = explanation['cross_drug_attention_associations']
 
@@ -75,6 +82,10 @@ def test_cross_attention_artifact_exposes_pair_isolated_associations_only():
     assert len(associations['drug_a_to_drug_b']) == 2
     assert len(associations['drug_b_to_drug_a']) == 2
     assert 'not validated' in associations['interpretation_warning']
+    motif_associations = associations['configured_motif_associations']
+    assert motif_associations['available'] is True
+    assert motif_associations['drug_a_to_drug_b']
+    assert 'not validated' in motif_associations['interpretation_warning']
 
 
 def test_representative_selection_prioritizes_each_confusion_case_deterministically():
@@ -105,3 +116,17 @@ def test_cross_attention_maps_are_normalized_for_each_source_atom():
 
     assert torch.allclose(a_to_b[0].sum(dim=1), torch.ones(graph_a.num_nodes))
     assert torch.allclose(b_to_a[0].sum(dim=1), torch.ones(graph_b.num_nodes))
+
+
+def test_occlusion_svg_is_a_vector_artifact_with_atom_indices(tmp_path):
+    destination = tmp_path / 'ethanol_occlusion.svg'
+    render_occlusion_svg(
+        'CCO',
+        [{'atom_index': 2, 'raw_probability_change': 0.2}],
+        [{'bond_atom_indices': [1, 2], 'raw_probability_change': -0.1}],
+        destination,
+    )
+
+    content = destination.read_text(encoding='utf-8')
+    assert content.lstrip().startswith('<?xml')
+    assert '<svg' in content

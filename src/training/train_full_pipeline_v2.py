@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -69,6 +70,7 @@ from data_prep.molecular_motifs import (
 )
 from data_prep.pubchem_bridge import canonicalize, resolve_toxicity_bridge
 from data_prep.splits import build_binary_pair_dataset, create_splits, deduplicate_unordered_pairs
+from data_prep.scaffold_splits import create_scaffold_disjoint_splits
 from models.ddi_model import (
     MODEL_ARCHITECTURE_EDGE_AWARE,
     MODEL_ARCHITECTURE_LEGACY,
@@ -85,6 +87,7 @@ from models.candidate_explainability import (
     EXPLANATION_LIMITATIONS,
     EXPLANATION_METHOD,
     explain_pair_with_occlusion,
+    render_occlusion_svg,
     select_representative_indices,
 )
 from models.applicability_domain import MorganApplicabilityDomain
@@ -93,6 +96,13 @@ from models.uncertainty import (
     fit_split_conformal_binary,
     predictive_entropy,
     summarize_conformal_test_labels,
+)
+from evaluation.ddi_metrics import (
+    bootstrap_confidence_intervals,
+    calculate_binary_metrics,
+    save_confident_error_analysis,
+    selective_prediction_summary,
+    structural_similarity_slices,
 )
 
 
@@ -146,7 +156,12 @@ def resolve_results_base(
     return Path(configured_path) if configured_path else data_base
 
 
+# ``PXDDI_SEED`` remains the backwards-compatible one-knob default.  Ensemble
+# training can override the model and split seeds independently so its members
+# genuinely differ while evaluating exactly the same rows.
 SEED = _positive_int_from_environment('PXDDI_SEED', 42)
+MODEL_SEED = _positive_int_from_environment('PXDDI_MODEL_SEED', SEED)
+SPLIT_SEED = _positive_int_from_environment('PXDDI_SPLIT_SEED', SEED)
 DATA_CAP = _positive_int_from_environment('PXDDI_DATA_CAP', 200000)
 EPOCHS = _positive_int_from_environment('PXDDI_EPOCHS', 200)
 HIDDEN_CHANNELS = _positive_int_from_environment('PXDDI_HIDDEN_CHANNELS', 128)
@@ -198,6 +213,11 @@ USE_TOXICITY_PAIR_FEATURES = _boolean_from_environment(
 TOXICITY_LOSS_WEIGHT = float(os.environ.get('PXDDI_TOXICITY_LOSS_WEIGHT', '0.3'))
 if TOXICITY_LOSS_WEIGHT < 0:
     raise ValueError('PXDDI_TOXICITY_LOSS_WEIGHT must be non-negative.')
+EVALUATION_PROTOCOL = os.environ.get('PXDDI_EVALUATION_PROTOCOL', 'standard').strip().lower()
+if EVALUATION_PROTOCOL not in {'standard', 'scaffold_disjoint'}:
+    raise ValueError("PXDDI_EVALUATION_PROTOCOL must be 'standard' or 'scaffold_disjoint'.")
+BOOTSTRAP_RESAMPLES = _non_negative_int_from_environment('PXDDI_BOOTSTRAP_RESAMPLES', 1000)
+ERROR_ANALYSIS_MAX_ROWS = _positive_int_from_environment('PXDDI_ERROR_ANALYSIS_MAX_ROWS', 100)
 
 TWOSIDES_EDGES = DRIVE_BASE / 'twosides' / 'drug_drug_edges.csv'
 TOXICITY_BRIDGE = DRIVE_BASE / 'checkpoints' / 'toxicity_smiles_bridge.csv'
@@ -373,9 +393,13 @@ def build_run_manifest() -> dict[str, Any]:
         'results_base': str(RESULTS_BASE),
         'repository_git_commit': repository_git_commit(),
         'runtime_environment': runtime_environment(),
-        'random_seed': SEED,
+        'random_seed': MODEL_SEED,
+        'model_seed': MODEL_SEED,
+        'split_seed': SPLIT_SEED,
         'configuration': {
             'data_cap': DATA_CAP,
+            'model_seed': MODEL_SEED,
+            'split_seed': SPLIT_SEED,
             'epochs': EPOCHS,
             'hidden_channels': HIDDEN_CHANNELS,
             'batch_size': BATCH_SIZE,
@@ -403,6 +427,20 @@ def build_run_manifest() -> dict[str, Any]:
             ),
             'negative_label_meaning': 'unreported_twosides_sampled',
             'toxicity_conflict_policy': 'exclude_conflicting_structures',
+            'evaluation_protocol': EVALUATION_PROTOCOL,
+            'test_set_bootstrap': {
+                'method': 'stratified_nonparametric_bootstrap',
+                'resamples': BOOTSTRAP_RESAMPLES,
+                'seed': SPLIT_SEED,
+                'metrics': [
+                    'auroc', 'average_precision', 'f1', 'mcc',
+                    'balanced_accuracy', 'brier_score_calibrated',
+                ],
+            },
+            'error_analysis': {
+                'method': 'confidence_ranked_threshold_errors',
+                'maximum_rows_per_error_type': ERROR_ANALYSIS_MAX_ROWS,
+            },
             'candidate_explanations': {
                 'enabled': RUN_CANDIDATE_EXPLANATIONS,
                 'method': EXPLANATION_METHOD,
@@ -497,7 +535,9 @@ def publish_latest_results(
         shutil.copy2(source, destination)
         copied_files.append(str(relative))
 
-    for artifact_subdirectory in ('figures', 'predictions', 'explanations', 'uncertainty'):
+    for artifact_subdirectory in (
+        'figures', 'predictions', 'explanations', 'uncertainty', 'error_analysis', 'splits'
+    ):
         artifact_dir = run_dir / artifact_subdirectory
         if not artifact_dir.exists():
             continue
@@ -755,10 +795,11 @@ def build_loader(
     batch_size: int = BATCH_SIZE,
     shuffle: bool = True,
     graph_cache: GraphCache | None = None,
+    generator_seed: int = MODEL_SEED,
 ) -> DataLoader:
     dataset = PxDDIDataset(dataframe, toxicity_lookup, graph_cache=graph_cache)
     generator = torch.Generator()
-    generator.manual_seed(SEED)
+    generator.manual_seed(generator_seed)
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -837,6 +878,55 @@ def collect_predictions(model, loader) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(labels, dtype=int), np.asarray(predictions, dtype=float)
 
 
+def measure_inference_efficiency(model, loader) -> dict[str, Any]:
+    """Measure full-loader inference throughput for transparent model comparison.
+
+    The figure includes graph batching and host-to-device transfer because that
+    is the practical research inference path.  It is hardware-specific and is
+    therefore stored beside GPU/runtime details rather than treated as a
+    universal production latency claim.
+    """
+    if len(loader.dataset) == 0:
+        return {
+            'status': 'skipped_empty_loader',
+            'sample_count': 0,
+            'wall_clock_seconds': None,
+            'pairs_per_second': None,
+            'mean_batch_latency_milliseconds': None,
+            'peak_cuda_memory_bytes': None,
+        }
+    if DEVICE.type == 'cuda':
+        torch.cuda.synchronize(DEVICE)
+        torch.cuda.reset_peak_memory_stats(DEVICE)
+    batch_count = 0
+    start = time.perf_counter()
+    model.eval()
+    with torch.inference_mode():
+        for graph_a, graph_b, *_ in loader:
+            model(graph_a.to(DEVICE), graph_b.to(DEVICE))
+            batch_count += 1
+    if DEVICE.type == 'cuda':
+        torch.cuda.synchronize(DEVICE)
+    elapsed = time.perf_counter() - start
+    sample_count = int(len(loader.dataset))
+    return {
+        'status': 'measured',
+        'measurement_scope': 'full_loader_inference_including_batching_and_device_transfer',
+        'sample_count': sample_count,
+        'batch_count': int(batch_count),
+        'wall_clock_seconds': float(elapsed),
+        'pairs_per_second': float(sample_count / elapsed) if elapsed else None,
+        'mean_batch_latency_milliseconds': float(1000 * elapsed / batch_count)
+        if batch_count else None,
+        'peak_cuda_memory_bytes': int(torch.cuda.max_memory_allocated(DEVICE))
+        if DEVICE.type == 'cuda' else None,
+        'interpretation_warning': (
+            'Inference efficiency depends on the recorded hardware, batch size, '
+            'PyTorch/PyG versions, and whether data are already in memory.'
+        ),
+    }
+
+
 def select_validation_threshold(labels: np.ndarray, predictions: np.ndarray) -> float:
     if len(labels) == 0 or len(np.unique(labels)) < 2:
         raise ValueError('Validation split must contain both classes to select a threshold.')
@@ -846,7 +936,7 @@ def select_validation_threshold(labels: np.ndarray, predictions: np.ndarray) -> 
 
 def partition_validation_for_posthoc(
     labels: np.ndarray,
-    seed: int = SEED,
+    seed: int = SPLIT_SEED,
 ) -> dict[str, Any]:
     """Create disjoint calibration, threshold, and conformal validation roles.
 
@@ -976,45 +1066,8 @@ def calculate_metrics(
     threshold: float,
     raw_predictions: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Calculate ranking, decision, and calibration metrics for one split."""
-    if raw_predictions is None:
-        raw_predictions = predictions
-    if len(raw_predictions) != len(predictions):
-        raise ValueError('Raw and final predictions must have equal length.')
-    predicted_labels = (predictions >= threshold).astype(int)
-    matrix = confusion_matrix(labels, predicted_labels, labels=[0, 1])
-    true_negative, false_positive, false_negative, true_positive = matrix.ravel()
-    result: dict[str, Any] = {
-        'sample_count': int(len(labels)),
-        'positive_count': int((labels == 1).sum()),
-        'negative_count': int((labels == 0).sum()),
-        'threshold': float(threshold),
-        'confusion_matrix': matrix.tolist(),
-        'f1': float(f1_score(labels, predicted_labels, zero_division=0)) if len(labels) else None,
-        'precision': float(precision_score(labels, predicted_labels, zero_division=0)) if len(labels) else None,
-        'recall': float(recall_score(labels, predicted_labels, zero_division=0)) if len(labels) else None,
-        'specificity': float(true_negative / (true_negative + false_positive))
-        if true_negative + false_positive else None,
-        'mcc': float(matthews_corrcoef(labels, predicted_labels))
-        if len(np.unique(labels)) > 1 else None,
-        'brier_score_raw': float(brier_score_loss(labels, raw_predictions)) if len(labels) else None,
-        'brier_score_calibrated': float(brier_score_loss(labels, predictions)) if len(labels) else None,
-        'ece_raw': expected_calibration_error(labels, raw_predictions),
-        'ece_calibrated': expected_calibration_error(labels, predictions),
-    }
-    if len(np.unique(labels)) < 2:
-        result.update({
-            'status': 'skipped_one_class_or_empty_split',
-            'auroc': None,
-            'average_precision': None,
-        })
-        return result
-    result.update({
-        'status': 'evaluated',
-        'auroc': float(roc_auc_score(labels, predictions)),
-        'average_precision': float(average_precision_score(labels, predictions)),
-    })
-    return result
+    """Backward-compatible wrapper for the shared rigorous metric set."""
+    return calculate_binary_metrics(labels, predictions, threshold, raw_predictions)
 
 
 def save_prediction_artifact(
@@ -1089,6 +1142,8 @@ def generate_candidate_explanation_artifact(
     artifact: dict[str, Any] = {
         'method': EXPLANATION_METHOD,
         'model_architecture': MODEL_ARCHITECTURE,
+        'model_seed': MODEL_SEED,
+        'split_seed': SPLIT_SEED,
         'uses_raw_model_probabilities': True,
         'scope_limitations': EXPLANATION_LIMITATIONS,
         'samples_per_split_limit': EXPLANATION_SAMPLES_PER_SPLIT,
@@ -1130,6 +1185,26 @@ def generate_candidate_explanation_artifact(
                     top_k=EXPLANATION_TOP_K,
                     graph_builder=graph_builder,
                 )
+                visual_dir = explanation_dir / 'figures' / split_name.lower().replace(' ', '_')
+                example_prefix = f'example_{index:05d}'
+                source_figure = visual_dir / f'{example_prefix}_drug_a.svg'
+                target_figure = visual_dir / f'{example_prefix}_drug_b.svg'
+                render_occlusion_svg(
+                    metadata['source'],
+                    example['explanation']['drug_a']['top_atom_occlusions'],
+                    example['explanation']['drug_a']['top_bond_occlusions'],
+                    source_figure,
+                )
+                render_occlusion_svg(
+                    metadata['target'],
+                    example['explanation']['drug_b']['top_atom_occlusions'],
+                    example['explanation']['drug_b']['top_bond_occlusions'],
+                    target_figure,
+                )
+                example['explanation_figures'] = {
+                    'drug_a_svg': str(source_figure),
+                    'drug_b_svg': str(target_figure),
+                }
             except Exception as error:  # Keep a completed candidate run auditable.
                 example['explanation_error'] = {
                     'type': type(error).__name__,
@@ -1357,7 +1432,9 @@ def model_summary(model: PxDDIModel) -> dict[str, Any]:
     }
 
 
-def _prepare_positive_edges(audit_dir: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
+def _prepare_positive_edges(
+    audit_dir: Path, sampling_seed: int = SPLIT_SEED
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Deduplicate and validate positive pairs before negative sampling or splitting."""
     edges = pd.read_csv(TWOSIDES_EDGES)
     required_columns = {'source', 'target'}
@@ -1376,7 +1453,7 @@ def _prepare_positive_edges(audit_dir: Path) -> tuple[pd.DataFrame, dict[str, An
     exclusions.to_csv(exclusions_path, index=False)
     curation_summary = save_counterion_curation_candidates(exclusions, audit_dir)
     sampled = clean_positives.sample(
-        n=min(DATA_CAP, len(clean_positives)), random_state=SEED
+        n=min(DATA_CAP, len(clean_positives)), random_state=sampling_seed
     ).reset_index(drop=True)
     summary = {
         'raw_unique_positive_pairs': int(len(positives)),
@@ -1399,7 +1476,7 @@ def _prepare_positive_edges(audit_dir: Path) -> tuple[pd.DataFrame, dict[str, An
 
 
 def main() -> None:
-    set_reproducibility(SEED)
+    set_reproducibility(MODEL_SEED)
     print(f'Training on: {DEVICE}')
     if DEVICE.type != 'cuda':
         print('Warning: CUDA is unavailable; Colab GPU is recommended for this run.')
@@ -1415,9 +1492,11 @@ def main() -> None:
     write_json(RUN_ARTIFACTS_DIR / 'run_manifest_initial.json', manifest)
 
     toxicity_lookup, toxicity_summary = load_toxicity_lookup(audit_dir)
-    positives, input_quality_summary = _prepare_positive_edges(audit_dir)
+    positives, input_quality_summary = _prepare_positive_edges(
+        audit_dir, sampling_seed=SPLIT_SEED
+    )
     full_dataset = build_binary_pair_dataset(
-        positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SEED
+        positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SPLIT_SEED
     )
     dataset_summary = {
         'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
@@ -1426,30 +1505,53 @@ def main() -> None:
         'negative_label_meaning': 'unreported_twosides_sampled',
     }
     write_json(audit_dir / 'dataset_summary.json', dataset_summary)
-    splits = create_splits(
-        full_dataset, drug_a_col='source', drug_b_col='target', seed=SEED
-    )
+    if EVALUATION_PROTOCOL == 'scaffold_disjoint':
+        splits, scaffold_audit = create_scaffold_disjoint_splits(
+            full_dataset, drug_a_col='source', drug_b_col='target', seed=SPLIT_SEED
+        )
+        train_split_key = 'scaffold_train'
+        validation_split_key = 'scaffold_validation'
+        test_split_keys = {'Scaffold-disjoint': 'scaffold_test'}
+        evaluation_protocol_summary = {
+            'name': 'scaffold_disjoint',
+            **scaffold_audit,
+        }
+        write_json(audit_dir / 'scaffold_split_audit.json', evaluation_protocol_summary)
+    else:
+        splits = create_splits(
+            full_dataset, drug_a_col='source', drug_b_col='target', seed=SPLIT_SEED
+        )
+        train_split_key = 'transductive_train'
+        validation_split_key = 'validation'
+        test_split_keys = {
+            'Transductive': 'transductive_test',
+            'S1': 's1_test',
+            'S2': 's2_test',
+        }
+        evaluation_protocol_summary = {
+            'name': 'standard_transductive_s1_s2',
+            'interpretation_warning': (
+                'Standard results include a transductive split and drug-identity '
+                'cold-start S1/S2 partitions. Run scaffold-disjoint evaluation '
+                'separately; it requires a distinct training partition.'
+            ),
+        }
     split_manifest = save_split_manifests(splits, RUN_ARTIFACTS_DIR)
 
     graph_cache = GraphCache(
         FEATURE_SCHEMA, include_motif_features=USE_MOTIF_FEATURES
     )
     train_loader = build_loader(
-        splits['transductive_train'], toxicity_lookup, shuffle=True, graph_cache=graph_cache
+        splits[train_split_key], toxicity_lookup, shuffle=True, graph_cache=graph_cache
     )
     validation_loader = build_loader(
-        splits['validation'], toxicity_lookup, shuffle=False, graph_cache=graph_cache
+        splits[validation_split_key], toxicity_lookup, shuffle=False, graph_cache=graph_cache
     )
     test_loaders = {
-        'Transductive': build_loader(
-            splits['transductive_test'], toxicity_lookup, shuffle=False, graph_cache=graph_cache
-        ),
-        'S1': build_loader(
-            splits['s1_test'], toxicity_lookup, shuffle=False, graph_cache=graph_cache
-        ),
-        'S2': build_loader(
-            splits['s2_test'], toxicity_lookup, shuffle=False, graph_cache=graph_cache
-        ),
+        name: build_loader(
+            splits[split_key], toxicity_lookup, shuffle=False, graph_cache=graph_cache
+        )
+        for name, split_key in test_split_keys.items()
     }
     all_loaders = {'train': train_loader, 'validation': validation_loader, **test_loaders}
     unexpected_skips = {
@@ -1494,6 +1596,10 @@ def main() -> None:
     best_auroc = float('-inf')
     epochs_without_improvement = 0
     stopped_early = False
+    if DEVICE.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats(DEVICE)
+        torch.cuda.synchronize(DEVICE)
+    training_started_at = time.perf_counter()
 
     for epoch in range(1, EPOCHS + 1):
         loss = train_one_epoch(model, train_loader, optimizer, scaler)
@@ -1547,7 +1653,9 @@ def main() -> None:
                     'auroc': float(best_auroc),
                     'epoch': epoch,
                     'data_cap': DATA_CAP,
-                    'seed': SEED,
+                    'seed': MODEL_SEED,
+                    'model_seed': MODEL_SEED,
+                    'split_seed': SPLIT_SEED,
                     'threshold': threshold,
                 },
                 CHECKPOINT_PATH,
@@ -1563,10 +1671,27 @@ def main() -> None:
             )
             break
 
+    if DEVICE.type == 'cuda':
+        torch.cuda.synchronize(DEVICE)
+    training_efficiency = {
+        'measurement_scope': 'optimization_and_per_epoch_validation',
+        'wall_clock_seconds': float(time.perf_counter() - training_started_at),
+        'peak_cuda_memory_bytes': int(torch.cuda.max_memory_allocated(DEVICE))
+        if DEVICE.type == 'cuda' else None,
+        'recorded_batch_size': BATCH_SIZE,
+        'parameter_count': int(sum(parameter.numel() for parameter in model.parameters())),
+        'interpretation_warning': (
+            'Training efficiency is hardware- and data-size-specific. Compare it '
+            'only across runs with the same runtime environment and split manifest.'
+        ),
+    }
+
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     validation_true, validation_raw_predictions = collect_predictions(model, validation_loader)
-    posthoc_partition = partition_validation_for_posthoc(validation_true, seed=SEED)
+    posthoc_partition = partition_validation_for_posthoc(
+        validation_true, seed=SPLIT_SEED
+    )
     calibration_indices = posthoc_partition['indices']['calibration']
     threshold_indices = posthoc_partition['indices']['threshold']
     conformal_indices = posthoc_partition['indices']['conformal']
@@ -1622,6 +1747,25 @@ def main() -> None:
         if key not in {'path', 'sha256'}
     }
     checkpoint_hash = safe_checkpoint_save(checkpoint, CHECKPOINT_PATH)
+    validation_prediction_path = save_prediction_artifact(
+        'Validation',
+        validation_loader,
+        validation_true,
+        validation_raw_predictions,
+        validation_calibrated_predictions,
+        frozen_threshold,
+        prediction_dir,
+        calibration,
+    )
+    validation_prediction_summary = {
+        'path': str(validation_prediction_path),
+        'sha256': get_file_hash(validation_prediction_path),
+        'rows': int(len(validation_true)),
+        'purpose': (
+            'Raw member scores for a fixed-split ensemble are combined before '
+            'the ensemble calibrator, threshold, and conformal rule are fitted.'
+        ),
+    }
 
     plot_training_curves(history, figure_dir)
     history_summary = save_training_history(history, RUN_ARTIFACTS_DIR)
@@ -1664,18 +1808,51 @@ def main() -> None:
         metrics['prediction_path'] = str(prediction_path)
         metrics['prediction_sha256'] = get_file_hash(prediction_path)
         metrics['skipped_invalid_smiles'] = int(loader.dataset.skipped_count)
+        metrics['test_set_bootstrap_95ci'] = bootstrap_confidence_intervals(
+            labels,
+            calibrated_predictions,
+            frozen_threshold,
+            raw_predictions=raw_predictions,
+            resamples=BOOTSTRAP_RESAMPLES,
+            seed=SPLIT_SEED,
+        )
         metrics['uncertainty'] = summarize_conformal_test_labels(labels, conformal_sets)
         metrics['uncertainty'].update({
             'method': conformal['method'],
             'alpha': conformal['alpha'],
             'interpretation_warning': conformal['interpretation_warning'],
         })
+        metrics['selective_prediction'] = selective_prediction_summary(
+            labels,
+            calibrated_predictions,
+            frozen_threshold,
+            conformal_sets['abstain'],
+        )
         metrics['applicability_domain'] = {
             'structural_ood_count': int(applicability_scores['structural_ood_flag'].sum()),
             'structural_ood_rate': float(applicability_scores['structural_ood_flag'].mean()),
             'minimum_tanimoto_similarity': APPLICABILITY_DOMAIN_MINIMUM_SIMILARITY,
             'interpretation_warning': applicability_domain_summary['interpretation_warning'],
         }
+        metrics['structural_similarity_slices'] = structural_similarity_slices(
+            labels,
+            calibrated_predictions,
+            frozen_threshold,
+            applicability_scores['pair_minimum_nearest_train_tanimoto'],
+            raw_predictions=raw_predictions,
+        )
+        metrics['error_analysis'] = save_confident_error_analysis(
+            loader.dataset.metadata,
+            labels,
+            raw_predictions,
+            calibrated_predictions,
+            frozen_threshold,
+            RUN_ARTIFACTS_DIR / 'error_analysis',
+            name,
+            maximum_rows_per_error_type=ERROR_ANALYSIS_MAX_ROWS,
+            additional_columns=additional_prediction_columns,
+        )
+        metrics['inference_efficiency'] = measure_inference_efficiency(model, loader)
         results[name] = metrics
         evaluation_data[name] = {
             'loader': loader,
@@ -1709,6 +1886,7 @@ def main() -> None:
             'validation_selected_threshold': frozen_threshold,
         },
         'calibration': calibration,
+        'validation_predictions': validation_prediction_summary,
         'uncertainty': {
             'conformal': {
                 key: value for key, value in conformal.items()
@@ -1719,6 +1897,13 @@ def main() -> None:
             'applicability_domain': applicability_domain_summary,
         },
         'model_summary': model_summary(model),
+        'evaluation_protocol': evaluation_protocol_summary,
+        'efficiency': {
+            'training': training_efficiency,
+            'inference_by_evaluation_split': {
+                name: metrics['inference_efficiency'] for name, metrics in results.items()
+            },
+        },
         'training_history': history_summary,
         'early_stopping': {
             'enabled': EARLY_STOPPING_PATIENCE > 0,
