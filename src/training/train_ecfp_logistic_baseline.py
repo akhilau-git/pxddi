@@ -38,6 +38,7 @@ from src.training.train_full_pipeline_v2 import (
     plot_benchmark_comparison,
     plot_evaluation,
     plot_training_curves,
+    resolve_results_base,
     save_split_manifests,
     save_training_history,
     select_validation_threshold,
@@ -77,11 +78,12 @@ if EARLY_STOPPING_MIN_EPOCHS > ECFP_EPOCHS:
 
 DRIVE_BASE = Path(os.environ.get('PXDDI_DATA_BASE', '/content/drive/MyDrive/pxddi-data'))
 TWOSIDES_EDGES = DRIVE_BASE / 'twosides' / 'drug_drug_edges.csv'
-ARTIFACTS_BASE = Path(os.environ.get('PXDDI_ARTIFACTS_BASE', DRIVE_BASE / 'artifacts'))
+RESULTS_BASE = resolve_results_base()
+ARTIFACTS_BASE = Path(os.environ.get('PXDDI_ARTIFACTS_BASE', RESULTS_BASE / 'artifacts'))
 RUN_ID = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
 RUN_ARTIFACTS_DIR = ARTIFACTS_BASE / f'run_{RUN_ID}'
 DEFAULT_CHECKPOINT_PATH = (
-    DRIVE_BASE / 'checkpoints' / 'baselines' / 'pxddi_ecfp_sgd_logistic.npz'
+    RESULTS_BASE / 'checkpoints' / 'baselines' / 'pxddi_ecfp_sgd_logistic.npz'
 )
 CHECKPOINT_PATH = Path(os.environ.get('PXDDI_CHECKPOINT_PATH', DEFAULT_CHECKPOINT_PATH))
 
@@ -264,6 +266,8 @@ def baseline_manifest() -> dict[str, Any]:
         'run_id': RUN_ID,
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
         'random_seed': SEED,
+        'input_data_base': str(DRIVE_BASE),
+        'results_base': str(RESULTS_BASE),
         'input_sha256': {
             'twosides_edges': get_file_hash(TWOSIDES_EDGES),
             'training_source': get_file_hash(Path(__file__)),

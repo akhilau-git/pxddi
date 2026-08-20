@@ -22,7 +22,7 @@ from torch_geometric.loader import DataLoader
 from src.data_prep.build_dataloader import parse_binary_label
 from src.data_prep.prepare_twosides import FEATURE_SCHEMA_LEGACY, smiles_to_graph
 from src.models.calibration import apply_calibrator, expected_calibration_error
-from src.models.ddi_model import model_from_checkpoint
+from src.models.ddi_model import architecture_requires_motif_features, model_from_checkpoint
 
 
 REQUIRED_METADATA_FIELDS = {
@@ -57,7 +57,11 @@ def _collate(records):
     return Batch.from_data_list(graphs_a), Batch.from_data_list(graphs_b), torch.tensor(labels, dtype=torch.float)
 
 
-def build_external_records(dataframe: pd.DataFrame, feature_schema: str):
+def build_external_records(
+    dataframe: pd.DataFrame,
+    feature_schema: str,
+    include_motif_features: bool = False,
+):
     required = {'source', 'target', 'label'}
     missing = required.difference(dataframe.columns)
     if missing:
@@ -65,8 +69,16 @@ def build_external_records(dataframe: pd.DataFrame, feature_schema: str):
     records, excluded = [], []
     for index, row in dataframe.iterrows():
         source, target = row['source'], row['target']
-        graph_a = smiles_to_graph(source, feature_schema=feature_schema)
-        graph_b = smiles_to_graph(target, feature_schema=feature_schema)
+        graph_a = smiles_to_graph(
+            source,
+            feature_schema=feature_schema,
+            include_motif_features=include_motif_features,
+        )
+        graph_b = smiles_to_graph(
+            target,
+            feature_schema=feature_schema,
+            include_motif_features=include_motif_features,
+        )
         if graph_a is None or graph_b is None:
             excluded.append({'dataset_row_index': index, 'source': source, 'target': target, 'reason': 'graph_incompatible'})
             continue
@@ -102,8 +114,13 @@ def main() -> None:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, checkpoint = load_trained_model(checkpoint_path, device)
     feature_schema = checkpoint.get('feature_schema', FEATURE_SCHEMA_LEGACY)
+    include_motif_features = architecture_requires_motif_features(
+        checkpoint.get('architecture_version', 'legacy_gat_v1')
+    )
 
-    records, excluded = build_external_records(pd.read_csv(data_path), feature_schema)
+    records, excluded = build_external_records(
+        pd.read_csv(data_path), feature_schema, include_motif_features
+    )
     if not records:
         raise ValueError('No graph-compatible rows remain in the external dataset.')
     loader = DataLoader(records, batch_size=128, shuffle=False, collate_fn=_collate)

@@ -54,7 +54,11 @@ def expected_calibration_error(
     return float(total)
 
 
-def fit_platt_calibrator(labels, raw_probabilities) -> dict[str, Any]:
+def fit_platt_calibrator(
+    labels,
+    raw_probabilities,
+    fitted_on: str = 'validation_only',
+) -> dict[str, Any]:
     """Fit a logistic calibration mapping using validation data only.
 
     Calibration is explicitly marked as internal-validation calibration. It is
@@ -68,7 +72,7 @@ def fit_platt_calibrator(labels, raw_probabilities) -> dict[str, Any]:
         return {
             'status': 'not_fitted_insufficient_validation_classes',
             'method': None,
-            'fitted_on': 'validation_only',
+            'fitted_on': fitted_on,
         }
 
     logistic_inputs = _logit(raw_scores).reshape(-1, 1)
@@ -78,16 +82,16 @@ def fit_platt_calibrator(labels, raw_probabilities) -> dict[str, Any]:
     return {
         'status': 'fitted',
         'method': CALIBRATION_METHOD_PLATT,
-        'fitted_on': 'validation_only',
+        'fitted_on': fitted_on,
         'input_transform': 'logit_of_clipped_raw_probability',
         'clip_epsilon': SCORE_EPSILON,
         'coefficient': float(estimator.coef_[0, 0]),
         'intercept': float(estimator.intercept_[0]),
-        'validation_sample_count': int(len(targets)),
-        'validation_brier_raw': float(brier_score_loss(targets, raw_scores)),
-        'validation_brier_calibrated': float(brier_score_loss(targets, calibrated_scores)),
-        'validation_ece_raw': expected_calibration_error(targets, raw_scores),
-        'validation_ece_calibrated': expected_calibration_error(targets, calibrated_scores),
+        'fitted_partition_sample_count': int(len(targets)),
+        'fitted_partition_brier_raw': float(brier_score_loss(targets, raw_scores)),
+        'fitted_partition_brier_calibrated': float(brier_score_loss(targets, calibrated_scores)),
+        'fitted_partition_ece_raw': expected_calibration_error(targets, raw_scores),
+        'fitted_partition_ece_calibrated': expected_calibration_error(targets, calibrated_scores),
     }
 
 

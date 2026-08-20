@@ -19,7 +19,14 @@ SRC_PATH = BACKEND_DIR.parent / 'src'
 if str(SRC_PATH) not in sys.path:
     sys.path.append(str(SRC_PATH))
 
-from models.ddi_model import MODEL_ARCHITECTURE_EDGE_AWARE, model_from_checkpoint
+from models.ddi_model import (
+    MODEL_ARCHITECTURE_EDGE_AWARE,
+    MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
+    MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
+    architecture_uses_edge_features,
+    architecture_requires_motif_features,
+    model_from_checkpoint,
+)
 from models.calibration import apply_calibrator
 from models.explainability import full_explanation_pipeline
 from data_prep.prepare_twosides import (
@@ -102,7 +109,7 @@ def checkpoint_feature_schema(checkpoint_metadata: dict) -> str:
     feature_schema = checkpoint_metadata.get('feature_schema', FEATURE_SCHEMA_LEGACY)
     if feature_schema not in {FEATURE_SCHEMA_LEGACY, FEATURE_SCHEMA_RICH}:
         raise RuntimeError(f'Unsupported checkpoint feature schema: {feature_schema!r}.')
-    if architecture == MODEL_ARCHITECTURE_EDGE_AWARE and feature_schema != FEATURE_SCHEMA_RICH:
+    if architecture_uses_edge_features(architecture) and feature_schema != FEATURE_SCHEMA_RICH:
         raise RuntimeError(
             'An edge-aware checkpoint must declare the rich molecular feature schema.'
         )
@@ -139,6 +146,9 @@ model = model_from_checkpoint(checkpoint)
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
 MODEL_FEATURE_SCHEMA = checkpoint_feature_schema(checkpoint)
+MODEL_REQUIRES_MOTIF_FEATURES = architecture_requires_motif_features(
+    checkpoint.get('architecture_version', 'legacy_gat_v1')
+)
 
 DECISION_THRESHOLD = float(checkpoint.get('threshold', 0.5))
 CALIBRATION = checkpoint.get('calibration')
@@ -190,8 +200,16 @@ class DDIRequest(BaseModel):
 
 def build_drug_batches(req: DDIRequest):
     """Build bounded molecular batches shared by prediction and explanation."""
-    graph_a = smiles_to_graph(req.smiles_a, feature_schema=MODEL_FEATURE_SCHEMA)
-    graph_b = smiles_to_graph(req.smiles_b, feature_schema=MODEL_FEATURE_SCHEMA)
+    graph_a = smiles_to_graph(
+        req.smiles_a,
+        feature_schema=MODEL_FEATURE_SCHEMA,
+        include_motif_features=MODEL_REQUIRES_MOTIF_FEATURES,
+    )
+    graph_b = smiles_to_graph(
+        req.smiles_b,
+        feature_schema=MODEL_FEATURE_SCHEMA,
+        include_motif_features=MODEL_REQUIRES_MOTIF_FEATURES,
+    )
     if graph_a is None or graph_b is None:
         raise HTTPException(
             status_code=422,
@@ -253,14 +271,14 @@ def risk_calibration_response() -> dict:
 
 def explanation_response() -> dict:
     """Describe whether this architecture has a compatible explanation path."""
-    if getattr(model, 'architecture_version', None) == MODEL_ARCHITECTURE_EDGE_AWARE:
+    if getattr(model, 'architecture_version', None) != 'legacy_gat_v1':
         return {
             'available': False,
             'endpoint': None,
             'note': (
-                'The edge-aware candidate has no validated API explanation method yet. '
+                'This non-legacy candidate has no validated API explanation method yet. '
                 'Do not interpret an embedding attribution from the legacy method as an '
-                'edge-aware pair-risk explanation.'
+                'edge-aware or motif-aware pair-risk explanation.'
             ),
         }
     return {
@@ -369,6 +387,7 @@ def health():
         'model_type': 'GNN' if not checkpoint.get('use_chemberta', False) else 'ChemBERTa',
         'model_architecture': checkpoint.get('architecture_version', 'legacy_gat_v1'),
         'model_feature_schema': MODEL_FEATURE_SCHEMA,
+        'model_requires_motif_features': MODEL_REQUIRES_MOTIF_FEATURES,
         'score_calibration_status': risk_calibration_response()['status'],
         'explanation_status': 'available' if explanation_response()['available'] else 'not_available',
         'model_auroc': float(checkpoint.get('auroc')) if checkpoint.get('auroc') is not None else None,

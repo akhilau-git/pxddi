@@ -1,0 +1,426 @@
+"""Offline perturbation explanations for experimental PxDDI candidates.
+
+The deployed legacy API explanation remains separate.  This module is designed
+for a small, auditable set of candidate-evaluation examples: it measures how a
+candidate's *raw* DDI score changes when an atom, bond feature, or motif input
+is masked.  It is deliberately not a clinical explanation system and does not
+turn an internal attention weight into chemical evidence.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+import numpy as np
+import torch
+from rdkit import Chem
+from torch_geometric.data import Batch, Data
+
+try:  # Training runs import ``models`` from src; tests import ``src.models``.
+    from data_prep.molecular_motifs import motif_substructure_matches
+except ModuleNotFoundError:  # pragma: no cover - import style depends on caller.
+    from ..data_prep.molecular_motifs import motif_substructure_matches
+
+
+EXPLANATION_METHOD = 'single_component_occlusion_v1'
+EXPLANATION_LIMITATIONS = [
+    'Attribution measures local sensitivity of this trained model, not chemical causality.',
+    'Masked feature vectors can be out-of-distribution molecular inputs; do not interpret them as synthesizable interventions.',
+    'Attention weights, when available, are model-internal associations and are not validated interaction mechanisms.',
+    'These artifacts use raw model probabilities so calibration does not hide attribution changes.',
+]
+
+
+def _model_device(model) -> torch.device:
+    return next(model.parameters()).device
+
+
+def _single_graph_batch(graph: Data, device: torch.device) -> Batch:
+    return Batch.from_data_list([graph.clone()]).to(device)
+
+
+def raw_pair_probability(model, graph_a: Data, graph_b: Data) -> float:
+    """Return the candidate's uncalibrated probability for one graph pair."""
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            batch_a = _single_graph_batch(graph_a, _model_device(model))
+            batch_b = _single_graph_batch(graph_b, _model_device(model))
+            risk_logit, _, _ = model(batch_a, batch_b)
+            return float(torch.sigmoid(risk_logit).reshape(-1)[0].cpu().item())
+    finally:
+        model.train(was_training)
+
+
+def _mask_atoms(graph: Data, atom_indices: list[int]) -> Data:
+    masked = graph.clone()
+    masked.x = masked.x.clone()
+    masked.x[atom_indices] = 0.0
+    return masked
+
+
+def _retain_only_atoms(graph: Data, atom_indices: list[int]) -> Data:
+    retained = graph.clone()
+    retained.x = retained.x.clone()
+    keep = torch.zeros(retained.x.shape[0], dtype=torch.bool, device=retained.x.device)
+    keep[atom_indices] = True
+    retained.x[~keep] = 0.0
+    return retained
+
+
+def _unique_undirected_bonds(graph: Data) -> list[tuple[int, int]]:
+    if not hasattr(graph, 'edge_attr'):
+        return []
+    edge_pairs = graph.edge_index.detach().cpu().t().tolist()
+    return sorted({tuple(sorted((int(source), int(target)))) for source, target in edge_pairs})
+
+
+def _mask_bonds(graph: Data, bonds: list[tuple[int, int]]) -> Data:
+    if not hasattr(graph, 'edge_attr'):
+        raise ValueError('Bond occlusion requires a graph with edge_attr.')
+    masked = graph.clone()
+    masked.edge_attr = masked.edge_attr.clone()
+    requested = {tuple(sorted(bond)) for bond in bonds}
+    edges = masked.edge_index.detach().cpu().t().tolist()
+    edge_mask = torch.tensor(
+        [tuple(sorted((int(source), int(target)))) in requested for source, target in edges],
+        dtype=torch.bool,
+        device=masked.edge_attr.device,
+    )
+    masked.edge_attr[edge_mask] = 0.0
+    return masked
+
+
+def _mask_motifs(graph: Data, motif_indices: list[int]) -> Data:
+    if not hasattr(graph, 'motif_features'):
+        raise ValueError('Motif occlusion requires graph.motif_features.')
+    masked = graph.clone()
+    masked.motif_features = masked.motif_features.clone()
+    masked.motif_features[:, motif_indices] = 0.0
+    return masked
+
+
+def _atom_symbols(smiles: str, atom_count: int) -> list[str | None]:
+    molecule = Chem.MolFromSmiles(smiles)
+    if molecule is None or molecule.GetNumAtoms() != atom_count:
+        return [None] * atom_count
+    return [atom.GetSymbol() for atom in molecule.GetAtoms()]
+
+
+def _bond_descriptions(smiles: str, bonds: list[tuple[int, int]]) -> dict[tuple[int, int], str | None]:
+    molecule = Chem.MolFromSmiles(smiles)
+    if molecule is None:
+        return {bond: None for bond in bonds}
+    descriptions: dict[tuple[int, int], str | None] = {}
+    for begin, end in bonds:
+        bond = molecule.GetBondBetweenAtoms(begin, end)
+        descriptions[(begin, end)] = str(bond.GetBondType()) if bond is not None else None
+    return descriptions
+
+
+def _rank_by_absolute_change(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        entries,
+        key=lambda entry: (-abs(float(entry['raw_probability_change'])), entry['component_index']),
+    )
+
+
+def _atom_occlusion(
+    model,
+    graph_a: Data,
+    graph_b: Data,
+    smiles: str,
+    side: str,
+    baseline: float,
+) -> list[dict[str, Any]]:
+    graph = graph_a if side == 'a' else graph_b
+    symbols = _atom_symbols(smiles, int(graph.x.shape[0]))
+    entries = []
+    for atom_index in range(graph.x.shape[0]):
+        masked_a, masked_b = (
+            (_mask_atoms(graph_a, [atom_index]), graph_b)
+            if side == 'a'
+            else (graph_a, _mask_atoms(graph_b, [atom_index]))
+        )
+        score_after_mask = raw_pair_probability(model, masked_a, masked_b)
+        entries.append({
+            'component_index': int(atom_index),
+            'atom_index': int(atom_index),
+            'atom_symbol': symbols[atom_index],
+            'raw_probability_after_mask': score_after_mask,
+            'raw_probability_change': baseline - score_after_mask,
+        })
+    return _rank_by_absolute_change(entries)
+
+
+def _bond_occlusion(
+    model,
+    graph_a: Data,
+    graph_b: Data,
+    smiles: str,
+    side: str,
+    baseline: float,
+) -> list[dict[str, Any]]:
+    graph = graph_a if side == 'a' else graph_b
+    bonds = _unique_undirected_bonds(graph)
+    descriptions = _bond_descriptions(smiles, bonds)
+    entries = []
+    for bond_index, bond in enumerate(bonds):
+        masked_a, masked_b = (
+            (_mask_bonds(graph_a, [bond]), graph_b)
+            if side == 'a'
+            else (graph_a, _mask_bonds(graph_b, [bond]))
+        )
+        score_after_mask = raw_pair_probability(model, masked_a, masked_b)
+        entries.append({
+            'component_index': int(bond_index),
+            'bond_atom_indices': [int(bond[0]), int(bond[1])],
+            'bond_type': descriptions[bond],
+            'raw_probability_after_mask': score_after_mask,
+            'raw_probability_change': baseline - score_after_mask,
+        })
+    return _rank_by_absolute_change(entries)
+
+
+def _motif_occlusion(
+    model,
+    graph_a: Data,
+    graph_b: Data,
+    motif_names: list[str],
+    side: str,
+    baseline: float,
+) -> list[dict[str, Any]]:
+    graph = graph_a if side == 'a' else graph_b
+    if not hasattr(graph, 'motif_features'):
+        return []
+    values = graph.motif_features.detach().cpu().reshape(-1).tolist()
+    entries = []
+    for motif_index, value in enumerate(values):
+        masked_a, masked_b = (
+            (_mask_motifs(graph_a, [motif_index]), graph_b)
+            if side == 'a'
+            else (graph_a, _mask_motifs(graph_b, [motif_index]))
+        )
+        score_after_mask = raw_pair_probability(model, masked_a, masked_b)
+        entries.append({
+            'component_index': int(motif_index),
+            'motif_name': motif_names[motif_index],
+            'input_count': float(value),
+            'raw_probability_after_mask': score_after_mask,
+            'raw_probability_change': baseline - score_after_mask,
+        })
+    return _rank_by_absolute_change(entries)
+
+
+def _functional_group_context(smiles: str, important_atoms: list[int]) -> list[dict[str, Any]]:
+    important = set(important_atoms)
+    context = []
+    for name, matches in motif_substructure_matches(smiles).items():
+        overlapping = [match for match in matches if important.intersection(match)]
+        if overlapping:
+            context.append({'motif_name': name, 'atom_index_matches': overlapping})
+    return context
+
+
+def _top_cross_attention_pairs(
+    weights: torch.Tensor,
+    source_symbols: list[str | None],
+    target_symbols: list[str | None],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    flattened = weights.detach().cpu().reshape(-1)
+    take = min(top_k, int(flattened.numel()))
+    if take == 0:
+        return []
+    values, indices = torch.topk(flattened, k=take)
+    target_count = weights.shape[1]
+    return [
+        {
+            'source_atom_index': int(index.item() // target_count),
+            'source_atom_symbol': source_symbols[int(index.item() // target_count)],
+            'target_atom_index': int(index.item() % target_count),
+            'target_atom_symbol': target_symbols[int(index.item() % target_count)],
+            'attention_weight': float(value.item()),
+        }
+        for value, index in zip(values, indices)
+    ]
+
+
+def _cross_attention_associations(
+    model,
+    graph_a: Data,
+    graph_b: Data,
+    smiles_a: str,
+    smiles_b: str,
+    top_k: int,
+) -> dict[str, Any]:
+    if getattr(model, 'cross_drug_attention', None) is None:
+        return {
+            'available': False,
+            'reason': 'Model architecture has no cross-drug attention layer.',
+        }
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            batch_a = _single_graph_batch(graph_a, _model_device(model))
+            batch_b = _single_graph_batch(graph_b, _model_device(model))
+            a_to_b, b_to_a = model.cross_drug_attention_maps(batch_a, batch_b)
+    finally:
+        model.train(was_training)
+    symbols_a = _atom_symbols(smiles_a, int(graph_a.x.shape[0]))
+    symbols_b = _atom_symbols(smiles_b, int(graph_b.x.shape[0]))
+    return {
+        'available': True,
+        'interpretation_warning': (
+            'Attention weights are model-internal associations only; they are not '
+            'validated atom-to-atom interaction mechanisms.'
+        ),
+        'drug_a_to_drug_b': _top_cross_attention_pairs(
+            a_to_b[0], symbols_a, symbols_b, top_k
+        ),
+        'drug_b_to_drug_a': _top_cross_attention_pairs(
+            b_to_a[0], symbols_b, symbols_a, top_k
+        ),
+    }
+
+
+def _canonical_smiles(smiles: str) -> str | None:
+    molecule = Chem.MolFromSmiles(smiles)
+    if molecule is None:
+        return None
+    return Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
+
+
+def _canonical_reencoding_stability(
+    model,
+    smiles_a: str,
+    smiles_b: str,
+    baseline: float,
+    graph_builder: Callable[[str], Data | None] | None,
+) -> dict[str, Any]:
+    if graph_builder is None:
+        return {'status': 'not_run', 'reason': 'No graph builder was supplied.'}
+    canonical_a, canonical_b = _canonical_smiles(smiles_a), _canonical_smiles(smiles_b)
+    if canonical_a is None or canonical_b is None:
+        return {'status': 'not_run', 'reason': 'SMILES could not be canonicalized.'}
+    rebuilt_a, rebuilt_b = graph_builder(canonical_a), graph_builder(canonical_b)
+    if rebuilt_a is None or rebuilt_b is None:
+        return {'status': 'not_run', 'reason': 'Canonical SMILES could not be represented.'}
+    canonical_score = raw_pair_probability(model, rebuilt_a, rebuilt_b)
+    return {
+        'status': 'evaluated',
+        'canonical_smiles_a': canonical_a,
+        'canonical_smiles_b': canonical_b,
+        'raw_probability_after_canonical_reencoding': canonical_score,
+        'absolute_raw_probability_difference': abs(baseline - canonical_score),
+    }
+
+
+def explain_pair_with_occlusion(
+    model,
+    graph_a: Data,
+    graph_b: Data,
+    smiles_a: str,
+    smiles_b: str,
+    motif_names: list[str] | tuple[str, ...] = (),
+    top_k: int = 5,
+    graph_builder: Callable[[str], Data | None] | None = None,
+) -> dict[str, Any]:
+    """Explain one pair using score perturbations and candidate-only audits."""
+    if top_k <= 0:
+        raise ValueError('top_k must be positive.')
+    baseline = raw_pair_probability(model, graph_a, graph_b)
+    atoms_a = _atom_occlusion(model, graph_a, graph_b, smiles_a, 'a', baseline)
+    atoms_b = _atom_occlusion(model, graph_a, graph_b, smiles_b, 'b', baseline)
+    bonds_a = _bond_occlusion(model, graph_a, graph_b, smiles_a, 'a', baseline)
+    bonds_b = _bond_occlusion(model, graph_a, graph_b, smiles_b, 'b', baseline)
+    motifs_a = _motif_occlusion(model, graph_a, graph_b, list(motif_names), 'a', baseline)
+    motifs_b = _motif_occlusion(model, graph_a, graph_b, list(motif_names), 'b', baseline)
+    top_atoms_a = [entry['atom_index'] for entry in atoms_a[:top_k]]
+    top_atoms_b = [entry['atom_index'] for entry in atoms_b[:top_k]]
+    masked_score = raw_pair_probability(
+        model, _mask_atoms(graph_a, top_atoms_a), _mask_atoms(graph_b, top_atoms_b)
+    )
+    retained_score = raw_pair_probability(
+        model,
+        _retain_only_atoms(graph_a, top_atoms_a),
+        _retain_only_atoms(graph_b, top_atoms_b),
+    )
+    swapped_score = raw_pair_probability(model, graph_b, graph_a)
+    return {
+        'method': EXPLANATION_METHOD,
+        'scope_limitations': EXPLANATION_LIMITATIONS,
+        'raw_probability': baseline,
+        'symmetry_check': {
+            'raw_probability_after_swapping_drug_order': swapped_score,
+            'absolute_raw_probability_difference': abs(baseline - swapped_score),
+        },
+        'canonical_reencoding_stability': _canonical_reencoding_stability(
+            model, smiles_a, smiles_b, baseline, graph_builder
+        ),
+        'atom_attribution_quality': {
+            'top_k_per_drug': top_k,
+            'fidelity_mask_top_atoms_raw_probability': masked_score,
+            'fidelity_raw_probability_change': baseline - masked_score,
+            'sufficiency_retain_top_atoms_raw_probability': retained_score,
+            'sufficiency_raw_probability_change': baseline - retained_score,
+            'interpretation_warning': (
+                'Fidelity and sufficiency are local perturbation checks, not proof of '
+                'explanation correctness or chemical plausibility.'
+            ),
+        },
+        'drug_a': {
+            'smiles': smiles_a,
+            'top_atom_occlusions': atoms_a[:top_k],
+            'top_bond_occlusions': bonds_a[:top_k],
+            'top_motif_occlusions': motifs_a[:top_k],
+            'overlapping_configured_motifs': _functional_group_context(smiles_a, top_atoms_a),
+        },
+        'drug_b': {
+            'smiles': smiles_b,
+            'top_atom_occlusions': atoms_b[:top_k],
+            'top_bond_occlusions': bonds_b[:top_k],
+            'top_motif_occlusions': motifs_b[:top_k],
+            'overlapping_configured_motifs': _functional_group_context(smiles_b, top_atoms_b),
+        },
+        'cross_drug_attention_associations': _cross_attention_associations(
+            model, graph_a, graph_b, smiles_a, smiles_b, top_k
+        ),
+    }
+
+
+def select_representative_indices(
+    labels: np.ndarray,
+    predictions: np.ndarray,
+    threshold: float,
+    maximum_examples: int,
+) -> list[int]:
+    """Select a deterministic mix of correct and incorrect evaluation cases."""
+    if maximum_examples <= 0:
+        return []
+    labels = np.asarray(labels, dtype=int)
+    predictions = np.asarray(predictions, dtype=float)
+    if len(labels) != len(predictions):
+        raise ValueError('labels and predictions must have equal length.')
+    predicted = predictions >= threshold
+    groups = [
+        np.where((labels == 1) & ~predicted)[0],  # false negatives
+        np.where((labels == 0) & predicted)[0],   # false positives
+        np.where((labels == 1) & predicted)[0],   # true positives
+        np.where((labels == 0) & ~predicted)[0],  # true negatives
+    ]
+    selected: list[int] = []
+    for group in groups:
+        for index in sorted(group.tolist(), key=lambda item: (-abs(predictions[item] - threshold), item)):
+            if len(selected) >= maximum_examples:
+                return selected
+            selected.append(int(index))
+            break
+    remaining = sorted(
+        set(range(len(labels))) - set(selected),
+        key=lambda item: (-abs(predictions[item] - threshold), item),
+    )
+    return selected + [int(index) for index in remaining[: maximum_examples - len(selected)]]

@@ -61,17 +61,38 @@ from data_prep.prepare_twosides import (
     graph_compatibility_reason as source_graph_compatibility_reason,
     smiles_to_graph,
 )
+from data_prep.molecular_motifs import (
+    MOTIF_FEATURE_DIM,
+    MOTIF_FEATURE_NAMES,
+    MOTIF_SCHEMA_SMARTS_COUNTS_V1,
+    motif_metadata,
+)
 from data_prep.pubchem_bridge import canonicalize, resolve_toxicity_bridge
 from data_prep.splits import build_binary_pair_dataset, create_splits, deduplicate_unordered_pairs
 from models.ddi_model import (
     MODEL_ARCHITECTURE_EDGE_AWARE,
     MODEL_ARCHITECTURE_LEGACY,
+    MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
+    MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
     PxDDIModel,
 )
 from models.calibration import (
     apply_calibrator,
     expected_calibration_error,
     fit_platt_calibrator,
+)
+from models.candidate_explainability import (
+    EXPLANATION_LIMITATIONS,
+    EXPLANATION_METHOD,
+    explain_pair_with_occlusion,
+    select_representative_indices,
+)
+from models.applicability_domain import MorganApplicabilityDomain
+from models.uncertainty import (
+    conformal_prediction_sets,
+    fit_split_conformal_binary,
+    predictive_entropy,
+    summarize_conformal_test_labels,
 )
 
 
@@ -101,6 +122,30 @@ def _boolean_from_environment(name: str, default: bool) -> bool:
     raise ValueError(f'{name} must be one of true/false, yes/no, or 1/0.')
 
 
+def _open_unit_interval_from_environment(name: str, default: float) -> float:
+    value = float(os.environ.get(name, default))
+    if not 0 < value < 1:
+        raise ValueError(f'{name} must lie strictly between zero and one.')
+    return value
+
+
+def _closed_unit_interval_from_environment(name: str, default: float) -> float:
+    value = float(os.environ.get(name, default))
+    if not 0 <= value <= 1:
+        raise ValueError(f'{name} must lie between zero and one.')
+    return value
+
+
+def resolve_results_base(
+    configured_path: str | Path | None = None,
+    data_base: Path = DRIVE_BASE,
+) -> Path:
+    """Choose a writable output root independently of a shared data shortcut."""
+    if configured_path is None:
+        configured_path = os.environ.get('PXDDI_RESULTS_BASE')
+    return Path(configured_path) if configured_path else data_base
+
+
 SEED = _positive_int_from_environment('PXDDI_SEED', 42)
 DATA_CAP = _positive_int_from_environment('PXDDI_DATA_CAP', 200000)
 EPOCHS = _positive_int_from_environment('PXDDI_EPOCHS', 200)
@@ -118,11 +163,28 @@ USE_CHEMBERTA = False
 MODEL_ARCHITECTURE = os.environ.get(
     'PXDDI_MODEL_ARCHITECTURE', MODEL_ARCHITECTURE_EDGE_AWARE
 )
-if MODEL_ARCHITECTURE not in {MODEL_ARCHITECTURE_LEGACY, MODEL_ARCHITECTURE_EDGE_AWARE}:
+if MODEL_ARCHITECTURE not in {
+    MODEL_ARCHITECTURE_LEGACY,
+    MODEL_ARCHITECTURE_EDGE_AWARE,
+    MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
+    MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
+}:
     raise ValueError(f'Unsupported PXDDI_MODEL_ARCHITECTURE: {MODEL_ARCHITECTURE}.')
+USES_EDGE_FEATURES = MODEL_ARCHITECTURE in {
+    MODEL_ARCHITECTURE_EDGE_AWARE,
+    MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
+    MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
+}
+USE_MOTIF_FEATURES = MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE
+USE_CROSS_DRUG_ATTENTION = (
+    MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE
+)
+MOTIF_HIDDEN_CHANNELS = _positive_int_from_environment(
+    'PXDDI_MOTIF_HIDDEN_CHANNELS', 32
+)
 FEATURE_SCHEMA = (
     FEATURE_SCHEMA_RICH
-    if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE
+    if USES_EDGE_FEATURES
     else FEATURE_SCHEMA_LEGACY
 )
 INPUT_FEATURE_DIM = (
@@ -139,19 +201,37 @@ if TOXICITY_LOSS_WEIGHT < 0:
 
 TWOSIDES_EDGES = DRIVE_BASE / 'twosides' / 'drug_drug_edges.csv'
 TOXICITY_BRIDGE = DRIVE_BASE / 'checkpoints' / 'toxicity_smiles_bridge.csv'
+RESULTS_BASE = resolve_results_base()
 DEFAULT_CHECKPOINT_PATH = (
-    DRIVE_BASE / 'checkpoints' / 'candidates' / 'pxddi_edge_aware_candidate.pt'
-    if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE
-    else DRIVE_BASE / 'checkpoints' / 'pxddi_model.pt'
+    RESULTS_BASE / 'checkpoints' / 'pxddi_model.pt'
+    if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_LEGACY
+    else RESULTS_BASE / 'checkpoints' / 'candidates' / (
+        'pxddi_motif_edge_aware_candidate.pt'
+        if USE_MOTIF_FEATURES
+        else 'pxddi_cross_attention_edge_aware_candidate.pt'
+        if USE_CROSS_DRUG_ATTENTION
+        else 'pxddi_edge_aware_candidate.pt'
+    )
 )
 CHECKPOINT_PATH = Path(os.environ.get('PXDDI_CHECKPOINT_PATH', DEFAULT_CHECKPOINT_PATH))
 RUN_ID = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-ARTIFACTS_BASE = Path(os.environ.get('PXDDI_ARTIFACTS_BASE', DRIVE_BASE / 'artifacts'))
+ARTIFACTS_BASE = Path(os.environ.get('PXDDI_ARTIFACTS_BASE', RESULTS_BASE / 'artifacts'))
 RUN_ARTIFACTS_DIR = ARTIFACTS_BASE / f'run_{RUN_ID}'
 LATEST_RESULTS_DIR = Path(
-    os.environ.get('PXDDI_LATEST_RESULTS_DIR', DRIVE_BASE / 'latest_results')
+    os.environ.get('PXDDI_LATEST_RESULTS_DIR', RESULTS_BASE / 'latest_results')
 )
 PUBLISH_LATEST_RESULTS = _boolean_from_environment('PXDDI_PUBLISH_LATEST_RESULTS', True)
+RUN_CANDIDATE_EXPLANATIONS = _boolean_from_environment(
+    'PXDDI_RUN_CANDIDATE_EXPLANATIONS', False
+)
+EXPLANATION_SAMPLES_PER_SPLIT = _positive_int_from_environment(
+    'PXDDI_EXPLANATION_SAMPLES_PER_SPLIT', 4
+)
+EXPLANATION_TOP_K = _positive_int_from_environment('PXDDI_EXPLANATION_TOP_K', 5)
+CONFORMAL_ALPHA = _open_unit_interval_from_environment('PXDDI_CONFORMAL_ALPHA', 0.1)
+APPLICABILITY_DOMAIN_MINIMUM_SIMILARITY = _closed_unit_interval_from_environment(
+    'PXDDI_APPLICABILITY_DOMAIN_MINIMUM_SIMILARITY', 0.4
+)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -278,6 +358,10 @@ def build_run_manifest() -> dict[str, Any]:
         'toxicity_bridge': TOXICITY_BRIDGE,
         'training_source': Path(__file__),
     }
+    if USE_MOTIF_FEATURES:
+        required_paths['motif_definitions_source'] = (
+            PROJECT_ROOT / 'src' / 'data_prep' / 'molecular_motifs.py'
+        )
     missing = [name for name, path in required_paths.items() if not path.exists()]
     if missing:
         raise FileNotFoundError(f'Missing required Colab inputs: {missing}.')
@@ -285,6 +369,8 @@ def build_run_manifest() -> dict[str, Any]:
         'run_id': RUN_ID,
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
         'device': str(DEVICE),
+        'input_data_base': str(DRIVE_BASE),
+        'results_base': str(RESULTS_BASE),
         'repository_git_commit': repository_git_commit(),
         'runtime_environment': runtime_environment(),
         'random_seed': SEED,
@@ -298,14 +384,40 @@ def build_run_manifest() -> dict[str, Any]:
             'use_chemberta': USE_CHEMBERTA,
             'model_architecture': MODEL_ARCHITECTURE,
             'feature_schema': FEATURE_SCHEMA,
+            'use_motif_features': USE_MOTIF_FEATURES,
+            'use_cross_drug_attention': USE_CROSS_DRUG_ATTENTION,
+            'cross_drug_attention_type': (
+                'pair_isolated_atom_attention_v1'
+                if USE_CROSS_DRUG_ATTENTION else None
+            ),
+            'motif_feature_schema': (
+                MOTIF_SCHEMA_SMARTS_COUNTS_V1 if USE_MOTIF_FEATURES else None
+            ),
+            'motif_feature_dim': MOTIF_FEATURE_DIM if USE_MOTIF_FEATURES else None,
+            'motif_hidden_channels': MOTIF_HIDDEN_CHANNELS if USE_MOTIF_FEATURES else None,
             'use_toxicity_pair_features': USE_TOXICITY_PAIR_FEATURES,
             'toxicity_loss_weight': TOXICITY_LOSS_WEIGHT,
             'edge_feature_dim': (
                 NUM_BOND_FEATURES
-                if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE else None
+                if USES_EDGE_FEATURES else None
             ),
             'negative_label_meaning': 'unreported_twosides_sampled',
             'toxicity_conflict_policy': 'exclude_conflicting_structures',
+            'candidate_explanations': {
+                'enabled': RUN_CANDIDATE_EXPLANATIONS,
+                'method': EXPLANATION_METHOD,
+                'samples_per_split': EXPLANATION_SAMPLES_PER_SPLIT,
+                'top_k': EXPLANATION_TOP_K,
+                'uses_raw_model_probabilities': True,
+            },
+            'uncertainty': {
+                'conformal_method': 'split_conformal_binary_v1',
+                'conformal_alpha': CONFORMAL_ALPHA,
+                'applicability_domain_method': 'nearest_train_ecfp_tanimoto_v1',
+                'applicability_domain_minimum_similarity': (
+                    APPLICABILITY_DOMAIN_MINIMUM_SIMILARITY
+                ),
+            },
         },
         'input_sha256': {name: get_file_hash(path) for name, path in required_paths.items()},
     }
@@ -385,14 +497,17 @@ def publish_latest_results(
         shutil.copy2(source, destination)
         copied_files.append(str(relative))
 
-    figure_dir = run_dir / 'figures'
-    for source in sorted(figure_dir.rglob('*')):
-        if source.is_file():
-            relative = source.relative_to(run_dir)
-            destination = latest_dir / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            copied_files.append(str(relative))
+    for artifact_subdirectory in ('figures', 'predictions', 'explanations', 'uncertainty'):
+        artifact_dir = run_dir / artifact_subdirectory
+        if not artifact_dir.exists():
+            continue
+        for source in sorted(artifact_dir.rglob('*')):
+            if source.is_file():
+                relative = source.relative_to(run_dir)
+                destination = latest_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                copied_files.append(str(relative))
 
     write_json(latest_dir / 'latest_run.json', {
         'source_run_directory': str(run_dir),
@@ -520,8 +635,9 @@ def load_toxicity_lookup(audit_dir: Path) -> tuple[dict[str, float], dict[str, A
 
 class GraphCache:
     """Reuse immutable SMILES graphs across train/validation/test loaders."""
-    def __init__(self, feature_schema: str) -> None:
+    def __init__(self, feature_schema: str, include_motif_features: bool = False) -> None:
         self.feature_schema = feature_schema
+        self.include_motif_features = include_motif_features
         self._graphs: dict[str, Any] = {}
         self.hits = 0
         self.misses = 0
@@ -533,7 +649,11 @@ class GraphCache:
             graph = self._graphs[key]
         else:
             self.misses += 1
-            graph = smiles_to_graph(key, feature_schema=self.feature_schema)
+            graph = smiles_to_graph(
+                key,
+                feature_schema=self.feature_schema,
+                include_motif_features=self.include_motif_features,
+            )
             self._graphs[key] = graph
         return graph.clone() if graph is not None else None
 
@@ -541,6 +661,7 @@ class GraphCache:
         requests = self.hits + self.misses
         return {
             'feature_schema': self.feature_schema,
+            'include_motif_features': self.include_motif_features,
             'unique_smiles_cached': len(self._graphs),
             'graph_requests': requests,
             'cache_hits': self.hits,
@@ -565,7 +686,9 @@ class PxDDIDataset(Dataset):
         self.records = []
         self.metadata: list[dict[str, Any]] = []
         self.skipped_count = 0
-        self.graph_cache = graph_cache or GraphCache(FEATURE_SCHEMA)
+        self.graph_cache = graph_cache or GraphCache(
+            FEATURE_SCHEMA, include_motif_features=USE_MOTIF_FEATURES
+        )
         for row in dataframe.itertuples(index=False):
             source = getattr(row, source_col)
             target = getattr(row, target_col)
@@ -721,6 +844,118 @@ def select_validation_threshold(labels: np.ndarray, predictions: np.ndarray) -> 
     return float(thresholds[np.argmax(true_positive_rate - false_positive_rate)])
 
 
+def partition_validation_for_posthoc(
+    labels: np.ndarray,
+    seed: int = SEED,
+) -> dict[str, Any]:
+    """Create disjoint calibration, threshold, and conformal validation roles.
+
+    Keeping these roles separate prevents a post-hoc calibrator, decision
+    threshold, and conformal nonconformity distribution from each evaluating
+    themselves.  The model still uses the overall validation split for early
+    stopping, which is recorded separately in the run manifest.
+    """
+    targets = np.asarray(labels, dtype=int)
+    if targets.ndim != 1 or len(targets) == 0:
+        raise ValueError('Validation labels must be a non-empty one-dimensional array.')
+    if not np.isin(targets, (0, 1)).all() or len(np.unique(targets)) < 2:
+        raise ValueError('Post-hoc validation partitioning requires both binary classes.')
+
+    class_indices = {label: np.flatnonzero(targets == label) for label in (0, 1)}
+    minimum_class_count = min(len(indices) for indices in class_indices.values())
+    if minimum_class_count < 3:
+        all_indices = np.arange(len(targets), dtype=int)
+        return {
+            'status': 'reused_validation_insufficient_per_class_count',
+            'independent_roles': False,
+            'reason': (
+                'At least three examples of each class are required for disjoint '
+                'calibration, threshold, and conformal roles.'
+            ),
+            'indices': {
+                'calibration': all_indices,
+                'threshold': all_indices,
+                'conformal': all_indices,
+            },
+        }
+
+    generator = np.random.default_rng(seed)
+    role_indices = {'calibration': [], 'threshold': [], 'conformal': []}
+    for label in (0, 1):
+        shuffled = generator.permutation(class_indices[label])
+        role_sizes = [len(shuffled) // 3] * 3
+        for offset in range(len(shuffled) % 3):
+            role_sizes[offset] += 1
+        start = 0
+        for role, role_size in zip(role_indices, role_sizes):
+            role_indices[role].extend(shuffled[start:start + role_size].tolist())
+            start += role_size
+    indices = {
+        role: np.asarray(sorted(values), dtype=int)
+        for role, values in role_indices.items()
+    }
+    return {
+        'status': 'stratified_disjoint_three_way',
+        'independent_roles': True,
+        'seed': int(seed),
+        'indices': indices,
+    }
+
+
+def posthoc_validation_partition_summary(
+    labels: np.ndarray,
+    partition: dict[str, Any],
+) -> dict[str, Any]:
+    """Produce JSON-safe counts for the three post-hoc validation roles."""
+    targets = np.asarray(labels, dtype=int)
+    roles = {}
+    for role, indices in partition['indices'].items():
+        role_labels = targets[indices]
+        roles[role] = {
+            'rows': int(len(indices)),
+            'negative_count': int((role_labels == 0).sum()),
+            'positive_count': int((role_labels == 1).sum()),
+        }
+    return {
+        'status': partition['status'],
+        'independent_roles': partition['independent_roles'],
+        'reason': partition.get('reason'),
+        'roles': roles,
+    }
+
+
+def save_posthoc_validation_partition_artifact(
+    loader: DataLoader,
+    labels: np.ndarray,
+    raw_predictions: np.ndarray,
+    calibrated_predictions: np.ndarray,
+    partition: dict[str, Any],
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    """Save the exact validation roles used by post-hoc analysis."""
+    if len(loader.dataset.metadata) != len(labels):
+        raise RuntimeError('Validation provenance does not match post-hoc labels.')
+    assignments = np.full(len(labels), 'not_assigned', dtype=object)
+    for role, indices in partition['indices'].items():
+        if np.any(assignments[indices] != 'not_assigned'):
+            assignments[indices] = assignments[indices] + '|' + role
+        else:
+            assignments[indices] = role
+    table = pd.DataFrame(loader.dataset.metadata)
+    table['label'] = labels
+    table['raw_prediction_score'] = raw_predictions
+    table['calibrated_prediction_score'] = calibrated_predictions
+    table['posthoc_validation_role'] = assignments
+    table['posthoc_roles_independent'] = partition['independent_roles']
+    path = artifact_dir / 'posthoc_validation_partition.csv'
+    table.to_csv(path, index=False)
+    return {
+        **posthoc_validation_partition_summary(labels, partition),
+        'path': str(path),
+        'sha256': get_file_hash(path),
+    }
+
+
 def should_stop_early(
     epoch: int,
     epochs_without_improvement: int,
@@ -791,6 +1026,7 @@ def save_prediction_artifact(
     threshold: float,
     prediction_dir: Path,
     calibration: dict[str, Any],
+    additional_columns: dict[str, Any] | None = None,
 ) -> Path:
     metadata = loader.dataset.metadata
     if len(metadata) != len(labels):
@@ -804,9 +1040,142 @@ def save_prediction_artifact(
     table['calibration_method'] = calibration.get('method')
     table['threshold'] = threshold
     table['predicted_label'] = (calibrated_predictions >= threshold).astype(int)
+    for column_name, values in (additional_columns or {}).items():
+        if len(values) != len(table):
+            raise ValueError(
+                f'Additional prediction column {column_name!r} does not match '
+                'the evaluated dataset length.'
+            )
+        table[column_name] = values
     prediction_path = prediction_dir / f'{name.lower().replace(" ", "_")}_predictions.csv'
     table.to_csv(prediction_path, index=False)
     return prediction_path
+
+
+def generate_candidate_explanation_artifact(
+    model: PxDDIModel,
+    evaluation_data: dict[str, dict[str, Any]],
+    explanation_dir: Path,
+) -> dict[str, Any]:
+    """Write a bounded, offline explanation audit for experimental candidates.
+
+    This deliberately runs only when requested.  Occlusion is much slower than
+    normal inference, and the output is a research artifact rather than an API
+    feature.  A single failed example is captured in the JSON without losing a
+    completed training run or its benchmark results.
+    """
+    if not RUN_CANDIDATE_EXPLANATIONS:
+        return {
+            'status': 'disabled',
+            'reason': 'Set PXDDI_RUN_CANDIDATE_EXPLANATIONS=1 to generate a bounded offline audit.',
+            'method': EXPLANATION_METHOD,
+        }
+    if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_LEGACY:
+        return {
+            'status': 'not_applicable',
+            'reason': (
+                'The deployed legacy model keeps its existing API explanation path. '
+                'Candidate occlusion artifacts are reserved for experimental architectures.'
+            ),
+            'method': EXPLANATION_METHOD,
+        }
+
+    explanation_dir.mkdir(parents=True, exist_ok=True)
+    graph_builder = lambda smiles: smiles_to_graph(
+        smiles,
+        feature_schema=FEATURE_SCHEMA,
+        include_motif_features=USE_MOTIF_FEATURES,
+    )
+    artifact: dict[str, Any] = {
+        'method': EXPLANATION_METHOD,
+        'model_architecture': MODEL_ARCHITECTURE,
+        'uses_raw_model_probabilities': True,
+        'scope_limitations': EXPLANATION_LIMITATIONS,
+        'samples_per_split_limit': EXPLANATION_SAMPLES_PER_SPLIT,
+        'top_k': EXPLANATION_TOP_K,
+        'splits': {},
+    }
+    for split_name, payload in evaluation_data.items():
+        loader = payload['loader']
+        labels = payload['labels']
+        raw_predictions = payload['raw_predictions']
+        calibrated_predictions = payload['calibrated_predictions']
+        threshold = payload['threshold']
+        selected_indices = select_representative_indices(
+            labels, calibrated_predictions, threshold, EXPLANATION_SAMPLES_PER_SPLIT
+        )
+        examples = []
+        for index in selected_indices:
+            graph_a, graph_b, *_ = loader.dataset.records[index]
+            metadata = loader.dataset.metadata[index]
+            example: dict[str, Any] = {
+                'dataset_index': int(index),
+                'source': metadata['source'],
+                'target': metadata['target'],
+                'label': int(labels[index]),
+                'label_evidence': metadata['label_evidence'],
+                'raw_prediction_score': float(raw_predictions[index]),
+                'calibrated_prediction_score': float(calibrated_predictions[index]),
+                'validation_selected_threshold': float(threshold),
+                'predicted_label': int(calibrated_predictions[index] >= threshold),
+            }
+            try:
+                example['explanation'] = explain_pair_with_occlusion(
+                    model,
+                    graph_a,
+                    graph_b,
+                    metadata['source'],
+                    metadata['target'],
+                    motif_names=MOTIF_FEATURE_NAMES if USE_MOTIF_FEATURES else (),
+                    top_k=EXPLANATION_TOP_K,
+                    graph_builder=graph_builder,
+                )
+            except Exception as error:  # Keep a completed candidate run auditable.
+                example['explanation_error'] = {
+                    'type': type(error).__name__,
+                    'message': str(error),
+                }
+            examples.append(example)
+        artifact['splits'][split_name] = {
+            'evaluated_rows': int(len(labels)),
+            'selected_dataset_indices': selected_indices,
+            'examples': examples,
+        }
+
+    artifact_path = explanation_dir / 'candidate_occlusion_explanations.json'
+    write_json(artifact_path, artifact)
+    return {
+        'status': 'generated',
+        'method': EXPLANATION_METHOD,
+        'path': str(artifact_path),
+        'sha256': get_file_hash(artifact_path),
+        'samples_per_split_limit': EXPLANATION_SAMPLES_PER_SPLIT,
+        'top_k': EXPLANATION_TOP_K,
+        'scope_limitations': EXPLANATION_LIMITATIONS,
+    }
+
+
+def save_conformal_calibration_artifact(
+    conformal: dict[str, Any], uncertainty_dir: Path
+) -> dict[str, Any]:
+    """Persist the validation nonconformity values behind conformal p-values."""
+    if conformal.get('status') != 'fitted':
+        return {
+            'status': conformal.get('status', 'not_fitted'),
+            'path': None,
+            'sha256': None,
+        }
+    uncertainty_dir.mkdir(parents=True, exist_ok=True)
+    path = uncertainty_dir / 'conformal_validation_nonconformity.csv'
+    pd.DataFrame({
+        'validation_nonconformity_score': conformal['validation_nonconformity_scores']
+    }).to_csv(path, index=False)
+    return {
+        'status': 'saved',
+        'path': str(path),
+        'sha256': get_file_hash(path),
+        'rows': int(len(conformal['validation_nonconformity_scores'])),
+    }
 
 
 def _save_figure(figure, destination: Path) -> None:
@@ -951,12 +1320,33 @@ def model_summary(model: PxDDIModel) -> dict[str, Any]:
         'input_atom_features': INPUT_FEATURE_DIM,
         'edge_feature_dim': (
             NUM_BOND_FEATURES
-            if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE else None
+            if USES_EDGE_FEATURES else None
         ),
+        'use_motif_features': USE_MOTIF_FEATURES,
+        'use_cross_drug_attention': USE_CROSS_DRUG_ATTENTION,
+        'cross_drug_attention_type': (
+            'pair_isolated_atom_attention_v1'
+            if USE_CROSS_DRUG_ATTENTION else None
+        ),
+        'motif_feature_schema': (
+            MOTIF_SCHEMA_SMARTS_COUNTS_V1 if USE_MOTIF_FEATURES else None
+        ),
+        'motif_feature_dim': MOTIF_FEATURE_DIM if USE_MOTIF_FEATURES else None,
+        'motif_hidden_channels': MOTIF_HIDDEN_CHANNELS if USE_MOTIF_FEATURES else None,
+        'motif_metadata': motif_metadata() if USE_MOTIF_FEATURES else None,
         'hidden_channels': HIDDEN_CHANNELS,
         'use_chemberta': USE_CHEMBERTA,
         'pair_representation': (
-            'embedding_sum + absolute_embedding_difference + toxicity_sum + absolute_toxicity_difference'
+            'graph_embedding_plus_pair_isolated_cross_drug_atom_attention_sum + absolute_difference + toxicity_sum + absolute_toxicity_difference'
+            if USE_CROSS_DRUG_ATTENTION and USE_TOXICITY_PAIR_FEATURES
+            else 'graph_embedding_plus_pair_isolated_cross_drug_atom_attention_sum + absolute_difference'
+            if USE_CROSS_DRUG_ATTENTION
+            else
+            'graph_embedding_plus_motif_embedding_sum + absolute_difference + toxicity_sum + absolute_toxicity_difference'
+            if USE_MOTIF_FEATURES and USE_TOXICITY_PAIR_FEATURES
+            else 'graph_embedding_plus_motif_embedding_sum + absolute_difference'
+            if USE_MOTIF_FEATURES
+            else 'embedding_sum + absolute_embedding_difference + toxicity_sum + absolute_toxicity_difference'
             if USE_TOXICITY_PAIR_FEATURES
             else 'embedding_sum + absolute_embedding_difference'
         ),
@@ -1041,7 +1431,9 @@ def main() -> None:
     )
     split_manifest = save_split_manifests(splits, RUN_ARTIFACTS_DIR)
 
-    graph_cache = GraphCache(FEATURE_SCHEMA)
+    graph_cache = GraphCache(
+        FEATURE_SCHEMA, include_motif_features=USE_MOTIF_FEATURES
+    )
     train_loader = build_loader(
         splits['transductive_train'], toxicity_lookup, shuffle=True, graph_cache=graph_cache
     )
@@ -1081,9 +1473,11 @@ def main() -> None:
         architecture_version=MODEL_ARCHITECTURE,
         edge_feature_dim=(
             NUM_BOND_FEATURES
-            if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE else None
+            if USES_EDGE_FEATURES else None
         ),
         use_toxicity_pair_features=USE_TOXICITY_PAIR_FEATURES,
+        motif_feature_dim=MOTIF_FEATURE_DIM if USE_MOTIF_FEATURES else None,
+        motif_hidden_channels=MOTIF_HIDDEN_CHANNELS if USE_MOTIF_FEATURES else None,
     ).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
@@ -1132,7 +1526,20 @@ def main() -> None:
                     'feature_schema': FEATURE_SCHEMA,
                     'edge_feature_dim': (
                         NUM_BOND_FEATURES
-                        if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_EDGE_AWARE else None
+                        if USES_EDGE_FEATURES else None
+                    ),
+                    'motif_feature_schema': (
+                        MOTIF_SCHEMA_SMARTS_COUNTS_V1 if USE_MOTIF_FEATURES else None
+                    ),
+                    'motif_feature_dim': MOTIF_FEATURE_DIM if USE_MOTIF_FEATURES else None,
+                    'motif_hidden_channels': (
+                        MOTIF_HIDDEN_CHANNELS if USE_MOTIF_FEATURES else None
+                    ),
+                    'motif_metadata': motif_metadata() if USE_MOTIF_FEATURES else None,
+                    'use_cross_drug_attention': USE_CROSS_DRUG_ATTENTION,
+                    'cross_drug_attention_type': (
+                        'pair_isolated_atom_attention_v1'
+                        if USE_CROSS_DRUG_ATTENTION else None
                     ),
                     'use_toxicity_pair_features': USE_TOXICITY_PAIR_FEATURES,
                     'toxicity_loss_weight': TOXICITY_LOSS_WEIGHT,
@@ -1159,20 +1566,67 @@ def main() -> None:
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     validation_true, validation_raw_predictions = collect_predictions(model, validation_loader)
-    calibration = fit_platt_calibrator(validation_true, validation_raw_predictions)
+    posthoc_partition = partition_validation_for_posthoc(validation_true, seed=SEED)
+    calibration_indices = posthoc_partition['indices']['calibration']
+    threshold_indices = posthoc_partition['indices']['threshold']
+    conformal_indices = posthoc_partition['indices']['conformal']
+    calibration = fit_platt_calibrator(
+        validation_true[calibration_indices],
+        validation_raw_predictions[calibration_indices],
+        fitted_on=(
+            'validation_calibration_partition'
+            if posthoc_partition['independent_roles']
+            else 'reused_validation_insufficient_per_class_count'
+        ),
+    )
     validation_calibrated_predictions = apply_calibrator(
         validation_raw_predictions, calibration
     )
+    conformal = fit_split_conformal_binary(
+        validation_true[conformal_indices],
+        validation_calibrated_predictions[conformal_indices],
+        alpha=CONFORMAL_ALPHA,
+        fitted_on=(
+            'validation_conformal_partition'
+            if posthoc_partition['independent_roles']
+            else 'reused_validation_insufficient_per_class_count'
+        ),
+    )
+    conformal_artifact = save_conformal_calibration_artifact(
+        conformal, RUN_ARTIFACTS_DIR / 'uncertainty'
+    )
+    posthoc_partition_artifact = save_posthoc_validation_partition_artifact(
+        validation_loader,
+        validation_true,
+        validation_raw_predictions,
+        validation_calibrated_predictions,
+        posthoc_partition,
+        RUN_ARTIFACTS_DIR / 'uncertainty',
+    )
+    training_smiles = {
+        metadata[column]
+        for metadata in train_loader.dataset.metadata
+        for column in ('source', 'target')
+    }
+    applicability_domain = MorganApplicabilityDomain(
+        minimum_similarity=APPLICABILITY_DOMAIN_MINIMUM_SIMILARITY
+    )
+    applicability_domain_summary = applicability_domain.fit(training_smiles)
     frozen_threshold = select_validation_threshold(
-        validation_true, validation_calibrated_predictions
+        validation_true[threshold_indices], validation_calibrated_predictions[threshold_indices]
     )
     checkpoint['threshold'] = frozen_threshold
     checkpoint['calibration'] = calibration
+    checkpoint['posthoc_validation_partition'] = {
+        key: value for key, value in posthoc_partition_artifact.items()
+        if key not in {'path', 'sha256'}
+    }
     checkpoint_hash = safe_checkpoint_save(checkpoint, CHECKPOINT_PATH)
 
     plot_training_curves(history, figure_dir)
     history_summary = save_training_history(history, RUN_ARTIFACTS_DIR)
     results: dict[str, dict[str, Any]] = {}
+    evaluation_data: dict[str, dict[str, Any]] = {}
     for name, loader in test_loaders.items():
         labels, raw_predictions = collect_predictions(model, loader)
         calibrated_predictions = apply_calibrator(raw_predictions, calibration)
@@ -1182,6 +1636,20 @@ def main() -> None:
             frozen_threshold,
             raw_predictions=raw_predictions,
         )
+        conformal_sets = conformal_prediction_sets(calibrated_predictions, conformal)
+        applicability_scores = applicability_domain.score_pairs(
+            [metadata['source'] for metadata in loader.dataset.metadata],
+            [metadata['target'] for metadata in loader.dataset.metadata],
+        )
+        additional_prediction_columns = {
+            'predictive_entropy_nats': predictive_entropy(calibrated_predictions),
+            'conformal_no_interaction_p_value': conformal_sets['no_interaction_p_value'],
+            'conformal_interaction_p_value': conformal_sets['interaction_p_value'],
+            'conformal_prediction_set': conformal_sets['prediction_set'],
+            'conformal_prediction_set_size': conformal_sets['set_size'],
+            'conformal_abstain': conformal_sets['abstain'],
+            **applicability_scores,
+        }
         prediction_path = save_prediction_artifact(
             name,
             loader,
@@ -1191,11 +1659,31 @@ def main() -> None:
             frozen_threshold,
             prediction_dir,
             calibration,
+            additional_columns=additional_prediction_columns,
         )
         metrics['prediction_path'] = str(prediction_path)
         metrics['prediction_sha256'] = get_file_hash(prediction_path)
         metrics['skipped_invalid_smiles'] = int(loader.dataset.skipped_count)
+        metrics['uncertainty'] = summarize_conformal_test_labels(labels, conformal_sets)
+        metrics['uncertainty'].update({
+            'method': conformal['method'],
+            'alpha': conformal['alpha'],
+            'interpretation_warning': conformal['interpretation_warning'],
+        })
+        metrics['applicability_domain'] = {
+            'structural_ood_count': int(applicability_scores['structural_ood_flag'].sum()),
+            'structural_ood_rate': float(applicability_scores['structural_ood_flag'].mean()),
+            'minimum_tanimoto_similarity': APPLICABILITY_DOMAIN_MINIMUM_SIMILARITY,
+            'interpretation_warning': applicability_domain_summary['interpretation_warning'],
+        }
         results[name] = metrics
+        evaluation_data[name] = {
+            'loader': loader,
+            'labels': labels,
+            'raw_predictions': raw_predictions,
+            'calibrated_predictions': calibrated_predictions,
+            'threshold': frozen_threshold,
+        }
         plot_evaluation(
             name,
             labels,
@@ -1207,6 +1695,9 @@ def main() -> None:
     plot_benchmark_comparison(results, figure_dir)
     plot_toxicity_bridge_coverage(toxicity_summary, figure_dir)
     write_json(RUN_ARTIFACTS_DIR / 'results_summary.json', results)
+    explanation_summary = generate_candidate_explanation_artifact(
+        model, evaluation_data, RUN_ARTIFACTS_DIR / 'explanations'
+    )
 
     manifest.update({
         'completed_at_utc': datetime.now(timezone.utc).isoformat(),
@@ -1218,6 +1709,15 @@ def main() -> None:
             'validation_selected_threshold': frozen_threshold,
         },
         'calibration': calibration,
+        'uncertainty': {
+            'conformal': {
+                key: value for key, value in conformal.items()
+                if key != 'validation_nonconformity_scores'
+            },
+            'conformal_validation_artifact': conformal_artifact,
+            'posthoc_validation_partition': posthoc_partition_artifact,
+            'applicability_domain': applicability_domain_summary,
+        },
         'model_summary': model_summary(model),
         'training_history': history_summary,
         'early_stopping': {
@@ -1234,6 +1734,7 @@ def main() -> None:
         'graph_cache': graph_cache.summary(),
         'split_manifest': split_manifest,
         'results': results,
+        'candidate_explanations': explanation_summary,
         'latest_results_directory': str(LATEST_RESULTS_DIR) if PUBLISH_LATEST_RESULTS else None,
     })
     write_json(RUN_ARTIFACTS_DIR / 'run_manifest.json', manifest)

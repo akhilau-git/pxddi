@@ -26,3 +26,13 @@ def test_legacy_or_unfitted_calibration_returns_raw_scores_safely():
     assert returned[0] > 0
     assert returned[-1] < 1
     assert returned[1] == 0.5
+
+
+def test_calibration_records_its_exact_fit_partition_role():
+    calibration = fit_platt_calibrator(
+        [0, 0, 1, 1], [0.1, 0.2, 0.8, 0.9],
+        fitted_on='validation_calibration_partition',
+    )
+
+    assert calibration['fitted_on'] == 'validation_calibration_partition'
+    assert calibration['fitted_partition_sample_count'] == 4

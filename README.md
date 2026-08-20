@@ -79,6 +79,14 @@ after installing the requirements before starting training. The run manifest
 records the resolved package versions, so the installed environment remains
 auditable.
 
+Google Drive shortcuts may be read-only even when the source data inside them
+is accessible. In that case set `PXDDI_DATA_BASE` to the shared shortcut and
+`PXDDI_RESULTS_BASE` to a writable folder in your own `MyDrive`. Normal GNN
+and ECFP baseline runs will then read the TWOSIDES CSV and toxicity bridge from
+the shortcut while storing artifacts, latest results, and new candidate
+checkpoints under the writable results folder. The run manifest records both
+locations. This never alters the deployed backend checkpoint.
+
 Each run creates `artifacts/run_<timestamp>/` in Drive containing an initial
 and final manifest, resolved package/GPU environment, source revision, model
 summary, numeric training-history CSV, clean toxicity-label and input-quality
@@ -99,6 +107,62 @@ GAT checkpoint. New training defaults to an **edge-aware candidate** checkpoint
 at `checkpoints/candidates/pxddi_edge_aware_candidate.pt`; it does not replace
 the deployed model automatically. The candidate uses richer atom features and
 bond order, stereo, chirality, conjugation, aromaticity, and ring features.
+
+An additional untrained research candidate,
+`motif_edge_aware_gat_v1`, can be selected with
+`PXDDI_MODEL_ARCHITECTURE=motif_edge_aware_gat_v1`. It fuses the edge-aware
+graph embedding with 17 fixed SMARTS motif-count features, including carbonyl,
+amide, ester, aromatic-ring, amine, halogen, and other common chemical motifs.
+The motif vocabulary is explicit in `src/data_prep/molecular_motifs.py` and is
+recorded in each run manifest. These are experimental chemical-prior features,
+not proven DDI mechanisms or validated explanations.
+
+Another separate untrained candidate,
+`cross_attention_edge_aware_gat_v1`, can be selected with
+`PXDDI_MODEL_ARCHITECTURE=cross_attention_edge_aware_gat_v1`. After the
+edge-aware encoder produces atom embeddings, each atom in Drug A attends only
+to atoms in its paired Drug B, and vice versa. Attention is isolated within
+each DDI row—no molecule can attend to a different pair in the batch. Its
+shared two-way projections and final sum/absolute-difference pair head preserve
+the A–B/B–A symmetry guarantee. Attention values are not evidence of a chemical
+mechanism or validated explanations.
+
+### Candidate explanation audit (optional)
+
+For a **trained candidate only**, set
+`PXDDI_RUN_CANDIDATE_EXPLANATIONS=1` when launching
+`src/training/train_full_pipeline_v2.py`. The run then writes a small,
+deterministically selected evaluation subset to
+`artifacts/run_<timestamp>/explanations/candidate_occlusion_explanations.json`.
+For each example it records raw-score changes after masking one atom, bond
+feature, or (where applicable) SMARTS motif; top-atom fidelity/sufficiency
+checks; A–B versus B–A score symmetry; and canonical-SMILES re-encoding score
+stability. The cross-attention candidate additionally records its strongest
+pair-isolated atom-to-atom attention associations.
+
+This is intentionally disabled by default, because masking each component is
+slower than ordinary inference. It is an offline research audit, not a backend
+endpoint, and its output must not be described as causal chemical evidence or
+clinical explanation. The latest-results mirror also copies the explanation
+and prediction files from a completed run for easy inspection.
+
+### Uncertainty and structural-domain audit
+
+Every new run partitions the post-training validation predictions by class into
+three disjoint roles: Platt-calibration fitting, decision-threshold selection,
+and binary split-conformal fitting (default `PXDDI_CONFORMAL_ALPHA=0.1`). The
+exact roles, scores, and hash are stored in the run artifact. Each saved test
+prediction states whether its conformal set is a single label, both labels, or
+an empty set; both-label and empty sets are marked `conformal_abstain=true`.
+The prediction CSV also records Bernoulli score entropy and a
+nearest-training-drug ECFP/Tanimoto structural-domain flag (default minimum
+similarity `0.4`).
+
+These are research guardrails, not clinical confidence. The conformal coverage
+assumption may fail under the S1/S2 distribution shifts, and molecular
+similarity does not measure novelty of a DDI pair or prove reliability. An OOD
+flag tells the reviewer to inspect or abstain; an unflagged result is still not
+validated or safe.
 
 Candidate training applies validation-AUROC early stopping after at least 40
 epochs, with a default patience of 30 non-improving epochs. Set
@@ -124,6 +188,24 @@ intervals. The ECFP baseline can be included in any deliberate run through
 `ECFP_a+ECFP_b` and `|ECFP_a-ECFP_b|` features, so reversing the drug order
 does not change its score. A screening result is directional evidence only; it
 is not statistical proof. Neither mode promotes a model automatically.
+
+The ablation suite now also exposes `motif_edge_aware_ddi_only` and
+`motif_edge_aware_multitask`. Do not treat their presence as a result: keep the
+motif component only if repeated, matched-seed results improve S1/S2 over the
+edge-aware GATv2 reference without degrading calibration.
+
+It also exposes `cross_attention_edge_aware_ddi_only` and
+`cross_attention_edge_aware_multitask`. Keep the cross-drug component only if
+it improves repeated matched-seed S1/S2 results over the same edge-aware GATv2
+reference, without an unacceptable calibration or efficiency regression.
+
+If `PXDDI_DATA_BASE` is a read-only Google Drive shortcut, keep it pointed at
+the shared data and set `PXDDI_EXPERIMENTS_BASE` to a writable folder in your
+own Drive before running the experiment suite. The suite then reads source data
+from the shortcut but writes study artifacts and candidate checkpoints to the
+writable location. `PXDDI_EXPERIMENTS_BASE` controls the complete study folder;
+its child runs already receive their individual writable artifact and checkpoint
+paths automatically.
 
 External validation is supported by `src/training/evaluate_external_dataset.py`
 only after you supply an independently sourced, documented dataset and its

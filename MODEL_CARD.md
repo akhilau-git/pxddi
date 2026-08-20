@@ -65,16 +65,31 @@ in a report or comparison.
    bond order, stereochemistry, chirality, and other chemical detail. The
    separate edge-aware candidate adds these atom and bond features, but has not
    solved S1 generalization and is not promoted.
+   A separate motif-edge-aware candidate additionally uses fixed SMARTS motif
+   counts. It is untrained in the committed project and its motifs are not
+   validated causal explanations.
+   A separate cross-attention edge-aware candidate lets atom embeddings from
+   the two drugs exchange pair-isolated attention messages. It is untrained,
+   not deployed, and its attention weights are not validated explanations.
 6. **Calibration:** the deployed legacy checkpoint is uncalibrated. Candidate
-   checkpoints can store a calibration mapping fitted only on the internal
-   validation split, which must not be presented as calibrated cold-start,
-   external, or clinical performance.
+   checkpoints can store a calibration mapping fitted on a disjoint internal
+   validation-calibration partition, which must not be presented as calibrated
+   cold-start, external, or clinical performance.
+   New candidate run artifacts additionally include validation-only
+   split-conformal sets and nearest-training-drug ECFP similarity flags. These
+   are abstention/review signals under stated assumptions, not clinical
+   confidence, a safety guarantee, or a cure for S1/S2 distribution shift.
 7. **Validation:** no external, temporal, prospective, or clinical validation
    has been performed.
 8. **Explanation:** `/explain` attributes molecular embeddings and applies a
    functional-group heuristic; it is not a final pair-risk explanation or a
-   literature validation. It is intentionally unavailable if an edge-aware
-   candidate is ever promoted, until a compatible explanation method is
+   literature validation. An optional, offline candidate audit now performs
+   single-component atom/bond/motif occlusion on a bounded evaluation subset,
+   with local fidelity/sufficiency, score-symmetry, and canonical-reencoding
+   checks. Cross-attention weights are also exported only as internal
+   associations. None of these outputs are causal mechanisms, chemical proof,
+   or clinically validated explanations. Candidate models remain unavailable
+   through `/explain` unless a separately reviewed API-compatible method is
    implemented and evaluated.
 9. **Security:** local CORS is restricted and explanation concurrency is
    bounded, but authentication, global rate limiting, audit logging, TLS,
@@ -105,6 +120,27 @@ The screening suite includes a non-deployment ECFP/Morgan-fingerprint +
 linear-logistic baseline. It is a necessary comparison point, not a claim of
 novelty or clinical utility. Its pair vector uses fingerprint sums and absolute
 differences so, like the GNN, it is order-independent.
+
+The suite also includes two explicit motif ablations: motif-edge-aware DDI-only
+and motif-edge-aware multi-task. They compare the fixed 17-feature SMARTS motif
+view against the same edge-aware graph encoder. The component must not be
+described as helpful until repeated matched-seed S1/S2 evidence supports it.
+
+Two additional cross-attention ablations—cross-attention edge-aware DDI-only
+and multi-task—test direct atom-level interaction reasoning against the same
+edge-aware reference. The attention layer is pair-isolated and the final head
+is still symmetric, but it must not be presented as a mechanism explanation or
+accuracy improvement until repeated matched-seed S1/S2, calibration, and
+efficiency evidence supports it.
+
+For a trained nonlegacy candidate, setting
+`PXDDI_RUN_CANDIDATE_EXPLANATIONS=1` writes a bounded offline occlusion audit
+under the immutable run artifact directory. It uses raw (not calibrated) model
+probabilities, stores the selected evaluation examples and all stated warnings,
+and does not alter the candidate checkpoint, legacy checkpoint, or API. It is
+evidence about local model behaviour only; a separate stability study and
+expert chemical review are still needed before it could support scientific
+interpretation.
 
 The training audit produces a counterion-candidate review table. It does not
 invent parent mappings for isolated ions or salts: an authoritative source and

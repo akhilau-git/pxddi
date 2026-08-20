@@ -6,6 +6,8 @@ from rdkit import Chem
 import torch
 from torch_geometric.data import Data
 
+from .molecular_motifs import motif_count_vector
+
 
 FEATURE_SCHEMA_LEGACY = 'legacy_v1'
 FEATURE_SCHEMA_RICH = 'rich_v2'
@@ -117,6 +119,7 @@ def graph_compatibility_reason(smiles) -> str | None:
 def smiles_to_graph(
     smiles,
     feature_schema: str = FEATURE_SCHEMA_LEGACY,
+    include_motif_features: bool = False,
 ):
     """Convert a graph-compatible SMILES into a PyG graph under one schema."""
     reason = graph_compatibility_reason(smiles)
@@ -146,4 +149,8 @@ def smiles_to_graph(
     )
     if feature_schema == FEATURE_SCHEMA_RICH:
         graph.edge_attr = torch.tensor(edge_features, dtype=torch.float)
+    if include_motif_features:
+        graph.motif_features = torch.tensor(
+            motif_count_vector(molecule), dtype=torch.float
+        ).unsqueeze(0)
     return graph

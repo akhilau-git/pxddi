@@ -72,6 +72,34 @@ EXPERIMENTS = (
         'use_toxicity_pair_features': True,
         'toxicity_loss_weight': 0.3,
     },
+    {
+        'name': 'motif_edge_aware_ddi_only',
+        'runner': 'gnn',
+        'architecture': 'motif_edge_aware_gat_v1',
+        'use_toxicity_pair_features': False,
+        'toxicity_loss_weight': 0.0,
+    },
+    {
+        'name': 'motif_edge_aware_multitask',
+        'runner': 'gnn',
+        'architecture': 'motif_edge_aware_gat_v1',
+        'use_toxicity_pair_features': True,
+        'toxicity_loss_weight': 0.3,
+    },
+    {
+        'name': 'cross_attention_edge_aware_ddi_only',
+        'runner': 'gnn',
+        'architecture': 'cross_attention_edge_aware_gat_v1',
+        'use_toxicity_pair_features': False,
+        'toxicity_loss_weight': 0.0,
+    },
+    {
+        'name': 'cross_attention_edge_aware_multitask',
+        'runner': 'gnn',
+        'architecture': 'cross_attention_edge_aware_gat_v1',
+        'use_toxicity_pair_features': True,
+        'toxicity_loss_weight': 0.3,
+    },
 )
 
 
@@ -80,6 +108,22 @@ def _parse_seeds(value: str) -> list[int]:
     if not seeds or any(seed <= 0 for seed in seeds):
         raise ValueError('PXDDI_EXPERIMENT_SEEDS must contain positive integers.')
     return seeds
+
+
+def resolve_experiments_base(
+    configured_path: str | Path | None = None,
+    data_base: Path = DRIVE_BASE,
+) -> Path:
+    """Select a writable output root separately from the read-only data root.
+
+    Shared Google Drive folders are often mounted through a read-only shortcut.
+    PxDDI can still read its source CSVs there, while ``PXDDI_EXPERIMENTS_BASE``
+    directs every study artifact and candidate checkpoint to the user's own
+    writable Drive location.
+    """
+    if configured_path is None:
+        configured_path = os.environ.get('PXDDI_EXPERIMENTS_BASE')
+    return Path(configured_path) if configured_path else data_base / 'experiments'
 
 
 def experiment_settings() -> tuple[list[int], int]:
@@ -358,11 +402,14 @@ def main() -> None:
                 f'Selected experiments: {sorted(experiment_names)}.'
             )
     study_id = datetime.now(timezone.utc).strftime('study_%Y%m%dT%H%M%SZ')
-    study_dir = DRIVE_BASE / 'experiments' / study_id
+    experiments_base = resolve_experiments_base()
+    study_dir = experiments_base / study_id
     study_dir.mkdir(parents=True, exist_ok=False)
     write_json(study_dir / 'study_plan.json', {
         'study_id': study_id,
         'preset': PRESET,
+        'input_data_base': str(DRIVE_BASE),
+        'experiments_base': str(experiments_base),
         'seeds': seeds,
         'epochs_per_run': epochs,
         'experiments': experiments,

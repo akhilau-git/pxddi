@@ -21,6 +21,9 @@ with patch('torch.cuda.is_available', return_value=True):
         filter_graph_compatible_pairs,
         get_file_hash,
         publish_latest_results,
+        partition_validation_for_posthoc,
+        posthoc_validation_partition_summary,
+        resolve_results_base,
         runtime_environment,
         save_counterion_curation_candidates,
         safe_checkpoint_save,
@@ -39,6 +42,14 @@ def test_get_file_hash():
         assert h == "8a46f52b4eb2d8bfadd3c6623b1534d3ccd424062343f6d4a0ff8852fb5bda30"
     finally:
         os.remove(tmp_path)
+
+
+def test_results_base_can_be_separate_from_read_only_input_data(tmp_path):
+    writable_results = tmp_path / 'my_drive' / 'pxddi_results'
+
+    assert resolve_results_base(
+        writable_results, data_base=tmp_path / 'shared_read_only_data'
+    ) == writable_results
 
 def test_safe_checkpoint_save_atomic_replace():
     """Verify safe_checkpoint_save writes to tmp, validates, then replaces."""
@@ -89,6 +100,31 @@ def test_early_stopping_waits_for_minimum_epochs_and_patience():
     assert not should_stop_early(40, 29, minimum_epochs=40, patience=30)
     assert should_stop_early(40, 30, minimum_epochs=40, patience=30)
     assert not should_stop_early(100, 100, minimum_epochs=40, patience=0)
+
+
+def test_posthoc_validation_roles_are_stratified_and_disjoint_when_possible():
+    labels = np.array([0] * 6 + [1] * 6)
+    partition = partition_validation_for_posthoc(labels, seed=123)
+    summary = posthoc_validation_partition_summary(labels, partition)
+
+    calibration = set(partition['indices']['calibration'].tolist())
+    threshold = set(partition['indices']['threshold'].tolist())
+    conformal = set(partition['indices']['conformal'].tolist())
+    assert partition['status'] == 'stratified_disjoint_three_way'
+    assert partition['independent_roles'] is True
+    assert not calibration & threshold
+    assert not calibration & conformal
+    assert not threshold & conformal
+    assert calibration | threshold | conformal == set(range(len(labels)))
+    assert all(role['negative_count'] and role['positive_count'] for role in summary['roles'].values())
+
+
+def test_posthoc_validation_partition_marks_small_validation_fallback():
+    partition = partition_validation_for_posthoc(np.array([0, 0, 1, 1]), seed=123)
+
+    assert partition['status'] == 'reused_validation_insufficient_per_class_count'
+    assert partition['independent_roles'] is False
+    assert np.array_equal(partition['indices']['calibration'], np.arange(4))
 
 
 def test_graph_incompatible_pairs_are_removed_before_splitting_with_an_audit():

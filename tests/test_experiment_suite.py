@@ -7,6 +7,7 @@ from src.training.run_experiment_suite import (
     bootstrap_mean_confidence_interval,
     paired_bootstrap_difference_confidence_interval,
     paired_comparison_summary,
+    resolve_experiments_base,
     selected_experiments,
     split_manifest_signature,
     validate_study_comparability,
@@ -114,3 +115,32 @@ def test_ecfp_baseline_can_be_selected_explicitly():
 
     assert selected[0]['runner'] == 'ecfp_sgd_logistic'
     assert selected[0]['architecture'] == 'ecfp_sgd_logistic_v1'
+
+
+def test_motif_candidate_ablation_can_be_selected_explicitly():
+    selected = selected_experiments('motif_edge_aware_ddi_only,motif_edge_aware_multitask')
+
+    assert [item['architecture'] for item in selected] == [
+        'motif_edge_aware_gat_v1', 'motif_edge_aware_gat_v1'
+    ]
+
+
+def test_cross_attention_candidate_ablation_can_be_selected_explicitly():
+    selected = selected_experiments(
+        'cross_attention_edge_aware_ddi_only,cross_attention_edge_aware_multitask'
+    )
+
+    assert [item['architecture'] for item in selected] == [
+        'cross_attention_edge_aware_gat_v1',
+        'cross_attention_edge_aware_gat_v1',
+    ]
+
+
+def test_experiment_outputs_can_be_separated_from_the_read_only_data_root(tmp_path):
+    writable_output_root = tmp_path / 'my_drive' / 'pxddi_results'
+
+    resolved = resolve_experiments_base(
+        writable_output_root, data_base=tmp_path / 'read_only_shared_data'
+    )
+
+    assert resolved == writable_output_root

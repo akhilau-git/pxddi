@@ -9,6 +9,7 @@ from src.data_prep.prepare_twosides import (
     NUM_BOND_FEATURES,
     RICH_NUM_ATOM_FEATURES,
 )
+from src.data_prep.molecular_motifs import MOTIF_FEATURE_DIM
 from src.models.ddi_model import PxDDIModel
 
 from backend import main
@@ -175,3 +176,31 @@ def test_checkpoint_feature_schema_rejects_architecture_mismatches():
             'architecture_version': main.MODEL_ARCHITECTURE_EDGE_AWARE,
             'feature_schema': FEATURE_SCHEMA_LEGACY,
         })
+
+    assert main.checkpoint_feature_schema({
+        'architecture_version': 'cross_attention_edge_aware_gat_v1',
+        'feature_schema': FEATURE_SCHEMA_RICH,
+    }) == FEATURE_SCHEMA_RICH
+
+
+def test_backend_builds_motif_features_for_a_motif_candidate(monkeypatch):
+    candidate = PxDDIModel(
+        in_channels=RICH_NUM_ATOM_FEATURES,
+        hidden_channels=8,
+        architecture_version='motif_edge_aware_gat_v1',
+        edge_feature_dim=NUM_BOND_FEATURES,
+        motif_feature_dim=MOTIF_FEATURE_DIM,
+        motif_hidden_channels=4,
+    ).eval()
+    monkeypatch.setattr(main, 'model', candidate)
+    monkeypatch.setattr(main, 'MODEL_FEATURE_SCHEMA', FEATURE_SCHEMA_RICH)
+    monkeypatch.setattr(main, 'MODEL_REQUIRES_MOTIF_FEATURES', True)
+
+    graph_a, graph_b = main.build_drug_batches(
+        main.DDIRequest(smiles_a=ASPIRIN, smiles_b=ACETAMINOPHEN)
+    )
+    risk, _, _ = candidate(graph_a, graph_b)
+
+    assert graph_a.motif_features.shape == (1, MOTIF_FEATURE_DIM)
+    assert graph_b.motif_features.shape == (1, MOTIF_FEATURE_DIM)
+    assert risk.shape == (1,)
