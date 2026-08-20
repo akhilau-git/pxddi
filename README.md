@@ -95,6 +95,47 @@ JSON, and PNG/PDF figures. The pipeline excludes structures with conflicting
 toxicity scores rather than choosing a score by CSV row order or averaging
 them, and removes graph-incompatible SMILES before splitting.
 
+### Phase 7 evaluation protocol
+
+Each normal run reports Transductive, S1 (both drugs unseen), and S2 (one drug
+unseen) results. Its `results_summary.json` now records:
+
+- **Primary research metrics:** AUROC, average precision (PR-AUC), MCC, Brier
+  score and ECE. These answer ranking, class-imbalance, thresholded agreement,
+  and score-calibration questions.
+- **Secondary threshold metrics:** F1, precision, recall/sensitivity,
+  specificity, negative predictive value, false-positive rate, false-negative
+  rate, balanced accuracy, and ordinary accuracy. Ordinary accuracy is kept
+  only for comparison with prior papers; it is not a headline claim because
+  zero-labelled pairs are sampled *unreported* pairs, not known-safe pairs.
+- **Confidence intervals:** stratified 95% bootstrap intervals for AUROC,
+  average precision, F1, MCC, balanced accuracy, and Brier score. These are
+  within-test-split intervals, separate from the matched five-seed intervals
+  produced by the experiment suite.
+- **Audit outputs:** confidence-ranked false-positive and false-negative CSVs;
+  prediction metrics by three nearest-training-drug structural-similarity
+  bands; conformal abstention coverage and retained-subset metrics; total
+  training time, full-loader inference throughput, parameter count, and peak
+  CUDA memory when a GPU is present.
+
+Calibration slope/intercept are explicitly labelled as **post-hoc diagnostic
+metrics**: they are calculated on the evaluation partition and are not used to
+re-fit or select the model. Do not describe them as clinical calibration.
+
+For a chemical-framework holdout, run a separate candidate training job with
+`PXDDI_EVALUATION_PROTOCOL=scaffold_disjoint`. It creates Murcko
+scaffold-disjoint train/validation/test partitions, excludes pairs spanning two
+different scaffold roles, and trains a distinct candidate checkpoint. It must
+not be mixed with the standard Transductive/S1/S2 result, because doing so
+would invalidate the scaffold-disjoint claim. The audit records the fallback
+used for acyclic molecules and all deliberately excluded cross-partition pairs.
+
+For a paper comparison, use the `paper` experiment preset with five matched
+model seeds. It writes paired bootstrap effect-size intervals and a two-sided
+Wilcoxon signed-rank test only when five or more matched seeds exist; the
+resulting p-values receive Holm multiple-testing correction. Even then, they
+are internal benchmark evidence, not external or clinical proof.
+
 After a successful run, `latest_results/` in the Drive data folder is refreshed
 with the newest figures, manifests, summaries, training history, and audits.
 This gives one stable location for the current results; the timestamped run

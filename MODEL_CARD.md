@@ -40,6 +40,14 @@ the raw datasets, split manifests, run logs, predictions, and completed Colab
 notebook are not committed. They must be regenerated and versioned before use
 in a report or comparison.
 
+The Phase 7 evaluator is implemented but has not yet generated accepted
+candidate results. It will report AUROC, average precision, MCC, Brier/ECE,
+validation-thresholded decision metrics, stratified test-set bootstrap
+intervals, structural-novelty slices, confidence-ranked errors, conformal
+abstention coverage, and hardware-specific efficiency records. These are
+research measurements on reported-versus-unreported labels, not clinical
+performance measures.
+
 ## Verified software behavior
 
 - **Symmetry:** fixed. The pair representation uses embedding sums and
@@ -111,10 +119,18 @@ replace the deployed artifact until a controlled comparison reports all of:
 - Ablation/baseline comparison.
 - Repeated-seed uncertainty intervals when making comparative claims.
 
+The normal Transductive/S1/S2 protocol and the separate Murcko
+scaffold-disjoint protocol must be trained and reported as distinct studies.
+The latter uses scaffold-disjoint training, validation, and test partitions,
+so its score cannot be merged into a normal-split table. Both protocols still
+need executed Colab artifacts before their metrics can appear in the paper.
+
 The experiment suite additionally refuses a cross-model comparison when the
 matched runs do not have identical TWOSIDES input and split-manifest hashes.
 For repeated runs it reports paired candidate-minus-reference bootstrap
-intervals; a one-seed screening run intentionally has no confidence interval.
+intervals. With five or more matched seeds it also reports a two-sided
+Wilcoxon signed-rank test with Holm correction across the study comparisons; a
+one-seed screening run intentionally has neither interval nor hypothesis test.
 
 The screening suite includes a non-deployment ECFP/Morgan-fingerprint +
 linear-logistic baseline. It is a necessary comparison point, not a claim of

@@ -5,8 +5,10 @@ import pytest
 
 from src.training.run_experiment_suite import (
     bootstrap_mean_confidence_interval,
+    holm_adjust_p_values,
     paired_bootstrap_difference_confidence_interval,
     paired_comparison_summary,
+    paired_wilcoxon_signed_rank_test,
     resolve_experiments_base,
     selected_experiments,
     split_manifest_signature,
@@ -38,6 +40,31 @@ def test_paired_confidence_interval_requires_matched_repeated_runs():
     assert summary['matched_seed_count'] == 3
     assert summary['mean_difference_candidate_minus_reference'] == pytest.approx(0.1)
     assert summary['ci_95_lower'] <= 0.1 <= summary['ci_95_upper']
+
+
+def test_wilcoxon_requires_the_paper_study_minimum_of_five_seeds():
+    not_run = paired_wilcoxon_signed_rank_test([0.6, 0.7], [0.7, 0.8])
+    assert not_run['status'] == 'not_run_fewer_than_five_matched_seeds'
+
+    result = paired_wilcoxon_signed_rank_test(
+        [0.40, 0.45, 0.48, 0.50, 0.52],
+        [0.50, 0.55, 0.58, 0.60, 0.62],
+    )
+    assert result['status'] == 'evaluated'
+    assert 0 <= result['p_value_raw'] <= 1
+
+
+def test_holm_adjustment_is_monotonic_and_bounded():
+    comparisons = [
+        {'statistical_test': {'p_value_raw': 0.01}},
+        {'statistical_test': {'p_value_raw': 0.03}},
+        {'statistical_test': {'p_value_raw': None}},
+    ]
+    holm_adjust_p_values(comparisons)
+
+    assert comparisons[0]['statistical_test']['p_value_holm_adjusted'] == pytest.approx(0.02)
+    assert comparisons[1]['statistical_test']['p_value_holm_adjusted'] == pytest.approx(0.03)
+    assert 'p_value_holm_adjusted' not in comparisons[2]['statistical_test']
 
 
 def _split_manifest(seed_suffix: str = 'a'):
@@ -89,6 +116,7 @@ def test_paired_summary_uses_only_matched_seed_metrics():
                 'average_precision': 0.5 + offset,
                 'f1': 0.5 + offset,
                 'mcc': 0.1 + offset,
+                'balanced_accuracy': 0.55 + offset,
                 'brier_score_calibrated': 0.4 - offset,
             })
 
@@ -100,6 +128,7 @@ def test_paired_summary_uses_only_matched_seed_metrics():
 
     assert auroc['matched_seeds'] == [11, 23, 37]
     assert auroc['statistics']['mean_difference_candidate_minus_reference'] == pytest.approx(0.1)
+    assert auroc['statistical_test']['status'] == 'not_run_fewer_than_five_matched_seeds'
 
 
 def test_paper_preset_default_experiment_subset_is_explicit(monkeypatch):
