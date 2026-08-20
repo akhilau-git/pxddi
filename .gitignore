@@ -75,6 +75,8 @@ yarn-error.log*
 backend/artifacts/
 backend/checkpoints/*_before_*.pt
 backend/checkpoints/*_run_*.pt
+backend/checkpoints/candidates/
+backend/latest_results/
 
 # IDE / Editor
 .idea/

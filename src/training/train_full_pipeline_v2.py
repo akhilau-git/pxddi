@@ -82,6 +82,13 @@ def _positive_int_from_environment(name: str, default: int) -> int:
     return value
 
 
+def _non_negative_int_from_environment(name: str, default: int) -> int:
+    value = int(os.environ.get(name, default))
+    if value < 0:
+        raise ValueError(f'{name} must be zero or a positive integer.')
+    return value
+
+
 def _boolean_from_environment(name: str, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -99,6 +106,14 @@ DATA_CAP = _positive_int_from_environment('PXDDI_DATA_CAP', 200000)
 EPOCHS = _positive_int_from_environment('PXDDI_EPOCHS', 200)
 HIDDEN_CHANNELS = _positive_int_from_environment('PXDDI_HIDDEN_CHANNELS', 128)
 BATCH_SIZE = _positive_int_from_environment('PXDDI_BATCH_SIZE', 128)
+EARLY_STOPPING_PATIENCE = _non_negative_int_from_environment(
+    'PXDDI_EARLY_STOPPING_PATIENCE', 30
+)
+EARLY_STOPPING_MIN_EPOCHS = _positive_int_from_environment(
+    'PXDDI_EARLY_STOPPING_MIN_EPOCHS', 40
+)
+if EARLY_STOPPING_MIN_EPOCHS > EPOCHS:
+    raise ValueError('PXDDI_EARLY_STOPPING_MIN_EPOCHS must not exceed PXDDI_EPOCHS.')
 USE_CHEMBERTA = False
 MODEL_ARCHITECTURE = os.environ.get(
     'PXDDI_MODEL_ARCHITECTURE', MODEL_ARCHITECTURE_EDGE_AWARE
@@ -278,6 +293,8 @@ def build_run_manifest() -> dict[str, Any]:
             'epochs': EPOCHS,
             'hidden_channels': HIDDEN_CHANNELS,
             'batch_size': BATCH_SIZE,
+            'early_stopping_patience': EARLY_STOPPING_PATIENCE,
+            'early_stopping_min_epochs': EARLY_STOPPING_MIN_EPOCHS,
             'use_chemberta': USE_CHEMBERTA,
             'model_architecture': MODEL_ARCHITECTURE,
             'feature_schema': FEATURE_SCHEMA,
@@ -704,6 +721,20 @@ def select_validation_threshold(labels: np.ndarray, predictions: np.ndarray) -> 
     return float(thresholds[np.argmax(true_positive_rate - false_positive_rate)])
 
 
+def should_stop_early(
+    epoch: int,
+    epochs_without_improvement: int,
+    minimum_epochs: int = EARLY_STOPPING_MIN_EPOCHS,
+    patience: int = EARLY_STOPPING_PATIENCE,
+) -> bool:
+    """Return whether a non-improving training run has reached its stop rule."""
+    return (
+        patience > 0
+        and epoch >= minimum_epochs
+        and epochs_without_improvement >= patience
+    )
+
+
 def calculate_metrics(
     labels: np.ndarray,
     predictions: np.ndarray,
@@ -1066,6 +1097,8 @@ def main() -> None:
         'learning_rate': [],
     }
     best_auroc = float('-inf')
+    epochs_without_improvement = 0
+    stopped_early = False
 
     for epoch in range(1, EPOCHS + 1):
         loss = train_one_epoch(model, train_loader, optimizer, scaler)
@@ -1088,6 +1121,7 @@ def main() -> None:
         )
         if validation_metrics['auroc'] > best_auroc:
             best_auroc = validation_metrics['auroc']
+            epochs_without_improvement = 0
             safe_checkpoint_save(
                 {
                     'model_state_dict': model.state_dict(),
@@ -1110,6 +1144,16 @@ def main() -> None:
                 },
                 CHECKPOINT_PATH,
             )
+        else:
+            epochs_without_improvement += 1
+        if should_stop_early(epoch, epochs_without_improvement):
+            stopped_early = True
+            print(
+                'Early stopping: no validation AUROC improvement for '
+                f'{epochs_without_improvement} epochs after epoch {EARLY_STOPPING_MIN_EPOCHS}. '
+                f'Keeping best checkpoint from epoch {history["epoch"][int(np.argmax(history["auroc"]))]}.'
+            )
+            break
 
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -1175,6 +1219,14 @@ def main() -> None:
         'calibration': calibration,
         'model_summary': model_summary(model),
         'training_history': history_summary,
+        'early_stopping': {
+            'enabled': EARLY_STOPPING_PATIENCE > 0,
+            'patience': EARLY_STOPPING_PATIENCE,
+            'minimum_epochs': EARLY_STOPPING_MIN_EPOCHS,
+            'stopped_early': stopped_early,
+            'completed_epochs': len(history['epoch']),
+            'best_epoch': checkpoint['epoch'],
+        },
         'toxicity_bridge': toxicity_summary,
         'input_quality': input_quality_summary,
         'dataset': dataset_summary,

@@ -74,6 +74,16 @@ def build_external_records(dataframe: pd.DataFrame, feature_schema: str):
     return records, pd.DataFrame(excluded, columns=['dataset_row_index', 'source', 'target', 'reason'])
 
 
+def load_trained_model(checkpoint_path: Path, device: torch.device):
+    """Load both the model architecture and its saved learned parameters."""
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+    model = model_from_checkpoint(checkpoint)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+    model.eval()
+    return model, checkpoint
+
+
 def main() -> None:
     data_path = Path(os.environ['PXDDI_EXTERNAL_EDGES'])
     metadata_path = Path(os.environ['PXDDI_EXTERNAL_METADATA'])
@@ -89,11 +99,9 @@ def main() -> None:
 
     metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
     validate_external_metadata(metadata)
-    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
-    feature_schema = checkpoint.get('feature_schema', FEATURE_SCHEMA_LEGACY)
-    model = model_from_checkpoint(checkpoint).eval()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
+    model, checkpoint = load_trained_model(checkpoint_path, device)
+    feature_schema = checkpoint.get('feature_schema', FEATURE_SCHEMA_LEGACY)
 
     records, excluded = build_external_records(pd.read_csv(data_path), feature_schema)
     if not records:

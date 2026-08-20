@@ -5,7 +5,9 @@
 # rather than obsolete exact pins. Every run records the resolved versions in
 # artifacts/run_<timestamp>/run_manifest.json.
 
-torch-geometric>=2.5.3,<3
+# PyG 2.7.0 was verified in the successful edge-aware candidate Colab run.
+# Keep it fixed because a later 2.8 build caused a circular-import failure.
+torch-geometric==2.7.0
 pandas>=2.2.3,<3
 numpy>=1.26.4,<3
 scikit-learn>=1.4.2,<2

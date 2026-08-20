@@ -22,7 +22,11 @@ if str(SRC_PATH) not in sys.path:
 from models.ddi_model import MODEL_ARCHITECTURE_EDGE_AWARE, model_from_checkpoint
 from models.calibration import apply_calibrator
 from models.explainability import full_explanation_pipeline
-from data_prep.prepare_twosides import smiles_to_graph
+from data_prep.prepare_twosides import (
+    FEATURE_SCHEMA_LEGACY,
+    FEATURE_SCHEMA_RICH,
+    smiles_to_graph,
+)
 
 if __package__:
     from .toxicity_lookup import (
@@ -65,6 +69,50 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def resolve_checkpoint_path(configured_path: str | None = None) -> Path:
+    """Return an existing checkpoint path without allowing path traversal.
+
+    ``PXDDI_CHECKPOINT_PATH`` accepts either a path relative to
+    ``backend/checkpoints`` (for example ``candidates/model.pt``) or an
+    absolute path inside that directory.  This lets a reviewed candidate be
+    served explicitly, while preventing an environment setting from loading an
+    arbitrary pickle-like file elsewhere on the host.
+    """
+    checkpoints_dir = BACKEND_DIR / 'checkpoints'
+    raw_path = configured_path or os.environ.get(
+        'PXDDI_CHECKPOINT_PATH', 'pxddi_model.pt'
+    )
+    requested_path = Path(raw_path)
+    selected_path = requested_path if requested_path.is_absolute() else checkpoints_dir / requested_path
+    selected_path = selected_path.resolve()
+    try:
+        selected_path.relative_to(checkpoints_dir.resolve())
+    except ValueError as error:
+        raise RuntimeError(
+            'PXDDI_CHECKPOINT_PATH must point inside backend/checkpoints.'
+        ) from error
+    if not selected_path.is_file():
+        raise RuntimeError(f'Configured checkpoint does not exist: {selected_path}')
+    return selected_path
+
+
+def checkpoint_feature_schema(checkpoint_metadata: dict) -> str:
+    """Read and validate the graph schema required by a versioned checkpoint."""
+    architecture = checkpoint_metadata.get('architecture_version', 'legacy_gat_v1')
+    feature_schema = checkpoint_metadata.get('feature_schema', FEATURE_SCHEMA_LEGACY)
+    if feature_schema not in {FEATURE_SCHEMA_LEGACY, FEATURE_SCHEMA_RICH}:
+        raise RuntimeError(f'Unsupported checkpoint feature schema: {feature_schema!r}.')
+    if architecture == MODEL_ARCHITECTURE_EDGE_AWARE and feature_schema != FEATURE_SCHEMA_RICH:
+        raise RuntimeError(
+            'An edge-aware checkpoint must declare the rich molecular feature schema.'
+        )
+    if architecture == 'legacy_gat_v1' and feature_schema != FEATURE_SCHEMA_LEGACY:
+        raise RuntimeError(
+            'A legacy GAT checkpoint must declare the legacy molecular feature schema.'
+        )
+    return feature_schema
+
+
 MAX_SMILES_LENGTH = positive_integer_from_environment('PXDDI_MAX_SMILES_LENGTH', 1000)
 MAX_MOLECULE_ATOMS = positive_integer_from_environment('PXDDI_MAX_MOLECULE_ATOMS', 200)
 MAX_MOLECULE_BONDS = positive_integer_from_environment('PXDDI_MAX_MOLECULE_BONDS', 250)
@@ -84,12 +132,13 @@ app.add_middleware(
     allow_headers=['Content-Type'],
 )
 
-CHECKPOINT_PATH = BACKEND_DIR / 'checkpoints' / 'pxddi_model.pt'
+CHECKPOINT_PATH = resolve_checkpoint_path()
 # Checkpoint metadata contains only safe built-in types and tensors.
 checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=True)
 model = model_from_checkpoint(checkpoint)
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
+MODEL_FEATURE_SCHEMA = checkpoint_feature_schema(checkpoint)
 
 DECISION_THRESHOLD = float(checkpoint.get('threshold', 0.5))
 CALIBRATION = checkpoint.get('calibration')
@@ -141,8 +190,8 @@ class DDIRequest(BaseModel):
 
 def build_drug_batches(req: DDIRequest):
     """Build bounded molecular batches shared by prediction and explanation."""
-    graph_a = smiles_to_graph(req.smiles_a)
-    graph_b = smiles_to_graph(req.smiles_b)
+    graph_a = smiles_to_graph(req.smiles_a, feature_schema=MODEL_FEATURE_SCHEMA)
+    graph_b = smiles_to_graph(req.smiles_b, feature_schema=MODEL_FEATURE_SCHEMA)
     if graph_a is None or graph_b is None:
         raise HTTPException(
             status_code=422,
@@ -319,6 +368,7 @@ def health():
         'model_loaded': True,
         'model_type': 'GNN' if not checkpoint.get('use_chemberta', False) else 'ChemBERTa',
         'model_architecture': checkpoint.get('architecture_version', 'legacy_gat_v1'),
+        'model_feature_schema': MODEL_FEATURE_SCHEMA,
         'score_calibration_status': risk_calibration_response()['status'],
         'explanation_status': 'available' if explanation_response()['available'] else 'not_available',
         'model_auroc': float(checkpoint.get('auroc')) if checkpoint.get('auroc') is not None else None,

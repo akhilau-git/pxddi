@@ -25,6 +25,7 @@ with patch('torch.cuda.is_available', return_value=True):
         save_counterion_curation_candidates,
         safe_checkpoint_save,
         select_validation_threshold,
+        should_stop_early,
     )
 def test_get_file_hash():
     """Verify SHA-256 hash calculation."""
@@ -81,6 +82,13 @@ def test_metrics_handle_evaluable_and_one_class_splits():
     )
     assert one_class_metrics['status'] == 'skipped_one_class_or_empty_split'
     assert one_class_metrics['auroc'] is None
+
+
+def test_early_stopping_waits_for_minimum_epochs_and_patience():
+    assert not should_stop_early(39, 100, minimum_epochs=40, patience=30)
+    assert not should_stop_early(40, 29, minimum_epochs=40, patience=30)
+    assert should_stop_early(40, 30, minimum_epochs=40, patience=30)
+    assert not should_stop_early(100, 100, minimum_epochs=40, patience=0)
 
 
 def test_graph_incompatible_pairs_are_removed_before_splitting_with_an_audit():

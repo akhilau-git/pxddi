@@ -1,8 +1,13 @@
 """Tests for strict external-dataset provenance requirements."""
 
 import pytest
+import torch
 
-from src.training.evaluate_external_dataset import validate_external_metadata
+from src.models.ddi_model import PxDDIModel
+from src.training.evaluate_external_dataset import (
+    load_trained_model,
+    validate_external_metadata,
+)
 
 
 def test_external_evaluation_requires_dataset_provenance():
@@ -18,3 +23,28 @@ def test_external_evaluation_accepts_complete_provenance():
         'label_definition': 'Binary reported interaction label',
         'split_definition': 'External held-out dataset',
     })
+
+
+def test_external_evaluation_loads_the_checkpoint_weights(tmp_path):
+    """External evaluation must not score records with a random model."""
+    source_model = PxDDIModel(in_channels=13, hidden_channels=8).eval()
+    with torch.no_grad():
+        for parameter in source_model.parameters():
+            parameter.fill_(0.125)
+
+    checkpoint_path = tmp_path / 'trained_model.pt'
+    torch.save(
+        {
+            'model_state_dict': source_model.state_dict(),
+            'in_channels': 13,
+            'hidden_channels': 8,
+            'use_chemberta': False,
+        },
+        checkpoint_path,
+    )
+
+    loaded_model, _ = load_trained_model(checkpoint_path, torch.device('cpu'))
+
+    assert loaded_model.training is False
+    for name, expected in source_model.state_dict().items():
+        assert torch.equal(loaded_model.state_dict()[name], expected), name

@@ -72,6 +72,13 @@ Colab-compatible non-PyTorch packages from `requirements_colab.txt`, set
 `PXDDI_DATA_BASE` to the Drive data directory when needed, and run
 `src/training/train_full_pipeline_v2.py`. ChemBERTa remains disabled.
 
+`requirements_colab.txt` fixes `torch-geometric` at version 2.7.0, the version
+used by the reviewed candidate run. If a Colab runtime previously imported a
+different PyG version or reports a circular-import error, restart the runtime
+after installing the requirements before starting training. The run manifest
+records the resolved package versions, so the installed environment remains
+auditable.
+
 Each run creates `artifacts/run_<timestamp>/` in Drive containing an initial
 and final manifest, resolved package/GPU environment, source revision, model
 summary, numeric training-history CSV, clean toxicity-label and input-quality
@@ -92,6 +99,17 @@ GAT checkpoint. New training defaults to an **edge-aware candidate** checkpoint
 at `checkpoints/candidates/pxddi_edge_aware_candidate.pt`; it does not replace
 the deployed model automatically. The candidate uses richer atom features and
 bond order, stereo, chirality, conjugation, aromaticity, and ring features.
+
+Candidate training applies validation-AUROC early stopping after at least 40
+epochs, with a default patience of 30 non-improving epochs. Set
+`PXDDI_EARLY_STOPPING_PATIENCE=0` only when a deliberate fixed-length run is
+needed; the final manifest always records whether early stopping occurred.
+
+The backend continues to load the legacy checkpoint unless an operator
+explicitly selects a reviewed file through `PXDDI_CHECKPOINT_PATH`. A selected
+edge-aware candidate is given the compatible rich graph schema automatically;
+this is a loading compatibility feature, not an approval to deploy the
+candidate.
 
 Run one candidate first, inspect its Transductive/S1/S2 metrics and calibration
 artifacts, then decide whether it should replace the legacy model. For a

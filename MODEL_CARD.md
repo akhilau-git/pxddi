@@ -61,8 +61,10 @@ in a report or comparison.
    claims are made.
 4. **Patient context:** no linked patient-exposure-outcome training data is in
    this project; the module must remain disabled.
-5. **Molecular representation:** graph features omit bond order,
-   stereochemistry, chirality, and other chemical detail.
+5. **Molecular representation:** the deployed legacy checkpoint still omits
+   bond order, stereochemistry, chirality, and other chemical detail. The
+   separate edge-aware candidate adds these atom and bond features, but has not
+   solved S1 generalization and is not promoted.
 6. **Calibration:** the deployed legacy checkpoint is uncalibrated. Candidate
    checkpoints can store a calibration mapping fitted only on the internal
    validation split, which must not be presented as calibrated cold-start,

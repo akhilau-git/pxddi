@@ -3,6 +3,13 @@
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import pytest
+from src.data_prep.prepare_twosides import (
+    FEATURE_SCHEMA_LEGACY,
+    FEATURE_SCHEMA_RICH,
+    NUM_BOND_FEATURES,
+    RICH_NUM_ATOM_FEATURES,
+)
+from src.models.ddi_model import PxDDIModel
 
 from backend import main
 
@@ -134,3 +141,37 @@ def test_edge_aware_candidate_does_not_advertise_legacy_explanations(monkeypatch
 
     assert explanation.status_code == 501
     assert health.json()['explanation_status'] == 'not_available'
+
+
+def test_backend_builds_and_scores_rich_graphs_for_an_edge_aware_candidate(monkeypatch):
+    """A selected candidate must receive the graph schema it was trained on."""
+    candidate = PxDDIModel(
+        in_channels=RICH_NUM_ATOM_FEATURES,
+        hidden_channels=8,
+        architecture_version=main.MODEL_ARCHITECTURE_EDGE_AWARE,
+        edge_feature_dim=NUM_BOND_FEATURES,
+    ).eval()
+    monkeypatch.setattr(main, 'model', candidate)
+    monkeypatch.setattr(main, 'MODEL_FEATURE_SCHEMA', FEATURE_SCHEMA_RICH)
+
+    graph_a, graph_b = main.build_drug_batches(
+        main.DDIRequest(smiles_a=ASPIRIN, smiles_b=ACETAMINOPHEN)
+    )
+    risk, _, _ = candidate(graph_a, graph_b)
+
+    assert graph_a.x.shape[1] == RICH_NUM_ATOM_FEATURES
+    assert graph_b.edge_attr.shape[1] == NUM_BOND_FEATURES
+    assert risk.shape == (1,)
+
+
+def test_checkpoint_feature_schema_rejects_architecture_mismatches():
+    assert main.checkpoint_feature_schema({
+        'architecture_version': main.MODEL_ARCHITECTURE_EDGE_AWARE,
+        'feature_schema': FEATURE_SCHEMA_RICH,
+    }) == FEATURE_SCHEMA_RICH
+
+    with pytest.raises(RuntimeError, match='edge-aware'):
+        main.checkpoint_feature_schema({
+            'architecture_version': main.MODEL_ARCHITECTURE_EDGE_AWARE,
+            'feature_schema': FEATURE_SCHEMA_LEGACY,
+        })
