@@ -101,6 +101,11 @@ matched runs do not have identical TWOSIDES input and split-manifest hashes.
 For repeated runs it reports paired candidate-minus-reference bootstrap
 intervals; a one-seed screening run intentionally has no confidence interval.
 
+The screening suite includes a non-deployment ECFP/Morgan-fingerprint +
+linear-logistic baseline. It is a necessary comparison point, not a claim of
+novelty or clinical utility. Its pair vector uses fingerprint sums and absolute
+differences so, like the GNN, it is order-independent.
+
 The training audit produces a counterion-candidate review table. It does not
 invent parent mappings for isolated ions or salts: an authoritative source and
 manual review are required before any mapping is approved.

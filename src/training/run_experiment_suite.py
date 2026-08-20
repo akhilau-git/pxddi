@@ -21,7 +21,12 @@ import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-TRAINING_SCRIPT = PROJECT_ROOT / 'src' / 'training' / 'train_full_pipeline_v2.py'
+GNN_TRAINING_SCRIPT = PROJECT_ROOT / 'src' / 'training' / 'train_full_pipeline_v2.py'
+ECFP_BASELINE_SCRIPT = PROJECT_ROOT / 'src' / 'training' / 'train_ecfp_logistic_baseline.py'
+RUNNER_SCRIPTS = {
+    'gnn': GNN_TRAINING_SCRIPT,
+    'ecfp_sgd_logistic': ECFP_BASELINE_SCRIPT,
+}
 DRIVE_BASE = Path(os.environ.get('PXDDI_DATA_BASE', '/content/drive/MyDrive/pxddi-data'))
 PRESET = os.environ.get('PXDDI_EXPERIMENT_PRESET', 'screening').strip().lower()
 REFERENCE_EXPERIMENT = os.environ.get(
@@ -32,25 +37,37 @@ METRIC_NAMES = ('auroc', 'average_precision', 'f1', 'mcc', 'brier_score_calibrat
 
 EXPERIMENTS = (
     {
+        'name': 'ecfp_sgd_logistic',
+        'runner': 'ecfp_sgd_logistic',
+        'architecture': 'ecfp_sgd_logistic_v1',
+        'use_toxicity_pair_features': False,
+        'toxicity_loss_weight': 0.0,
+        'epochs': 30,
+    },
+    {
         'name': 'legacy_gat_ddi_only',
+        'runner': 'gnn',
         'architecture': 'legacy_gat_v1',
         'use_toxicity_pair_features': False,
         'toxicity_loss_weight': 0.0,
     },
     {
         'name': 'legacy_gat_multitask',
+        'runner': 'gnn',
         'architecture': 'legacy_gat_v1',
         'use_toxicity_pair_features': True,
         'toxicity_loss_weight': 0.3,
     },
     {
         'name': 'edge_aware_ddi_only',
+        'runner': 'gnn',
         'architecture': 'edge_aware_gat_v2',
         'use_toxicity_pair_features': False,
         'toxicity_loss_weight': 0.0,
     },
     {
         'name': 'edge_aware_multitask',
+        'runner': 'gnn',
         'architecture': 'edge_aware_gat_v2',
         'use_toxicity_pair_features': True,
         'toxicity_loss_weight': 0.3,
@@ -361,20 +378,27 @@ def main() -> None:
         for seed in seeds:
             run_root = study_dir / experiment['name'] / f'seed_{seed}'
             artifact_base = run_root / 'artifacts'
-            checkpoint_path = run_root / 'checkpoints' / f"{experiment['name']}_seed_{seed}.pt"
+            checkpoint_suffix = '.npz' if experiment['runner'] == 'ecfp_sgd_logistic' else '.pt'
+            checkpoint_path = run_root / 'checkpoints' / f"{experiment['name']}_seed_{seed}{checkpoint_suffix}"
             environment = os.environ.copy()
             environment.update({
                 'PXDDI_SEED': str(seed),
-                'PXDDI_EPOCHS': str(epochs),
-                'PXDDI_MODEL_ARCHITECTURE': experiment['architecture'],
-                'PXDDI_USE_TOXICITY_PAIR_FEATURES': str(experiment['use_toxicity_pair_features']).lower(),
-                'PXDDI_TOXICITY_LOSS_WEIGHT': str(experiment['toxicity_loss_weight']),
                 'PXDDI_ARTIFACTS_BASE': str(artifact_base),
                 'PXDDI_CHECKPOINT_PATH': str(checkpoint_path),
                 'PXDDI_PUBLISH_LATEST_RESULTS': 'false',
             })
+            if experiment['runner'] == 'gnn':
+                environment.update({
+                    'PXDDI_EPOCHS': str(epochs),
+                    'PXDDI_MODEL_ARCHITECTURE': experiment['architecture'],
+                    'PXDDI_USE_TOXICITY_PAIR_FEATURES': str(experiment['use_toxicity_pair_features']).lower(),
+                    'PXDDI_TOXICITY_LOSS_WEIGHT': str(experiment['toxicity_loss_weight']),
+                })
+            else:
+                environment['PXDDI_ECFP_EPOCHS'] = str(experiment['epochs'])
+            training_script = RUNNER_SCRIPTS[experiment['runner']]
             print(f"Running {experiment['name']} seed={seed}; checkpoint={checkpoint_path}")
-            subprocess.run([sys.executable, str(TRAINING_SCRIPT)], check=True, env=environment)
+            subprocess.run([sys.executable, str(training_script)], check=True, env=environment)
             run_dir = find_completed_run(artifact_base)
             rows.extend(collect_metric_rows(experiment['name'], seed, run_dir))
 

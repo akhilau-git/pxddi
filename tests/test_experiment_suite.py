@@ -107,3 +107,10 @@ def test_paper_preset_default_experiment_subset_is_explicit(monkeypatch):
     assert [item['name'] for item in selected_experiments('')] == [
         'legacy_gat_multitask', 'edge_aware_multitask'
     ]
+
+
+def test_ecfp_baseline_can_be_selected_explicitly():
+    selected = selected_experiments('ecfp_sgd_logistic')
+
+    assert selected[0]['runner'] == 'ecfp_sgd_logistic'
+    assert selected[0]['architecture'] == 'ecfp_sgd_logistic_v1'

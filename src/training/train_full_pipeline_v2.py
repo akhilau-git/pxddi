@@ -981,6 +981,7 @@ def _prepare_positive_edges(audit_dir: Path) -> tuple[pd.DataFrame, dict[str, An
     if clean_positives.empty:
         raise ValueError('No graph-compatible positive pairs remain after SMILES validation.')
 
+    audit_dir.mkdir(parents=True, exist_ok=True)
     exclusions_path = audit_dir / 'invalid_smiles_exclusions.csv'
     exclusions.to_csv(exclusions_path, index=False)
     curation_summary = save_counterion_curation_candidates(exclusions, audit_dir)

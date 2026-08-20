@@ -114,14 +114,16 @@ candidate.
 Run one candidate first, inspect its Transductive/S1/S2 metrics and calibration
 artifacts, then decide whether it should replace the legacy model. For a
 controlled baseline/ablation study, run
-`src/training/run_experiment_suite.py`. Its screening preset compares four
-configurations once. Its paper preset repeats the directly comparable legacy
-and edge-aware multi-task models across five seeds, verifies that each matched
-seed used the same TWOSIDES input and exact split hashes, and saves paired
-bootstrap confidence intervals. A screening result is directional evidence
-only; it is not statistical proof. Use `PXDDI_EXPERIMENT_NAMES` to select a
-deliberate alternative set of configurations. Neither mode promotes a model
-automatically.
+`src/training/run_experiment_suite.py`. Its screening preset compares the
+ECFP/Morgan + linear-logistic baseline with four GNN ablations once. Its paper
+preset repeats the directly comparable legacy and edge-aware multi-task GNNs
+across five seeds. The suite verifies that each matched seed used the same
+TWOSIDES input and exact split hashes, and saves paired bootstrap confidence
+intervals. The ECFP baseline can be included in any deliberate run through
+`PXDDI_EXPERIMENT_NAMES=ecfp_sgd_logistic,...`. It uses symmetric
+`ECFP_a+ECFP_b` and `|ECFP_a-ECFP_b|` features, so reversing the drug order
+does not change its score. A screening result is directional evidence only; it
+is not statistical proof. Neither mode promotes a model automatically.
 
 External validation is supported by `src/training/evaluate_external_dataset.py`
 only after you supply an independently sourced, documented dataset and its
