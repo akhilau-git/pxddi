@@ -1653,6 +1653,8 @@ def main() -> None:
                     'toxicity_loss_weight': TOXICITY_LOSS_WEIGHT,
                     'use_chemberta': USE_CHEMBERTA,
                     'auroc': float(best_auroc),
+                    'model_selection_metric': 'AUROC',
+                    'model_selection_split': 'internal validation used for early stopping',
                     'epoch': epoch,
                     'data_cap': DATA_CAP,
                     'seed': MODEL_SEED,
@@ -1744,6 +1746,8 @@ def main() -> None:
     )
     checkpoint['threshold'] = frozen_threshold
     checkpoint['calibration'] = calibration
+    checkpoint['conformal'] = conformal
+    checkpoint['applicability_domain'] = applicability_domain.export_checkpoint_state()
     checkpoint['posthoc_validation_partition'] = {
         key: value for key, value in posthoc_partition_artifact.items()
         if key not in {'path', 'sha256'}

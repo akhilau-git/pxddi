@@ -125,3 +125,23 @@ class MorganApplicabilityDomain:
                 'clinical applicability.'
             ),
         }
+
+    def export_checkpoint_state(self) -> dict[str, Any]:
+        """Return the compact, data-free state needed for API OOD diagnostics.
+
+        It deliberately retains canonical molecular structures only—not pair
+        labels, report identifiers, or prediction outcomes. A serving API uses
+        this state to flag a drug far from its training structures; it must not
+        turn the flag into a clinical reliability claim.
+        """
+        if not self._reference_fingerprints:
+            raise RuntimeError('Call fit() before exporting applicability-domain state.')
+        return {
+            'method': APPLICABILITY_DOMAIN_METHOD,
+            'radius': self.radius,
+            'num_bits': self.num_bits,
+            'include_chirality': True,
+            'minimum_tanimoto_similarity': self.minimum_similarity,
+            'reference_canonical_smiles': sorted(self._reference_smiles),
+            'interpretation_warning': self.summary()['interpretation_warning'],
+        }

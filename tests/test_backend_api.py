@@ -1,5 +1,8 @@
 """Integration and contract tests for the research API backend."""
 
+import asyncio
+import re
+
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import pytest
@@ -11,6 +14,7 @@ from src.data_prep.prepare_twosides import (
 )
 from src.data_prep.molecular_motifs import MOTIF_FEATURE_DIM
 from src.models.ddi_model import PxDDIModel
+from src.models.uncertainty import fit_split_conformal_binary
 
 from backend import main
 
@@ -35,6 +39,18 @@ def test_health_reports_checkpoint_and_runtime_limits():
     assert payload['toxicity_bridge_size'] == len(main.KNOWN_TOXICITY_SMILES)
     assert payload['toxicity_bridge_conflicting_structures_excluded'] == (
         main.TOXICITY_BRIDGE_SUMMARY['excluded_conflicting_structures']
+    )
+    assert re.fullmatch(r'[A-Za-z0-9._-]{8,128}', response.headers['x-request-id'])
+    assert response.headers['cache-control'] == 'no-store'
+    assert response.headers['x-content-type-options'] == 'nosniff'
+    assert 'model_auroc' not in payload
+    assert payload['stored_validation_evidence']['status'] == 'available'
+    assert payload['stored_validation_evidence']['auroc'] is not None
+    assert 'not transductive test' in payload['stored_validation_evidence']['note']
+    assert payload['conformal_uncertainty_status'] == 'not_available'
+    assert payload['structural_applicability_domain_status'] == 'not_available'
+    assert payload['structural_applicability_domain_error'] == (
+        'checkpoint_has_no_structural_domain_reference_set'
     )
 
 
@@ -82,6 +98,33 @@ def test_unconfigured_origin_is_not_allowed_by_cors():
     assert 'access-control-allow-origin' not in response.headers
 
 
+def test_untrusted_host_header_is_rejected_including_before_routing():
+    response = CLIENT.get('/health', headers={'host': 'untrusted.example'})
+
+    assert response.status_code == 400
+
+
+def test_trusted_host_configuration_rejects_wildcard(monkeypatch):
+    monkeypatch.setenv('PXDDI_TRUSTED_HOSTS', '*')
+
+    with pytest.raises(RuntimeError, match='explicit bare host names'):
+        main.configured_trusted_hosts()
+
+
+def test_origin_configuration_rejects_wildcards_and_paths(monkeypatch):
+    monkeypatch.setenv('PXDDI_ALLOWED_ORIGINS', 'https://example.org/app')
+
+    with pytest.raises(RuntimeError, match='explicit HTTP'):
+        main.configured_origins()
+
+
+def test_valid_request_id_is_returned_for_correlation():
+    response = CLIENT.get('/health', headers={'x-request-id': 'local-run-0001'})
+
+    assert response.status_code == 200
+    assert response.headers['x-request-id'] == 'local-run-0001'
+
+
 def test_prediction_reports_label_coverage_and_disabled_patient_context():
     response = CLIENT.post(
         '/predict',
@@ -94,10 +137,87 @@ def test_prediction_reports_label_coverage_and_disabled_patient_context():
     assert 'uncalibrated' in payload['interaction_risk_note']
     assert 'not evidence that the pair is safe' in payload['interaction_label_note']
     assert payload['score_calibration']['status'] == 'uncalibrated'
+    assert payload['prediction_uncertainty']['status'] == 'not_available'
+    assert payload['structural_applicability_domain']['status'] == 'not_available'
+    assert 'cannot assess structural out-of-domain status' in (
+        payload['structural_applicability_domain']['note']
+    )
     assert payload['drug_a_toxicity']['known'] is True
     assert payload['drug_a_toxicity']['training_label_available'] is True
+    assert 'not a clinical toxicity probability' in payload['drug_a_toxicity']['model_score_note']
     assert 'FAERS-derived' in payload['drug_a_toxicity']['coverage_note']
     assert payload['explanation_available_at'] == '/explain (separate, slower endpoint)'
+
+
+def test_prediction_rejects_unknown_or_coerced_request_fields_without_echoing_input():
+    response = CLIENT.post(
+        '/predict',
+        json={
+            'smiles_a': ASPIRIN,
+            'smiles_b': ACETAMINOPHEN,
+            'age_band': '3',
+            'unexpected_option': 'must not be ignored',
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()['detail']
+    assert any(error['loc'] == ['body', 'age_band'] for error in detail)
+    assert any(error['loc'] == ['body', 'unexpected_option'] for error in detail)
+    assert all('input' not in error for error in detail)
+    assert 'must not be ignored' not in response.text
+
+
+def test_oversized_request_is_rejected_before_model_processing(monkeypatch):
+    monkeypatch.setattr(main, 'MAX_REQUEST_BYTES', 80)
+    response = CLIENT.post(
+        '/predict',
+        json={'smiles_a': 'C' * 60, 'smiles_b': 'C' * 60},
+    )
+
+    assert response.status_code == 413
+    assert 'exceeds the 80-byte API limit' in response.json()['detail']
+    assert response.headers['cache-control'] == 'no-store'
+
+
+def test_chunked_oversized_request_is_rejected_without_reaching_application(monkeypatch):
+    monkeypatch.setattr(main, 'MAX_REQUEST_BYTES', 80)
+    reached_application = False
+    input_messages = iter([
+        {'type': 'http.request', 'body': b'x' * 60, 'more_body': True},
+        {'type': 'http.request', 'body': b'x' * 60, 'more_body': False},
+    ])
+    output_messages = []
+
+    async def receive():
+        return next(input_messages)
+
+    async def send(message):
+        output_messages.append(message)
+
+    async def downstream(scope, receive, send):
+        nonlocal reached_application
+        reached_application = True
+
+    scope = {
+        'type': 'http',
+        'asgi': {'version': '3.0'},
+        'http_version': '1.1',
+        'method': 'POST',
+        'scheme': 'http',
+        'path': '/predict',
+        'raw_path': b'/predict',
+        'query_string': b'',
+        'headers': [],
+        'client': ('testclient', 50000),
+        'server': ('testserver', 80),
+    }
+
+    asyncio.run(main.MaxRequestBodyMiddleware(downstream)(scope, receive, send))
+
+    assert reached_application is False
+    assert output_messages[0]['type'] == 'http.response.start'
+    assert output_messages[0]['status'] == 413
 
 
 def test_invalid_or_single_atom_smiles_returns_422():
@@ -129,6 +249,21 @@ def test_second_explanation_request_is_rejected_while_one_is_active():
         main.EXPLANATION_SEMAPHORE.release()
 
     assert response.status_code == 429
+
+
+def test_prediction_request_is_rejected_while_process_limit_is_active(monkeypatch):
+    monkeypatch.setattr(main, 'PREDICTION_SEMAPHORE', main.threading.BoundedSemaphore(1))
+    assert main.PREDICTION_SEMAPHORE.acquire(blocking=False)
+    try:
+        response = CLIENT.post(
+            '/predict',
+            json={'smiles_a': ASPIRIN, 'smiles_b': ACETAMINOPHEN},
+        )
+    finally:
+        main.PREDICTION_SEMAPHORE.release()
+
+    assert response.status_code == 429
+    assert 'busy' in response.json()['detail']
 
 
 def test_edge_aware_candidate_does_not_advertise_legacy_explanations(monkeypatch):
@@ -170,17 +305,55 @@ def test_checkpoint_feature_schema_rejects_architecture_mismatches():
         'architecture_version': main.MODEL_ARCHITECTURE_EDGE_AWARE,
         'feature_schema': FEATURE_SCHEMA_RICH,
     }) == FEATURE_SCHEMA_RICH
-
     with pytest.raises(RuntimeError, match='edge-aware'):
         main.checkpoint_feature_schema({
             'architecture_version': main.MODEL_ARCHITECTURE_EDGE_AWARE,
             'feature_schema': FEATURE_SCHEMA_LEGACY,
         })
-
     assert main.checkpoint_feature_schema({
         'architecture_version': 'cross_attention_edge_aware_gat_v1',
         'feature_schema': FEATURE_SCHEMA_RICH,
     }) == FEATURE_SCHEMA_RICH
+
+
+def test_checkpoint_structural_domain_reports_seen_and_distant_drugs(monkeypatch):
+    domain, error = main.checkpoint_structural_domain({
+        'applicability_domain': {
+            'method': 'nearest_train_ecfp_tanimoto_v1',
+            'radius': 2,
+            'num_bits': 1024,
+            'include_chirality': True,
+            'minimum_tanimoto_similarity': 0.6,
+            'reference_canonical_smiles': ['CCO', 'CCN'],
+        },
+    })
+    assert error is None
+    assert domain is not None
+    monkeypatch.setattr(main, 'STRUCTURAL_DOMAIN', domain)
+    monkeypatch.setattr(main, 'STRUCTURAL_DOMAIN_ERROR', None)
+
+    response = main.structural_domain_response('CCO', 'c1ccccc1')
+
+    assert response['status'] == 'available_structure_similarity_diagnostic'
+    assert response['drug_a']['exactly_seen_in_training'] is True
+    assert response['drug_b']['outside_structural_domain'] is True
+    assert response['outside_structural_domain'] is True
+    assert 'does not measure pair novelty' in response['note']
+
+
+def test_checkpoint_conformal_state_is_applied_to_calibrated_score(monkeypatch):
+    conformal = fit_split_conformal_binary(
+        labels=[0, 0, 1, 1], probabilities=[0.1, 0.2, 0.8, 0.9], alpha=0.2,
+        fitted_on='validation_conformal_partition',
+    )
+    monkeypatch.setitem(main.checkpoint, 'conformal', conformal)
+
+    response = main.uncertainty_response(0.5)
+
+    assert response['status'] == 'available_internal_validation_only'
+    assert response['method'] == 'split_conformal_binary_v1'
+    assert response['fitted_on'] == 'validation_conformal_partition'
+    assert response['abstain'] is True
 
 
 def test_backend_builds_motif_features_for_a_motif_candidate(monkeypatch):

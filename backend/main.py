@@ -3,13 +3,24 @@
 from pathlib import Path
 from typing import List, Optional
 import hashlib
+import logging
 import os
+import re
 import sys
 import threading
+import time
+import uuid
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
+from rdkit import Chem, DataStructs
+from rdkit.Chem import rdFingerprintGenerator
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 import torch
 from torch_geometric.data import Batch
 
@@ -28,12 +39,18 @@ from models.ddi_model import (
     model_from_checkpoint,
 )
 from models.calibration import apply_calibrator
+from models.applicability_domain import APPLICABILITY_DOMAIN_METHOD
+from models.uncertainty import conformal_prediction_sets
 from models.explainability import full_explanation_pipeline
 from data_prep.prepare_twosides import (
     FEATURE_SCHEMA_LEGACY,
     FEATURE_SCHEMA_RICH,
     smiles_to_graph,
 )
+
+
+LOGGER = logging.getLogger('pxddi.api')
+REQUEST_ID_PATTERN = re.compile(r'^[A-Za-z0-9._-]{8,128}$')
 
 if __package__:
     from .toxicity_lookup import (
@@ -53,7 +70,10 @@ else:
 
 def positive_integer_from_environment(name: str, default: int) -> int:
     """Read a positive integer setting and fail early on an invalid config."""
-    value = int(os.environ.get(name, default))
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f'{name} must be a positive integer') from error
     if value <= 0:
         raise RuntimeError(f'{name} must be a positive integer')
     return value
@@ -65,7 +85,43 @@ def configured_origins():
     origins = [origin.strip() for origin in raw_origins.split(',') if origin.strip()]
     if not origins:
         raise RuntimeError('PXDDI_ALLOWED_ORIGINS must contain at least one origin')
+    for origin in origins:
+        parsed = urlparse(origin)
+        if (
+            origin == '*'
+            or parsed.scheme not in {'http', 'https'}
+            or not parsed.netloc
+            or parsed.path
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+            or parsed.username
+            or parsed.password
+        ):
+            raise RuntimeError(
+                'PXDDI_ALLOWED_ORIGINS must contain explicit HTTP(S) origins without paths.'
+            )
     return origins
+
+
+def configured_trusted_hosts() -> list[str]:
+    """Return an explicit Host-header allowlist for the HTTP service.
+
+    This protects the local/container service against Host-header attacks. A
+    public deployment must replace the development defaults with its actual
+    API domain through ``PXDDI_TRUSTED_HOSTS``; TLS, authentication, and a
+    global rate limit still belong at the deployment gateway.
+    """
+    default_hosts = 'localhost,127.0.0.1,testserver'
+    raw_hosts = os.environ.get('PXDDI_TRUSTED_HOSTS', default_hosts)
+    hosts = [host.strip() for host in raw_hosts.split(',') if host.strip()]
+    if not hosts:
+        raise RuntimeError('PXDDI_TRUSTED_HOSTS must contain at least one host.')
+    if any(host == '*' or '://' in host or '/' in host for host in hosts):
+        raise RuntimeError(
+            'PXDDI_TRUSTED_HOSTS must contain explicit bare host names, not URLs, paths, or *.'
+        )
+    return hosts
 
 
 def file_sha256(path: Path) -> str:
@@ -123,10 +179,15 @@ def checkpoint_feature_schema(checkpoint_metadata: dict) -> str:
 MAX_SMILES_LENGTH = positive_integer_from_environment('PXDDI_MAX_SMILES_LENGTH', 1000)
 MAX_MOLECULE_ATOMS = positive_integer_from_environment('PXDDI_MAX_MOLECULE_ATOMS', 200)
 MAX_MOLECULE_BONDS = positive_integer_from_environment('PXDDI_MAX_MOLECULE_BONDS', 250)
+MAX_REQUEST_BYTES = positive_integer_from_environment('PXDDI_MAX_REQUEST_BYTES', 16 * 1024)
+MAX_CONCURRENT_PREDICTIONS = positive_integer_from_environment(
+    'PXDDI_MAX_CONCURRENT_PREDICTIONS', 2
+)
 MAX_CONCURRENT_EXPLANATIONS = positive_integer_from_environment(
     'PXDDI_MAX_CONCURRENT_EXPLANATIONS', 1
 )
 ALLOWED_ORIGINS = configured_origins()
+TRUSTED_HOSTS = configured_trusted_hosts()
 
 app = FastAPI(title='PxDDI API')
 
@@ -137,7 +198,134 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_methods=['GET', 'POST'],
     allow_headers=['Content-Type'],
+    expose_headers=['X-Request-ID'],
 )
+
+
+class MaxRequestBodyMiddleware:
+    """Enforce a small buffered JSON body limit, including chunked requests."""
+
+    def __init__(self, app):
+        self.app = app
+
+    @staticmethod
+    async def _reject(scope, receive, send, status_code: int, detail: str) -> None:
+        await JSONResponse(status_code=status_code, content={'detail': detail})(
+            scope, receive, send
+        )
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+
+        headers = {key.lower(): value for key, value in scope.get('headers', [])}
+        content_length = headers.get(b'content-length')
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                await self._reject(
+                    scope, receive, send, 400, 'Content-Length must be a valid integer.'
+                )
+                return
+            if declared_size < 0 or declared_size > MAX_REQUEST_BYTES:
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    413,
+                    f'Request body exceeds the {MAX_REQUEST_BYTES}-byte API limit.',
+                )
+                return
+
+        messages = []
+        received_bytes = 0
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message['type'] == 'http.request':
+                received_bytes += len(message.get('body', b''))
+                if received_bytes > MAX_REQUEST_BYTES:
+                    await self._reject(
+                        scope,
+                        receive,
+                        send,
+                        413,
+                        f'Request body exceeds the {MAX_REQUEST_BYTES}-byte API limit.',
+                    )
+                    return
+                if not message.get('more_body', False):
+                    break
+            elif message['type'] == 'http.disconnect':
+                break
+
+        async def replay_body():
+            if messages:
+                return messages.pop(0)
+            return {'type': 'http.disconnect'}
+
+        await self.app(scope, replay_body, send)
+
+
+class RequestGuardMiddleware(BaseHTTPMiddleware):
+    """Guard request availability and log non-sensitive request metadata.
+
+    This deliberately never logs a request body or SMILES string. It is a
+    per-process availability guard and correlation aid, not a substitute for a
+    gateway rate limit, durable audit log, or clinical audit trail.
+    """
+
+    @staticmethod
+    def _finalize_response(
+        request: Request,
+        response,
+        request_id: str,
+        started_at: float,
+    ):
+        """Attach stable response metadata and log no request-body content."""
+        response.headers['X-Request-ID'] = request_id
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        LOGGER.info(
+            'api_request request_id=%s method=%s path=%s status=%s duration_ms=%.2f',
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            (time.perf_counter() - started_at) * 1000,
+        )
+        return response
+
+    async def dispatch(self, request: Request, call_next):
+        supplied_request_id = request.headers.get('x-request-id', '')
+        request_id = (
+            supplied_request_id
+            if REQUEST_ID_PATTERN.fullmatch(supplied_request_id)
+            else uuid.uuid4().hex
+        )
+        started_at = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            LOGGER.exception(
+                'api_request_failed request_id=%s method=%s path=%s',
+                request_id,
+                request.method,
+                request.url.path,
+            )
+            raise
+
+        return self._finalize_response(request, response, request_id, started_at)
+
+
+# Middleware is added in reverse wrapping order. This gives the request path
+# TrustedHost -> RequestGuard -> MaxRequestBody -> CORS -> application.
+app.add_middleware(MaxRequestBodyMiddleware)
+app.add_middleware(RequestGuardMiddleware)
+# Add this after CORS so it is the outermost middleware, including for CORS
+# preflight requests. Otherwise a malicious Host header could bypass the check.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 
 CHECKPOINT_PATH = resolve_checkpoint_path()
 # Checkpoint metadata contains only safe built-in types and tensors.
@@ -154,6 +342,127 @@ DECISION_THRESHOLD = float(checkpoint.get('threshold', 0.5))
 CALIBRATION = checkpoint.get('calibration')
 CHECKPOINT_SHA256 = file_sha256(CHECKPOINT_PATH)
 EXPLANATION_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_EXPLANATIONS)
+PREDICTION_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_PREDICTIONS)
+
+
+def _optional_float(value) -> float | None:
+    """Convert checkpoint scalar metadata without making health checks fragile."""
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if 0 <= numeric <= 1 else None
+
+
+def stored_validation_evidence(checkpoint_metadata: dict) -> dict:
+    """Describe stored validation metadata without presenting it as test evidence."""
+    auroc = _optional_float(
+        checkpoint_metadata.get('validation_auroc', checkpoint_metadata.get('auroc'))
+    )
+    epoch_value = checkpoint_metadata.get('epoch')
+    epoch = int(epoch_value) if isinstance(epoch_value, (int, float)) else None
+    selection_split = checkpoint_metadata.get(
+        'model_selection_split',
+        'internal validation; exact historical split manifest is unavailable',
+    )
+    return {
+        'status': 'available' if auroc is not None else 'unavailable',
+        'auroc': auroc,
+        'epoch': epoch,
+        'selection_metric': checkpoint_metadata.get('model_selection_metric', 'AUROC'),
+        'selection_split': selection_split,
+        'note': (
+            'This is stored internal model-selection metadata. It is not '
+            'transductive test, cold-start, external, or clinical performance.'
+        ),
+    }
+
+
+class CheckpointStructuralDomain:
+    """Optional checkpoint-backed nearest-training-structure diagnostic.
+
+    Candidate checkpoints produced by a future audited run may carry the
+    canonical training-structure reference list. The API can then flag a query
+    whose drug structure is far from every training drug. The diagnostic is a
+    review guardrail, never a reliability or safety guarantee.
+    """
+
+    REQUIRED_METHOD = APPLICABILITY_DOMAIN_METHOD
+
+    def __init__(self, metadata: dict) -> None:
+        if metadata.get('method') != self.REQUIRED_METHOD:
+            raise ValueError('unsupported applicability-domain method')
+        reference_smiles = metadata.get('reference_canonical_smiles')
+        if not isinstance(reference_smiles, list) or not reference_smiles:
+            raise ValueError('missing canonical training-structure references')
+        if len(reference_smiles) > 50_000:
+            raise ValueError('too many structural-domain reference structures')
+        radius = int(metadata.get('radius', 2))
+        num_bits = int(metadata.get('num_bits', 1024))
+        minimum_similarity = float(metadata.get('minimum_tanimoto_similarity', 0.4))
+        if radius <= 0 or num_bits < 128 or not 0 <= minimum_similarity <= 1:
+            raise ValueError('invalid applicability-domain parameters')
+        if metadata.get('include_chirality', True) is not True:
+            raise ValueError('only chirality-aware ECFP checkpoint domain state is supported')
+
+        canonical_references = []
+        for smiles in reference_smiles:
+            molecule = Chem.MolFromSmiles(str(smiles).strip())
+            if molecule is None:
+                raise ValueError('invalid canonical training structure in checkpoint metadata')
+            canonical_references.append(
+                Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
+            )
+        self.method = self.REQUIRED_METHOD
+        self.radius = radius
+        self.num_bits = num_bits
+        self.minimum_similarity = minimum_similarity
+        self.generator = rdFingerprintGenerator.GetMorganGenerator(
+            radius=radius,
+            fpSize=num_bits,
+            includeChirality=True,
+        )
+        self.reference_smiles = frozenset(canonical_references)
+        self.reference_fingerprints = tuple(
+            self.generator.GetFingerprint(Chem.MolFromSmiles(smiles))
+            for smiles in sorted(self.reference_smiles)
+        )
+
+    def score_smiles(self, smiles: str) -> dict:
+        molecule = Chem.MolFromSmiles(smiles.strip())
+        if molecule is None:
+            raise ValueError('SMILES could not be parsed for structural-domain scoring')
+        canonical = Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
+        fingerprint = self.generator.GetFingerprint(molecule)
+        similarity = max(DataStructs.BulkTanimotoSimilarity(
+            fingerprint, self.reference_fingerprints
+        ))
+        return {
+            'canonical_smiles': canonical,
+            'nearest_train_tanimoto': float(similarity),
+            'exactly_seen_in_training': canonical in self.reference_smiles,
+            'outside_structural_domain': bool(similarity < self.minimum_similarity),
+        }
+
+
+def checkpoint_structural_domain(
+    checkpoint_metadata: dict,
+) -> tuple[CheckpointStructuralDomain | None, str | None]:
+    """Load optional domain state while keeping legacy checkpoints loadable."""
+    metadata = checkpoint_metadata.get('applicability_domain')
+    if metadata is None:
+        return None, 'checkpoint_has_no_structural_domain_reference_set'
+    if not isinstance(metadata, dict):
+        return None, 'checkpoint_structural_domain_metadata_is_invalid'
+    try:
+        return CheckpointStructuralDomain(metadata), None
+    except (TypeError, ValueError) as error:
+        return None, f'checkpoint_structural_domain_unavailable: {error}'
+
+
+STRUCTURAL_DOMAIN, STRUCTURAL_DOMAIN_ERROR = checkpoint_structural_domain(checkpoint)
 
 print(
     'Loaded model. '
@@ -163,11 +472,13 @@ print(
 
 
 class DDIRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     smiles_a: str = Field(min_length=1, max_length=MAX_SMILES_LENGTH)
     smiles_b: str = Field(min_length=1, max_length=MAX_SMILES_LENGTH)
-    age_band: Optional[int] = None
-    sex: Optional[int] = None
-    comorbidities: Optional[List[int]] = None
+    age_band: Optional[StrictInt] = None
+    sex: Optional[StrictInt] = None
+    comorbidities: Optional[List[StrictInt]] = None
 
     @field_validator('smiles_a', 'smiles_b', mode='before')
     @classmethod
@@ -196,6 +507,22 @@ class DDIRequest(BaseModel):
         if value is not None and any(item not in (0, 1) for item in value):
             raise ValueError('comorbidities must contain only 0 or 1 values')
         return value
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(
+    request: Request, error: RequestValidationError
+):
+    """Return stable validation errors without echoing submitted structures."""
+    safe_errors = [
+        {
+            'loc': list(item['loc']),
+            'msg': item['msg'],
+            'type': item['type'],
+        }
+        for item in error.errors()
+    ]
+    return JSONResponse(status_code=422, content={'detail': safe_errors})
 
 
 def build_drug_batches(req: DDIRequest):
@@ -234,7 +561,7 @@ def build_drug_batches(req: DDIRequest):
 
 
 def toxicity_response(smiles: str, score: float):
-    """State whether the molecular structure had a FAERS-derived training label."""
+    """Separate an auxiliary model score from FAERS-label coverage."""
     training_label_available = is_toxicity_known(smiles)
     coverage_note = (
         'A matched FAERS-derived toxicity training label is available for this structure.'
@@ -243,6 +570,10 @@ def toxicity_response(smiles: str, score: float):
     )
     return {
         'score': score,
+        'model_score_note': (
+            'This is an auxiliary research-model score, not a clinical toxicity '
+            'probability. FAERS coverage describes supervision availability only.'
+        ),
         'known': training_label_available,
         'training_label_available': training_label_available,
         'coverage_note': coverage_note,
@@ -266,6 +597,94 @@ def risk_calibration_response() -> dict:
         'method': None,
         'fitted_on': None,
         'note': 'This checkpoint is uncalibrated; no saved calibration map is available.',
+    }
+
+
+def uncertainty_response(probability: float) -> dict:
+    """Return a saved conformal set only when the checkpoint carries its state."""
+    conformal = checkpoint.get('conformal')
+    if not isinstance(conformal, dict) or conformal.get('status') != 'fitted':
+        return {
+            'status': 'not_available',
+            'method': None,
+            'abstain': None,
+            'prediction_set': None,
+            'note': (
+                'This checkpoint has no saved validation-only conformal state. '
+                'Do not infer uncertainty from the score alone.'
+            ),
+        }
+    try:
+        prediction_sets = conformal_prediction_sets([probability], conformal)
+    except (KeyError, TypeError, ValueError) as error:
+        return {
+            'status': 'not_available_invalid_checkpoint_state',
+            'method': conformal.get('method'),
+            'abstain': None,
+            'prediction_set': None,
+            'note': f'Checkpoint conformal state is incomplete: {error}',
+        }
+    return {
+        'status': 'available_internal_validation_only',
+        'method': conformal.get('method'),
+        'alpha': conformal.get('alpha'),
+        'fitted_on': conformal.get('fitted_on'),
+        'prediction_set': str(prediction_sets['prediction_set'][0]),
+        'abstain': bool(prediction_sets['abstain'][0]),
+        'no_interaction_p_value': float(prediction_sets['no_interaction_p_value'][0]),
+        'interaction_p_value': float(prediction_sets['interaction_p_value'][0]),
+        'note': conformal.get(
+            'interpretation_warning',
+            'This is internal validation uncertainty only, not clinical confidence.',
+        ),
+    }
+
+
+def checkpoint_uncertainty_status() -> str:
+    """Expose availability in health without representing it as a prediction."""
+    return uncertainty_response(0.5)['status']
+
+
+def structural_domain_response(smiles_a: str, smiles_b: str) -> dict:
+    """Return a checkpoint-backed OOD flag without treating it as safety evidence."""
+    if STRUCTURAL_DOMAIN is None:
+        return {
+            'status': 'not_available',
+            'method': None,
+            'outside_structural_domain': None,
+            'note': (
+                'This checkpoint has no saved training-structure reference set, so '
+                'the API cannot assess structural out-of-domain status. '
+                f'Reason: {STRUCTURAL_DOMAIN_ERROR}.'
+            ),
+        }
+    try:
+        drug_a = STRUCTURAL_DOMAIN.score_smiles(smiles_a)
+        drug_b = STRUCTURAL_DOMAIN.score_smiles(smiles_b)
+    except ValueError as error:
+        return {
+            'status': 'not_available_invalid_query',
+            'method': STRUCTURAL_DOMAIN.method,
+            'outside_structural_domain': None,
+            'note': f'Could not assess the supplied structures: {error}',
+        }
+    pair_minimum = min(
+        drug_a['nearest_train_tanimoto'], drug_b['nearest_train_tanimoto']
+    )
+    outside = bool(pair_minimum < STRUCTURAL_DOMAIN.minimum_similarity)
+    return {
+        'status': 'available_structure_similarity_diagnostic',
+        'method': STRUCTURAL_DOMAIN.method,
+        'minimum_tanimoto_similarity': STRUCTURAL_DOMAIN.minimum_similarity,
+        'drug_a': drug_a,
+        'drug_b': drug_b,
+        'pair_minimum_nearest_train_tanimoto': pair_minimum,
+        'outside_structural_domain': outside,
+        'note': (
+            'This is a nearest-training-drug structural similarity diagnostic only. '
+            'It does not measure pair novelty, prove prediction reliability, or make '
+            'an unreported pair safe.'
+        ),
     }
 
 
@@ -302,44 +721,56 @@ def readiness_error() -> str | None:
 
 @app.post('/predict')
 def predict_ddi(req: DDIRequest):
-    batch_a, batch_b = build_drug_batches(req)
+    if not PREDICTION_SEMAPHORE.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail='The prediction service is busy. Please retry shortly.',
+        )
+    try:
+        batch_a, batch_b = build_drug_batches(req)
 
-    # The patient encoder remains disabled: it has not been trained with linked
-    # patient, exposure, and outcome data, so applying it would add random bias.
-    patient_context_note = (
-        'Patient context fields were accepted but NOT applied. The patient '
-        'conditioning module is not trained on linked patient-outcome data.'
-    )
+        # The patient encoder remains disabled: it has not been trained with linked
+        # patient, exposure, and outcome data, so applying it would add random bias.
+        patient_context_note = (
+            'Patient context fields were accepted but NOT applied. The patient '
+            'conditioning module is not trained on linked patient-outcome data.'
+        )
 
-    with torch.no_grad():
-        risk, tox_a, tox_b = model(batch_a, batch_b, patient=None)
+        with torch.no_grad():
+            risk, tox_a, tox_b = model(batch_a, batch_b, patient=None)
 
-    raw_risk_score = float(torch.sigmoid(risk))
-    risk_score = float(apply_calibrator([raw_risk_score], CALIBRATION)[0])
-    calibration_response = risk_calibration_response()
-    explanation = explanation_response()
-    return {
-        'disclaimer': 'Research prototype output. Not clinical advice. Not FDA/regulatory reviewed.',
-        'interaction_risk_estimate': risk_score,
-        'interaction_risk_score_raw': raw_risk_score,
-        'interaction_risk_note': (
-            'This is a research-model estimate, not a clinical probability. '
-            + calibration_response['note']
-        ),
-        'interaction_label_note': (
-            'The research task distinguishes reported TWOSIDES pairs from sampled '
-            'unreported pairs. An unreported pair is not evidence that the pair is safe.'
-        ),
-        'score_calibration': calibration_response,
-        'interaction_predicted': risk_score >= DECISION_THRESHOLD,
-        'decision_threshold_used': DECISION_THRESHOLD,
-        'patient_context_applied': False,
-        'patient_context_note': patient_context_note,
-        'drug_a_toxicity': toxicity_response(req.smiles_a, float(tox_a)),
-        'drug_b_toxicity': toxicity_response(req.smiles_b, float(tox_b)),
-        'explanation_available_at': explanation['endpoint'],
-        'explanation_note': explanation['note'],
-    }
+        raw_risk_score = float(torch.sigmoid(risk))
+        risk_score = float(apply_calibrator([raw_risk_score], CALIBRATION)[0])
+        calibration_response = risk_calibration_response()
+        explanation = explanation_response()
+        uncertainty = uncertainty_response(risk_score)
+        structural_domain = structural_domain_response(req.smiles_a, req.smiles_b)
+        return {
+            'disclaimer': 'Research prototype output. Not clinical advice. Not FDA/regulatory reviewed.',
+            'interaction_risk_estimate': risk_score,
+            'interaction_risk_score_raw': raw_risk_score,
+            'interaction_risk_note': (
+                'This is a research-model estimate, not a clinical probability. '
+                + calibration_response['note']
+            ),
+            'interaction_label_note': (
+                'The research task distinguishes reported TWOSIDES pairs from sampled '
+                'unreported pairs. An unreported pair is not evidence that the pair is safe.'
+            ),
+            'score_calibration': calibration_response,
+            'prediction_uncertainty': uncertainty,
+            'structural_applicability_domain': structural_domain,
+            'interaction_predicted': risk_score >= DECISION_THRESHOLD,
+            'decision_threshold_used': DECISION_THRESHOLD,
+            'patient_context_applied': False,
+            'patient_context_note': patient_context_note,
+            'drug_a_toxicity': toxicity_response(req.smiles_a, float(tox_a)),
+            'drug_b_toxicity': toxicity_response(req.smiles_b, float(tox_b)),
+            'explanation_available_at': explanation['endpoint'],
+            'explanation_note': explanation['note'],
+        }
+    finally:
+        PREDICTION_SEMAPHORE.release()
 
 
 @app.post('/explain')
@@ -389,9 +820,14 @@ def health():
         'model_feature_schema': MODEL_FEATURE_SCHEMA,
         'model_requires_motif_features': MODEL_REQUIRES_MOTIF_FEATURES,
         'score_calibration_status': risk_calibration_response()['status'],
+        'conformal_uncertainty_status': checkpoint_uncertainty_status(),
+        'structural_applicability_domain_status': (
+            'available_structure_similarity_diagnostic'
+            if STRUCTURAL_DOMAIN is not None else 'not_available'
+        ),
+        'structural_applicability_domain_error': STRUCTURAL_DOMAIN_ERROR,
         'explanation_status': 'available' if explanation_response()['available'] else 'not_available',
-        'model_auroc': float(checkpoint.get('auroc')) if checkpoint.get('auroc') is not None else None,
-        'model_epoch': int(checkpoint['epoch']) if checkpoint.get('epoch') is not None else None,
+        'stored_validation_evidence': stored_validation_evidence(checkpoint),
         'model_checkpoint_sha256': CHECKPOINT_SHA256,
         'toxicity_bridge_loaded': len(KNOWN_TOXICITY_SMILES) > 0,
         'toxicity_bridge_size': len(KNOWN_TOXICITY_SMILES),
@@ -409,6 +845,8 @@ def health():
         'max_smiles_length': MAX_SMILES_LENGTH,
         'max_molecule_atoms': MAX_MOLECULE_ATOMS,
         'max_molecule_bonds': MAX_MOLECULE_BONDS,
+        'max_request_bytes': MAX_REQUEST_BYTES,
+        'max_concurrent_predictions': MAX_CONCURRENT_PREDICTIONS,
         'max_concurrent_explanations': MAX_CONCURRENT_EXPLANATIONS,
     }
 

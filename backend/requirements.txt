@@ -6,6 +6,5 @@ scikit-learn
 rdkit
 fastapi
 uvicorn
-pymupdf
 pydantic
 requests

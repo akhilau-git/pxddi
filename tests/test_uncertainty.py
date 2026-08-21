@@ -58,3 +58,15 @@ def test_applicability_domain_flags_structurally_distant_drugs_without_claiming_
     assert scores['source_exactly_seen_in_training'].tolist() == [True, False]
     assert scores['structural_ood_flag'].tolist() == [False, True]
     assert 'does not' in summary['interpretation_warning']
+
+
+def test_applicability_domain_exports_a_checkpoint_safe_reference_state():
+    domain = MorganApplicabilityDomain(minimum_similarity=0.6)
+    domain.fit(['CCO', 'CCN'])
+
+    state = domain.export_checkpoint_state()
+
+    assert state['method'] == 'nearest_train_ecfp_tanimoto_v1'
+    assert state['reference_canonical_smiles'] == ['CCN', 'CCO']
+    assert state['include_chirality'] is True
+    assert 'does not measure DDI-pair novelty' in state['interpretation_warning']

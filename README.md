@@ -64,6 +64,27 @@ Useful endpoints:
 
 The default frontend origin is `http://localhost:3000`. Set
 `PXDDI_ALLOWED_ORIGINS` to a comma-separated allowlist for another deployment.
+`PXDDI_TRUSTED_HOSTS` must similarly contain the bare API host names (for
+example, `api.example.org`), never a URL or wildcard. `/health` now labels a
+checkpoint's stored AUROC as internal model-selection metadata rather than test
+or clinical evidence. `/predict` explicitly reports when its checkpoint lacks
+saved calibration, conformal-uncertainty, or structural-domain state.
+
+The API rejects unknown request fields and type coercion (for example, sending
+`"3"` instead of integer `3` for `age_band`). It accepts at most 16 KiB of
+request body by default, returns a non-sensitive validation response,
+adds `X-Request-ID` to responses, and prevents browsers or intermediaries from
+caching prediction output. Set `PXDDI_MAX_REQUEST_BYTES` or
+`PXDDI_MAX_CONCURRENT_PREDICTIONS` only after measuring the intended runtime;
+these local per-process guards do not replace gateway limits.
+
+For local Docker Compose use, the backend is deliberately bound to
+`127.0.0.1:8000`, runs non-root with a read-only filesystem, and mounts
+`backend/checkpoints/` read-only. A public deployment must put an authenticated
+TLS reverse proxy or API gateway in front of it, set concrete CORS/host
+allowlists, and provide central rate limiting, audit logs, monitoring, and
+deployment-specific resource limits. These controls cannot be safely claimed
+from the repository alone.
 
 ## Colab training
 

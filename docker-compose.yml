@@ -4,9 +4,22 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
-      - ./backend/checkpoints:/app/backend/checkpoints
+      - ./backend/checkpoints:/app/backend/checkpoints:ro
+    environment:
+      PXDDI_ALLOWED_ORIGINS: ${PXDDI_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      PXDDI_TRUSTED_HOSTS: ${PXDDI_TRUSTED_HOSTS:-localhost,127.0.0.1,backend}
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: ${PXDDI_BACKEND_MEMORY_LIMIT:-4g}
+    cpus: ${PXDDI_BACKEND_CPU_LIMIT:-2.0}
   frontend:
     build: ./frontend
     ports:
