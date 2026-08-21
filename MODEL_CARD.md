@@ -20,6 +20,11 @@ clinical validation. A later local or Colab checkpoint must be accompanied by
 its own run manifest, split files, predictions, and checkpoint hash before it
 replaces this reference in project documentation.
 
+The reference checkpoint predates the explicit recorded logits contract for
+the auxiliary toxicity loss. Its DDI forward path remains supported, but it
+cannot support a claim about auxiliary-toxicity performance. All multi-task
+candidates must be retrained with the corrected current loss contract.
+
 ## Training data
 
 - TWOSIDES: 200,000 sampled rows in the current training configuration.
@@ -47,6 +52,13 @@ intervals, structural-novelty slices, confidence-ranked errors, conformal
 abstention coverage, and hardware-specific efficiency records. These are
 research measurements on reported-versus-unreported labels, not clinical
 performance measures.
+
+Before training, the normal validation split is stratified into a
+model-selection subset for early stopping and a disjoint post-hoc subset. The
+post-hoc subset is then divided again for calibration, decision threshold, and
+conformal fitting. The split hashes and role assignments are artifacts. Results
+from runs that reused early-stopping validation for post-hoc fitting are
+historical only and must not be used for a fair new ensemble or comparison.
 
 ## Verified software behavior
 
@@ -87,6 +99,8 @@ performance measures.
    split-conformal sets and nearest-training-drug ECFP similarity flags. These
    are abstention/review signals under stated assumptions, not clinical
    confidence, a safety guarantee, or a cure for S1/S2 distribution shift.
+   The current pipeline reserves the calibration/threshold/conformal rows
+   before model training; it does not reuse the early-stopping subset.
 7. **Validation:** no external, temporal, prospective, or clinical validation
    has been performed.
 8. **Explanation:** `/explain` attributes molecular embeddings and applies a

@@ -22,7 +22,10 @@ def _manifest(model_seed: int, artifact_root: str = 'run'):
             'rows': 10,
             'label_counts': {'0.0': 5, '1.0': 5},
         }
-        for name in ('transductive_train', 'validation', 'transductive_test', 's1_test', 's2_test')
+        for name in (
+            'transductive_train', 'validation', 'posthoc_validation',
+            'transductive_test', 's1_test', 's2_test',
+        )
     }
     return {
         'input_sha256': {'twosides_edges': 'twosides-hash'},
@@ -106,7 +109,9 @@ def test_ensemble_reads_validation_and_test_prediction_manifest_field_names(tmp_
     test_path.write_text('label\n0\n', encoding='utf-8')
     manifest = {
         'validation_predictions': {
-            'path': str(validation_path), 'sha256': get_file_hash(validation_path),
+            'path': str(validation_path),
+            'sha256': get_file_hash(validation_path),
+            'split_role': 'posthoc_validation_reserved_before_training',
         },
         'results': {
             'S1': {

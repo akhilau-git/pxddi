@@ -22,6 +22,12 @@ clinical validation. A locally replaced or newly trained checkpoint must be
 described by its own Colab `run_manifest.json`, not by copying these figures.
 The API also marks its risk estimate as uncalibrated.
 
+The reference checkpoint predates the explicit auxiliary-toxicity logits-loss
+record now required by the training pipeline. It remains loadable as a
+research-only DDI reference, but it must not be used to make an
+auxiliary-toxicity performance claim. Every multi-task candidate must be
+retrained with the current code before comparison.
+
 ## Historical evaluation figures
 
 The following previously reported figures are retained for traceability, but
@@ -48,6 +54,9 @@ C:\Python310\python.exe -m pip install -r requirements-dev.txt
 C:\Python310\python.exe -m pytest -q
 ```
 
+The development test client uses the official `httpx` package. Do not install
+the unrelated `httpx2` package for this repository.
+
 Start the research API:
 
 ```powershell
@@ -70,6 +79,12 @@ checkpoint's stored AUROC as internal model-selection metadata rather than test
 or clinical evidence. `/predict` explicitly reports when its checkpoint lacks
 saved calibration, conformal-uncertainty, or structural-domain state.
 
+Interactive API documentation remains enabled for direct local development. In
+Docker Compose it is disabled by default; set `PXDDI_ENABLE_DOCS=true` only for
+a trusted development environment. `X-Request-ID` is accepted and returned so
+the frontend can correlate a request with the backend's non-sensitive runtime
+log entry.
+
 The API rejects unknown request fields and type coercion (for example, sending
 `"3"` instead of integer `3` for `age_band`). It accepts at most 16 KiB of
 request body by default, returns a non-sensitive validation response,
@@ -85,6 +100,11 @@ TLS reverse proxy or API gateway in front of it, set concrete CORS/host
 allowlists, and provide central rate limiting, audit logs, monitoring, and
 deployment-specific resource limits. These controls cannot be safely claimed
 from the repository alone.
+
+Generated Colab outputs under `backend/plots/`, `backend/pxddi-results/`, and
+`backend/latest_results/` are excluded from the Docker build context. They are
+research evidence, not service inputs; only the explicitly mounted reviewed
+checkpoint directory is available to a running container.
 
 ## Colab training
 
@@ -115,6 +135,14 @@ audits, exact split CSVs and hashes, checkpoint hash, prediction CSVs, metrics
 JSON, and PNG/PDF figures. The pipeline excludes structures with conflicting
 toxicity scores rather than choosing a score by CSV row order or averaging
 them, and removes graph-incompatible SMILES before splitting.
+
+Before training, the original validation partition is deterministically split
+by class into a **model-selection validation** partition (used only for epoch
+selection/early stopping) and a **reserved post-hoc validation** partition.
+Only the reserved partition is later split into calibration, decision-threshold,
+and conformal roles. This prevents those post-hoc choices from reusing rows
+that selected the model. It also means older runs cannot be mixed into a new
+ensemble or used as directly comparable evidence.
 
 ### Phase 7 evaluation protocol
 
@@ -223,15 +251,15 @@ variation. It reports agreement; it does not prove a causal explanation.
 
 ### Uncertainty and structural-domain audit
 
-Every new run partitions the post-training validation predictions by class into
-three disjoint roles: Platt-calibration fitting, decision-threshold selection,
-and binary split-conformal fitting (default `PXDDI_CONFORMAL_ALPHA=0.1`). The
-exact roles, scores, and hash are stored in the run artifact. Each saved test
-prediction states whether its conformal set is a single label, both labels, or
-an empty set; both-label and empty sets are marked `conformal_abstain=true`.
-The prediction CSV also records Bernoulli score entropy and a
-nearest-training-drug ECFP/Tanimoto structural-domain flag (default minimum
-similarity `0.4`).
+Every new run reserves post-hoc validation rows before training, then partitions
+those reserved predictions by class into three disjoint roles:
+Platt-calibration fitting, decision-threshold selection, and binary
+split-conformal fitting (default `PXDDI_CONFORMAL_ALPHA=0.1`). The exact roles,
+scores, and hashes are stored in the run artifact. Each saved test prediction
+states whether its conformal set is a single label, both labels, or an empty
+set; both-label and empty sets are marked `conformal_abstain=true`. The
+prediction CSV also records Bernoulli score entropy and a nearest-training-drug
+ECFP/Tanimoto structural-domain flag (default minimum similarity `0.4`).
 
 These are research guardrails, not clinical confidence. The conformal coverage
 assumption may fail under the S1/S2 distribution shifts, and molecular

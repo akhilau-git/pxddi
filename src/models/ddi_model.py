@@ -132,8 +132,13 @@ class PxDDIModel(nn.Module):
         else:
             ea = self.encoder(drug_a.x, drug_a.edge_index, drug_a.edge_attr, drug_a.batch)
             eb = self.encoder(drug_b.x, drug_b.edge_index, drug_b.edge_attr, drug_b.batch)
-        ta = torch.sigmoid(self.toxicity_head(ea))
-        tb = torch.sigmoid(self.toxicity_head(eb))
+        # Keep raw logits for ``BCEWithLogitsLoss``.  The interaction head still
+        # receives sigmoid-transformed toxicity features, preserving the legacy
+        # checkpoint's interaction-risk computation exactly.
+        toxicity_a_logits = self.toxicity_head(ea)
+        toxicity_b_logits = self.toxicity_head(eb)
+        toxicity_a_probability = torch.sigmoid(toxicity_a_logits)
+        toxicity_b_probability = torch.sigmoid(toxicity_b_logits)
         if patient is not None:
             g = self.patient_encoder(patient['age_band'], patient['sex'], patient['comorbidities'])
             ea, eb = ea*g, eb*g
@@ -157,12 +162,16 @@ class PxDDIModel(nn.Module):
         features = [emb_sum, emb_diff]
         if self.use_toxicity_pair_features:
             features.extend([
-                (ta + tb).unsqueeze(-1),
-                torch.abs(ta - tb).unsqueeze(-1),
+                (toxicity_a_probability + toxicity_b_probability).unsqueeze(-1),
+                torch.abs(toxicity_a_probability - toxicity_b_probability).unsqueeze(-1),
             ])
         combined = torch.cat(features, dim=1)
         
-        return self.risk_classifier(combined).squeeze(-1), ta, tb
+        return (
+            self.risk_classifier(combined).squeeze(-1),
+            toxicity_a_logits,
+            toxicity_b_logits,
+        )
 
     def cross_drug_attention_maps(self, drug_a, drug_b):
         """Return pair-isolated attention maps for an offline candidate audit.

@@ -33,7 +33,14 @@ PRESET = os.environ.get('PXDDI_EXPERIMENT_PRESET', 'screening').strip().lower()
 REFERENCE_EXPERIMENT = os.environ.get(
     'PXDDI_EXPERIMENT_REFERENCE', 'legacy_gat_multitask'
 ).strip()
-SPLIT_NAMES = ('transductive_train', 'validation', 'transductive_test', 's1_test', 's2_test')
+SPLIT_NAMES = (
+    'transductive_train',
+    'validation',
+    'posthoc_validation',
+    'transductive_test',
+    's1_test',
+    's2_test',
+)
 METRIC_NAMES = (
     'auroc', 'average_precision', 'f1', 'mcc', 'balanced_accuracy',
     'brier_score_calibrated',

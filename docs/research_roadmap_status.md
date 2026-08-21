@@ -6,7 +6,7 @@ until its audited artifacts have been generated and reviewed.
 
 | Original phase | Current status | What is implemented | What remains before a claim |
 | --- | --- | --- | --- |
-| 1. Correctness | Source complete | Version-aware checkpoint loading, candidate graph-schema selection, corrected external evaluator, Colab dependency bounds, early stopping, tests. | Run the selected candidate in Colab; Docker execution remains separately unverified. |
+| 1. Correctness | Source complete; historical candidates require rerun | Version-aware checkpoint loading, candidate graph-schema selection, corrected auxiliary toxicity logits loss, disjoint early-stopping/post-hoc validation roles, corrected external evaluator, Colab dependency bounds, early stopping, tests. | Rerun every multi-task candidate with the current code; run the selected candidate in Colab; Docker execution remains separately unverified. |
 | 2. Fair baselines | Partial | Symmetric ECFP/Morgan + SGD logistic baseline, fair shared-split experiment launcher, repeated-seed comparison support. | XGBoost, GCN/GIN, directed MPNN, and actual matched baseline runs. |
 | 3A. Motif view | Source complete | Auditable 17-SMARTS motif features and motif-edge-aware ablations. | Repeated matched-seed S1/S2 evidence. |
 | 3B. Cross-drug layer | Source complete | Pair-isolated symmetric atom-level cross attention and atom/motif association audit. | Repeated matched-seed S1/S2 and efficiency evidence. |
@@ -22,5 +22,6 @@ until its audited artifacts have been generated and reviewed.
 - A sampled unreported TWOSIDES pair is not a known-safe pair.
 - S1 results remain the key generalization test; the historical S1 result was near random.
 - FAERS toxicity is observational and the 58 conflicting mapped structures remain excluded.
+- Older multi-task artifacts used before the recorded toxicity-logits loss contract and before validation-role separation are historical only; do not compare or ensemble them with new runs.
 - Explanations, attention, calibration, conformal sets, OOD flags, and abstention are research aids—not clinical evidence.
 - No candidate or ensemble may overwrite `backend/checkpoints/pxddi_model.pt` without a documented review and explicit approval.

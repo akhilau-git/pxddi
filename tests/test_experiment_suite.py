@@ -74,7 +74,10 @@ def _split_manifest(seed_suffix: str = 'a'):
             'rows': 10,
             'label_counts': {'0.0': 5, '1.0': 5},
         }
-        for name in ('transductive_train', 'validation', 'transductive_test', 's1_test', 's2_test')
+        for name in (
+            'transductive_train', 'validation', 'posthoc_validation',
+            'transductive_test', 's1_test', 's2_test',
+        )
     }
 
 

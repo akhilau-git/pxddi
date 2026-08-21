@@ -38,6 +38,9 @@ from src.training.train_full_pipeline_v2 import (
     plot_benchmark_comparison,
     plot_evaluation,
     plot_training_curves,
+    partition_validation_for_model_selection,
+    partition_validation_for_posthoc,
+    posthoc_validation_partition_summary,
     resolve_results_base,
     save_split_manifests,
     save_training_history,
@@ -65,6 +68,9 @@ ECFP_RADIUS = _positive_int_from_environment('PXDDI_ECFP_RADIUS', 2)
 ECFP_NUM_BITS = _positive_int_from_environment('PXDDI_ECFP_NUM_BITS', 1024)
 ECFP_EPOCHS = _positive_int_from_environment('PXDDI_ECFP_EPOCHS', 30)
 ECFP_BATCH_SIZE = _positive_int_from_environment('PXDDI_ECFP_BATCH_SIZE', 1024)
+MODEL_SELECTION_VALIDATION_FRACTION = float(
+    os.environ.get('PXDDI_MODEL_SELECTION_VALIDATION_FRACTION', '0.5')
+)
 EARLY_STOPPING_PATIENCE = _non_negative_int_from_environment(
     'PXDDI_ECFP_EARLY_STOPPING_PATIENCE', 6
 )
@@ -75,6 +81,10 @@ if ECFP_NUM_BITS < 128:
     raise ValueError('PXDDI_ECFP_NUM_BITS must be at least 128.')
 if EARLY_STOPPING_MIN_EPOCHS > ECFP_EPOCHS:
     raise ValueError('PXDDI_ECFP_EARLY_STOPPING_MIN_EPOCHS must not exceed PXDDI_ECFP_EPOCHS.')
+if not 0 < MODEL_SELECTION_VALIDATION_FRACTION < 1:
+    raise ValueError(
+        'PXDDI_MODEL_SELECTION_VALIDATION_FRACTION must lie strictly between zero and one.'
+    )
 
 DRIVE_BASE = Path(os.environ.get('PXDDI_DATA_BASE', '/content/drive/MyDrive/pxddi-data'))
 TWOSIDES_EDGES = DRIVE_BASE / 'twosides' / 'drug_drug_edges.csv'
@@ -283,6 +293,10 @@ def baseline_manifest() -> dict[str, Any]:
             'batch_size': ECFP_BATCH_SIZE,
             'early_stopping_patience': EARLY_STOPPING_PATIENCE,
             'early_stopping_min_epochs': EARLY_STOPPING_MIN_EPOCHS,
+            'model_selection_validation_fraction': MODEL_SELECTION_VALIDATION_FRACTION,
+            'validation_role_protocol': (
+                'stratified_disjoint_model_selection_then_posthoc_three_way_v1'
+            ),
             'use_toxicity_pair_features': False,
             'toxicity_loss_weight': 0.0,
             'negative_label_meaning': 'unreported_twosides_sampled',
@@ -315,6 +329,17 @@ def main() -> None:
     }
     write_json(audit_dir / 'dataset_summary.json', dataset_summary)
     splits = create_splits(full_dataset, drug_a_col='source', drug_b_col='target', seed=SEED)
+    model_selection_validation, posthoc_validation, validation_role_partition = (
+        partition_validation_for_model_selection(
+            splits['validation'],
+            seed=SEED,
+            selection_fraction=MODEL_SELECTION_VALIDATION_FRACTION,
+        )
+    )
+    # Keep the conventional key for the experiment-suite split signature. The
+    # additional table is reserved before training for all post-hoc decisions.
+    splits['validation'] = model_selection_validation
+    splits['posthoc_validation'] = posthoc_validation
     split_manifest = save_split_manifests(splits, RUN_ARTIFACTS_DIR)
 
     cache = MorganFingerprintCache()
@@ -322,7 +347,15 @@ def main() -> None:
         loss='log_loss', penalty='l2', alpha=1e-5, max_iter=1,
         learning_rate='optimal', random_state=SEED, average=True,
     )
-    history = {'epoch': [], 'loss': [], 'auroc': [], 'f1': []}
+    history = {
+        'epoch': [],
+        'loss': [],
+        'auroc': [],
+        'average_precision': [],
+        'f1': [],
+        'mcc': [],
+        'balanced_accuracy': [],
+    }
     best_auroc = float('-inf')
     best_coefficients: np.ndarray | None = None
     best_intercept: float | None = None
@@ -352,10 +385,17 @@ def main() -> None:
         history['epoch'].append(epoch)
         history['loss'].append(float(log_loss(train_labels, train_predictions, labels=[0, 1])))
         history['auroc'].append(float(validation_metrics['auroc']))
+        history['average_precision'].append(float(validation_metrics['average_precision']))
         history['f1'].append(float(validation_metrics['f1']))
+        history['mcc'].append(float(validation_metrics['mcc']))
+        history['balanced_accuracy'].append(float(validation_metrics['balanced_accuracy']))
         print(
             f'Epoch {epoch}/{ECFP_EPOCHS}: loss={history["loss"][-1]:.4f}; '
-            f'validation AUROC={validation_metrics["auroc"]:.4f}; F1={validation_metrics["f1"]:.4f}'
+            f'selection AUROC={validation_metrics["auroc"]:.4f}; '
+            f'PR-AUC={validation_metrics["average_precision"]:.4f}; '
+            f'MCC={validation_metrics["mcc"]:.4f}; '
+            f'balanced accuracy={validation_metrics["balanced_accuracy"]:.4f}; '
+            f'F1={validation_metrics["f1"]:.4f}'
         )
 
         if validation_metrics['auroc'] > best_auroc:
@@ -367,7 +407,12 @@ def main() -> None:
             safe_save_baseline_checkpoint(
                 best_coefficients,
                 best_intercept,
-                {'epoch': epoch, 'validation_auroc': best_auroc, 'status': 'uncalibrated'},
+                {
+                    'epoch': epoch,
+                    'validation_auroc': best_auroc,
+                    'model_selection_split': 'validation',
+                    'status': 'uncalibrated',
+                },
                 CHECKPOINT_PATH,
             )
         else:
@@ -387,13 +432,46 @@ def main() -> None:
         raise RuntimeError('Baseline training did not produce a valid checkpoint.')
 
     validation_labels, validation_raw_predictions = collect_predictions(
-        splits['validation'], cache, best_coefficients, best_intercept
+        splits['posthoc_validation'], cache, best_coefficients, best_intercept
     )
-    calibration = fit_platt_calibrator(validation_labels, validation_raw_predictions)
+    posthoc_partition = partition_validation_for_posthoc(validation_labels, seed=SEED)
+    if not posthoc_partition['independent_roles']:
+        raise ValueError(
+            'The reserved baseline validation split has too few examples per class '
+            'for independent calibration and threshold roles.'
+        )
+    calibration_indices = posthoc_partition['indices']['calibration']
+    threshold_indices = posthoc_partition['indices']['threshold']
+    calibration = fit_platt_calibrator(
+        validation_labels[calibration_indices],
+        validation_raw_predictions[calibration_indices],
+        fitted_on='posthoc_validation_calibration_partition',
+    )
     validation_calibrated_predictions = apply_calibrator(validation_raw_predictions, calibration)
     frozen_threshold = select_validation_threshold(
-        validation_labels, validation_calibrated_predictions
+        validation_labels[threshold_indices],
+        validation_calibrated_predictions[threshold_indices],
     )
+    posthoc_assignments = np.full(len(validation_labels), 'not_assigned', dtype=object)
+    for role, indices in posthoc_partition['indices'].items():
+        posthoc_assignments[indices] = role
+    posthoc_validation_artifact = splits['posthoc_validation'].copy()
+    posthoc_validation_artifact['raw_prediction_score'] = validation_raw_predictions
+    posthoc_validation_artifact['calibrated_prediction_score'] = validation_calibrated_predictions
+    posthoc_validation_artifact['posthoc_validation_role'] = posthoc_assignments
+    posthoc_path = RUN_ARTIFACTS_DIR / 'uncertainty' / 'posthoc_validation_partition.csv'
+    posthoc_path.parent.mkdir(parents=True, exist_ok=True)
+    posthoc_validation_artifact.to_csv(posthoc_path, index=False)
+    posthoc_partition_artifact = {
+        **posthoc_validation_partition_summary(validation_labels, posthoc_partition),
+        'path': str(posthoc_path),
+        'sha256': get_file_hash(posthoc_path),
+        'role_usage': {
+            'calibration': 'platt_calibration_fit',
+            'threshold': 'decision_threshold_selection',
+            'conformal': 'not_used_by_this_classical_baseline',
+        },
+    }
     checkpoint_hash = safe_save_baseline_checkpoint(
         best_coefficients,
         best_intercept,
@@ -403,9 +481,36 @@ def main() -> None:
             'threshold': frozen_threshold,
             'calibration': calibration,
             'model_architecture': 'ecfp_sgd_logistic_v1',
+            'model_selection_split': 'validation',
+            'posthoc_validation_split': 'posthoc_validation',
+            'validation_role_partition': validation_role_partition,
+            'posthoc_validation_partition': {
+                key: value for key, value in posthoc_partition_artifact.items()
+                if key not in {'path', 'sha256'}
+            },
         },
         CHECKPOINT_PATH,
     )
+    validation_prediction_path = save_prediction_artifact(
+        'Validation',
+        splits['posthoc_validation'],
+        validation_labels,
+        validation_raw_predictions,
+        validation_calibrated_predictions,
+        frozen_threshold,
+        prediction_dir,
+        calibration,
+    )
+    validation_prediction_summary = {
+        'path': str(validation_prediction_path),
+        'sha256': get_file_hash(validation_prediction_path),
+        'rows': int(len(validation_labels)),
+        'split_role': 'posthoc_validation_reserved_before_training',
+        'purpose': (
+            'Reserved validation member scores. This table was not used for '
+            'early stopping and can be combined by a fixed-split ensemble.'
+        ),
+    }
 
     plot_training_curves(history, figure_dir)
     history_summary = save_training_history(history, RUN_ARTIFACTS_DIR)
@@ -444,6 +549,9 @@ def main() -> None:
             'validation_selected_threshold': frozen_threshold,
         },
         'calibration': calibration,
+        'validation_predictions': validation_prediction_summary,
+        'validation_role_partition': validation_role_partition,
+        'posthoc_validation_partition': posthoc_partition_artifact,
         'model_summary': {
             'model_class': 'SGDClassifier',
             'model_architecture': 'ecfp_sgd_logistic_v1',
@@ -459,6 +567,9 @@ def main() -> None:
             'stopped_early': stopped_early,
             'completed_epochs': len(history['epoch']),
             'best_epoch': best_epoch,
+            'model_selection_split': 'validation',
+            'posthoc_validation_split': 'posthoc_validation',
+            'posthoc_reserved_before_training': True,
         },
         'input_quality': input_quality_summary,
         'dataset': dataset_summary,

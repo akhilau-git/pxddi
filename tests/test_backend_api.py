@@ -40,6 +40,7 @@ def test_health_reports_checkpoint_and_runtime_limits():
     assert payload['toxicity_bridge_conflicting_structures_excluded'] == (
         main.TOXICITY_BRIDGE_SUMMARY['excluded_conflicting_structures']
     )
+    assert payload['api_documentation_enabled'] is True
     assert re.fullmatch(r'[A-Za-z0-9._-]{8,128}', response.headers['x-request-id'])
     assert response.headers['cache-control'] == 'no-store'
     assert response.headers['x-content-type-options'] == 'nosniff'
@@ -51,6 +52,9 @@ def test_health_reports_checkpoint_and_runtime_limits():
     assert payload['structural_applicability_domain_status'] == 'not_available'
     assert payload['structural_applicability_domain_error'] == (
         'checkpoint_has_no_structural_domain_reference_set'
+    )
+    assert payload['auxiliary_toxicity_head_status']['status'] == (
+        'historical_contract_not_recorded'
     )
 
 
@@ -77,12 +81,13 @@ def test_local_frontend_origin_is_allowed_by_cors():
         headers={
             'Origin': 'http://localhost:3000',
             'Access-Control-Request-Method': 'POST',
-            'Access-Control-Request-Headers': 'content-type',
+            'Access-Control-Request-Headers': 'content-type,x-request-id',
         },
     )
 
     assert response.status_code == 200
     assert response.headers['access-control-allow-origin'] == 'http://localhost:3000'
+    assert 'x-request-id' in response.headers['access-control-allow-headers'].lower()
 
 
 def test_unconfigured_origin_is_not_allowed_by_cors():
@@ -105,10 +110,18 @@ def test_untrusted_host_header_is_rejected_including_before_routing():
 
 
 def test_trusted_host_configuration_rejects_wildcard(monkeypatch):
-    monkeypatch.setenv('PXDDI_TRUSTED_HOSTS', '*')
+    monkeypatch.setenv('PXDDI_TRUSTED_HOSTS', '*.example.org')
 
     with pytest.raises(RuntimeError, match='explicit bare host names'):
         main.configured_trusted_hosts()
+
+
+def test_boolean_environment_setting_is_explicit(monkeypatch):
+    monkeypatch.setenv('PXDDI_ENABLE_DOCS', 'off')
+    assert main.boolean_from_environment('PXDDI_ENABLE_DOCS', True) is False
+    monkeypatch.setenv('PXDDI_ENABLE_DOCS', 'maybe')
+    with pytest.raises(RuntimeError, match='true or false'):
+        main.boolean_from_environment('PXDDI_ENABLE_DOCS', True)
 
 
 def test_origin_configuration_rejects_wildcards_and_paths(monkeypatch):
@@ -144,6 +157,8 @@ def test_prediction_reports_label_coverage_and_disabled_patient_context():
     )
     assert payload['drug_a_toxicity']['known'] is True
     assert payload['drug_a_toxicity']['training_label_available'] is True
+    assert 0 <= payload['drug_a_toxicity']['score'] <= 1
+    assert 0 <= payload['drug_b_toxicity']['score'] <= 1
     assert 'not a clinical toxicity probability' in payload['drug_a_toxicity']['model_score_note']
     assert 'FAERS-derived' in payload['drug_a_toxicity']['coverage_note']
     assert payload['explanation_available_at'] == '/explain (separate, slower endpoint)'
@@ -264,6 +279,21 @@ def test_prediction_request_is_rejected_while_process_limit_is_active(monkeypatc
 
     assert response.status_code == 429
     assert 'busy' in response.json()['detail']
+
+
+def test_explanation_also_respects_the_shared_inference_limit(monkeypatch):
+    monkeypatch.setattr(main, 'PREDICTION_SEMAPHORE', main.threading.BoundedSemaphore(1))
+    assert main.PREDICTION_SEMAPHORE.acquire(blocking=False)
+    try:
+        response = CLIENT.post(
+            '/explain',
+            json={'smiles_a': ASPIRIN, 'smiles_b': ACETAMINOPHEN},
+        )
+    finally:
+        main.PREDICTION_SEMAPHORE.release()
+
+    assert response.status_code == 429
+    assert 'inference service is busy' in response.json()['detail']
 
 
 def test_edge_aware_candidate_does_not_advertise_legacy_explanations(monkeypatch):

@@ -16,7 +16,14 @@ import pandas as pd
 ENSEMBLE_METHOD = 'fixed_split_probability_mean_v1'
 ABSTENTION_LABEL = 'insufficient_evidence_for_reliable_unseen_drug_prediction'
 PROVENANCE_COLUMNS = ('source', 'target', 'label', 'label_evidence')
-SPLIT_NAMES = ('transductive_train', 'validation', 'transductive_test', 's1_test', 's2_test')
+SPLIT_NAMES = (
+    'transductive_train',
+    'validation',
+    'posthoc_validation',
+    'transductive_test',
+    's1_test',
+    's2_test',
+)
 
 
 def _split_manifest_evidence(manifest: dict[str, Any]) -> dict[str, Any]:

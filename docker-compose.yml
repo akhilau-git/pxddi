@@ -10,6 +10,7 @@ services:
     environment:
       PXDDI_ALLOWED_ORIGINS: ${PXDDI_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       PXDDI_TRUSTED_HOSTS: ${PXDDI_TRUSTED_HOSTS:-localhost,127.0.0.1,backend}
+      PXDDI_ENABLE_DOCS: ${PXDDI_ENABLE_DOCS:-false}
     read_only: true
     tmpfs:
       - /tmp

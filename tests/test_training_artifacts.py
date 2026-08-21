@@ -20,6 +20,8 @@ with patch('torch.cuda.is_available', return_value=True):
         calculate_metrics,
         filter_graph_compatible_pairs,
         get_file_hash,
+        multi_task_loss,
+        partition_validation_for_model_selection,
         publish_latest_results,
         partition_validation_for_posthoc,
         posthoc_validation_partition_summary,
@@ -95,6 +97,41 @@ def test_metrics_handle_evaluable_and_one_class_splits():
     assert one_class_metrics['auroc'] is None
 
 
+def test_multi_task_loss_uses_logits_for_the_toxicity_heads():
+    risk_logits = torch.tensor([0.0, 0.5])
+    toxicity_a_logits = torch.tensor([-2.0, 2.0])
+    toxicity_b_logits = torch.tensor([1.5, -1.5])
+    risk_labels = torch.tensor([0.0, 1.0])
+    toxicity_a_labels = torch.tensor([0.0, 1.0])
+    toxicity_b_labels = torch.tensor([1.0, 0.0])
+    toxicity_a_known = torch.tensor([1.0, 0.0])
+    toxicity_b_known = torch.tensor([0.0, 1.0])
+
+    actual = multi_task_loss(
+        risk_logits,
+        toxicity_a_logits,
+        toxicity_b_logits,
+        risk_labels,
+        toxicity_a_labels,
+        toxicity_b_labels,
+        toxicity_a_known,
+        toxicity_b_known,
+        toxicity_loss_weight=0.3,
+    )
+    expected = torch.nn.functional.binary_cross_entropy_with_logits(
+        risk_logits, risk_labels
+    ) + 0.3 * (
+        torch.nn.functional.binary_cross_entropy_with_logits(
+            toxicity_a_logits[:1], toxicity_a_labels[:1]
+        )
+        + torch.nn.functional.binary_cross_entropy_with_logits(
+            toxicity_b_logits[1:], toxicity_b_labels[1:]
+        )
+    )
+
+    assert torch.allclose(actual, expected)
+
+
 def test_early_stopping_waits_for_minimum_epochs_and_patience():
     assert not should_stop_early(39, 100, minimum_epochs=40, patience=30)
     assert not should_stop_early(40, 29, minimum_epochs=40, patience=30)
@@ -117,6 +154,34 @@ def test_posthoc_validation_roles_are_stratified_and_disjoint_when_possible():
     assert not threshold & conformal
     assert calibration | threshold | conformal == set(range(len(labels)))
     assert all(role['negative_count'] and role['positive_count'] for role in summary['roles'].values())
+
+
+def test_model_selection_validation_is_disjoint_from_reserved_posthoc_rows():
+    frame = pd.DataFrame({
+        'row_id': np.arange(20),
+        'label': [0] * 10 + [1] * 10,
+    })
+
+    selection, posthoc, summary = partition_validation_for_model_selection(
+        frame, seed=123, selection_fraction=0.5
+    )
+
+    assert summary['status'] == 'stratified_disjoint_model_selection_and_posthoc'
+    assert summary['independent_from_early_stopping'] is True
+    assert set(selection['row_id']).isdisjoint(set(posthoc['row_id']))
+    assert set(selection['row_id']) | set(posthoc['row_id']) == set(frame['row_id'])
+    assert set(selection['label']) == {0, 1}
+    assert set(posthoc['label']) == {0, 1}
+    # The reserved half still has at least one example of every class for each
+    # calibration/threshold/conformal role.
+    assert summary['posthoc_label_counts'] == {'0': 5, '1': 5}
+
+
+def test_model_selection_partition_rejects_too_small_class():
+    frame = pd.DataFrame({'label': [0, 0, 0, 1, 1, 1]})
+
+    with pytest.raises(ValueError, match='at least four examples'):
+        partition_validation_for_model_selection(frame, seed=123)
 
 
 def test_posthoc_validation_partition_marks_small_validation_fallback():

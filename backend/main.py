@@ -79,6 +79,19 @@ def positive_integer_from_environment(name: str, default: int) -> int:
     return value
 
 
+def boolean_from_environment(name: str, default: bool) -> bool:
+    """Read an explicit boolean deployment setting without silent coercion."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {'1', 'true', 'yes', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'off'}:
+        return False
+    raise RuntimeError(f'{name} must be true or false')
+
+
 def configured_origins():
     default_origins = 'http://localhost:3000,http://127.0.0.1:3000'
     raw_origins = os.environ.get('PXDDI_ALLOWED_ORIGINS', default_origins)
@@ -117,7 +130,7 @@ def configured_trusted_hosts() -> list[str]:
     hosts = [host.strip() for host in raw_hosts.split(',') if host.strip()]
     if not hosts:
         raise RuntimeError('PXDDI_TRUSTED_HOSTS must contain at least one host.')
-    if any(host == '*' or '://' in host or '/' in host for host in hosts):
+    if any('*' in host or '://' in host or '/' in host for host in hosts):
         raise RuntimeError(
             'PXDDI_TRUSTED_HOSTS must contain explicit bare host names, not URLs, paths, or *.'
         )
@@ -186,10 +199,16 @@ MAX_CONCURRENT_PREDICTIONS = positive_integer_from_environment(
 MAX_CONCURRENT_EXPLANATIONS = positive_integer_from_environment(
     'PXDDI_MAX_CONCURRENT_EXPLANATIONS', 1
 )
+ENABLE_API_DOCUMENTATION = boolean_from_environment('PXDDI_ENABLE_DOCS', True)
 ALLOWED_ORIGINS = configured_origins()
 TRUSTED_HOSTS = configured_trusted_hosts()
 
-app = FastAPI(title='PxDDI API')
+app = FastAPI(
+    title='PxDDI API',
+    docs_url='/docs' if ENABLE_API_DOCUMENTATION else None,
+    redoc_url=None,
+    openapi_url='/openapi.json' if ENABLE_API_DOCUMENTATION else None,
+)
 
 # The default permits only the local frontend. Deployments must explicitly set
 # PXDDI_ALLOWED_ORIGINS to their own comma-separated frontend origins.
@@ -197,7 +216,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_methods=['GET', 'POST'],
-    allow_headers=['Content-Type'],
+    allow_headers=['Content-Type', 'X-Request-ID'],
     expose_headers=['X-Request-ID'],
 )
 
@@ -376,6 +395,33 @@ def stored_validation_evidence(checkpoint_metadata: dict) -> dict:
         'note': (
             'This is stored internal model-selection metadata. It is not '
             'transductive test, cold-start, external, or clinical performance.'
+        ),
+    }
+
+
+def auxiliary_toxicity_head_status(checkpoint_metadata: dict) -> dict:
+    """State whether auxiliary-head training uses the recorded logits contract.
+
+    The interaction forward path remains loadable for legacy checkpoints.  But
+    a checkpoint that predates the explicit logits-vs-probability record cannot
+    be used as evidence for an auxiliary toxicity-training claim.
+    """
+    if checkpoint_metadata.get('toxicity_head_output') == 'logits_v1':
+        return {
+            'status': 'current_logits_training_contract_recorded',
+            'note': (
+                'The candidate records raw toxicity logits for the auxiliary '
+                'BCE-with-logits training objective. Its toxicity output remains '
+                'an auxiliary research score, not a clinical probability.'
+            ),
+        }
+    return {
+        'status': 'historical_contract_not_recorded',
+        'note': (
+            'This checkpoint predates the recorded auxiliary-toxicity logits '
+            'training contract. It remains a loadable research DDI reference, but '
+            'it must not support an auxiliary-toxicity performance claim; retrain '
+            'a candidate with the current pipeline before making one.'
         ),
     }
 
@@ -736,7 +782,7 @@ def predict_ddi(req: DDIRequest):
             'conditioning module is not trained on linked patient-outcome data.'
         )
 
-        with torch.no_grad():
+        with torch.inference_mode():
             risk, tox_a, tox_b = model(batch_a, batch_b, patient=None)
 
         raw_risk_score = float(torch.sigmoid(risk))
@@ -764,8 +810,12 @@ def predict_ddi(req: DDIRequest):
             'decision_threshold_used': DECISION_THRESHOLD,
             'patient_context_applied': False,
             'patient_context_note': patient_context_note,
-            'drug_a_toxicity': toxicity_response(req.smiles_a, float(tox_a)),
-            'drug_b_toxicity': toxicity_response(req.smiles_b, float(tox_b)),
+            'drug_a_toxicity': toxicity_response(
+                req.smiles_a, float(torch.sigmoid(tox_a))
+            ),
+            'drug_b_toxicity': toxicity_response(
+                req.smiles_b, float(torch.sigmoid(tox_b))
+            ),
             'explanation_available_at': explanation['endpoint'],
             'explanation_note': explanation['note'],
         }
@@ -784,19 +834,29 @@ def explain_ddi(req: DDIRequest):
                 'This endpoint remains available only for the legacy GAT architecture.'
             ),
         )
-    batch_a, batch_b = build_drug_batches(req)
+    # An explanation performs several model forwards. It must consume the same
+    # finite inference capacity as a prediction, otherwise one explanation can
+    # still exhaust memory while the prediction semaphore is full.
+    if not PREDICTION_SEMAPHORE.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail='The inference service is busy. Please retry shortly.',
+        )
     if not EXPLANATION_SEMAPHORE.acquire(blocking=False):
+        PREDICTION_SEMAPHORE.release()
         raise HTTPException(
             status_code=429,
             detail='An explanation is already running. Please retry shortly.',
         )
 
     try:
+        batch_a, batch_b = build_drug_batches(req)
         explanation = full_explanation_pipeline(
             model, batch_a, req.smiles_a, batch_b, req.smiles_b
         )
     finally:
         EXPLANATION_SEMAPHORE.release()
+        PREDICTION_SEMAPHORE.release()
 
     return {
         'disclaimer': (
@@ -828,6 +888,7 @@ def health():
         'structural_applicability_domain_error': STRUCTURAL_DOMAIN_ERROR,
         'explanation_status': 'available' if explanation_response()['available'] else 'not_available',
         'stored_validation_evidence': stored_validation_evidence(checkpoint),
+        'auxiliary_toxicity_head_status': auxiliary_toxicity_head_status(checkpoint),
         'model_checkpoint_sha256': CHECKPOINT_SHA256,
         'toxicity_bridge_loaded': len(KNOWN_TOXICITY_SMILES) > 0,
         'toxicity_bridge_size': len(KNOWN_TOXICITY_SMILES),
@@ -848,6 +909,7 @@ def health():
         'max_request_bytes': MAX_REQUEST_BYTES,
         'max_concurrent_predictions': MAX_CONCURRENT_PREDICTIONS,
         'max_concurrent_explanations': MAX_CONCURRENT_EXPLANATIONS,
+        'api_documentation_enabled': ENABLE_API_DOCUMENTATION,
     }
 
 

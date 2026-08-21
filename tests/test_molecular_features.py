@@ -35,6 +35,39 @@ def test_rich_graph_contains_bond_and_stereo_features():
     assert graph.x.shape[1] > NUM_ATOM_FEATURES
 
 
+def test_toxicity_head_returns_logits_but_risk_features_remain_probabilities():
+    graph_a = smiles_to_graph('CCO')
+    graph_b = smiles_to_graph('CCN')
+    assert graph_a is not None and graph_b is not None
+    batch_a = Batch.from_data_list([graph_a])
+    batch_b = Batch.from_data_list([graph_b])
+    model = PxDDIModel(in_channels=NUM_ATOM_FEATURES, hidden_channels=8).eval()
+
+    with torch.no_grad():
+        embedding_a = model.encoder(batch_a.x, batch_a.edge_index, batch_a.batch)
+        embedding_b = model.encoder(batch_b.x, batch_b.edge_index, batch_b.batch)
+        expected_toxicity_a_logits = model.toxicity_head(embedding_a)
+        expected_toxicity_b_logits = model.toxicity_head(embedding_b)
+        expected_risk_features = torch.cat((
+            embedding_a + embedding_b,
+            torch.abs(embedding_a - embedding_b),
+            (
+                torch.sigmoid(expected_toxicity_a_logits)
+                + torch.sigmoid(expected_toxicity_b_logits)
+            ).unsqueeze(-1),
+            torch.abs(
+                torch.sigmoid(expected_toxicity_a_logits)
+                - torch.sigmoid(expected_toxicity_b_logits)
+            ).unsqueeze(-1),
+        ), dim=1)
+        expected_risk = model.risk_classifier(expected_risk_features).squeeze(-1)
+        risk, toxicity_a_logits, toxicity_b_logits = model(batch_a, batch_b)
+
+    assert torch.allclose(toxicity_a_logits, expected_toxicity_a_logits)
+    assert torch.allclose(toxicity_b_logits, expected_toxicity_b_logits)
+    assert torch.allclose(risk, expected_risk)
+
+
 def test_counterion_only_structures_have_an_explicit_audit_reason():
     assert graph_compatibility_reason('[Na+].[Cl-]') == 'counterion_or_inorganic_only_structure'
     assert graph_compatibility_reason('C') == 'single_atom_or_disconnected_structure'

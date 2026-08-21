@@ -12,3 +12,6 @@ venv
 *.key
 notebooks
 tests
+backend/plots
+backend/pxddi-results
+backend/latest_results

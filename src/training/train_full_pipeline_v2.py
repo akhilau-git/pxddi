@@ -51,9 +51,10 @@ if str(REPOSITORY_SRC) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_SRC))
 
 DRIVE_BASE = Path(os.environ.get('PXDDI_DATA_BASE', '/content/drive/MyDrive/pxddi-data'))
-DRIVE_SRC = DRIVE_BASE / 'pxddi' / 'src'
-if DRIVE_SRC.exists() and str(DRIVE_SRC) not in sys.path:
-    sys.path.insert(0, str(DRIVE_SRC))
+# Training code must come from ``PROJECT_ROOT`` above (normally /content/pxddi
+# in Colab).  DRIVE_BASE intentionally contains data, prior checkpoints, and
+# outputs only.  Prepending a stale Drive checkout here would make a run's Git
+# revision disagree with the code it actually imported.
 
 from data_prep.prepare_twosides import (
     FEATURE_SCHEMA_LEGACY,
@@ -176,6 +177,9 @@ EARLY_STOPPING_MIN_EPOCHS = _positive_int_from_environment(
 )
 if EARLY_STOPPING_MIN_EPOCHS > EPOCHS:
     raise ValueError('PXDDI_EARLY_STOPPING_MIN_EPOCHS must not exceed PXDDI_EPOCHS.')
+MODEL_SELECTION_VALIDATION_FRACTION = _open_unit_interval_from_environment(
+    'PXDDI_MODEL_SELECTION_VALIDATION_FRACTION', 0.5
+)
 USE_CHEMBERTA = False
 MODEL_ARCHITECTURE = os.environ.get(
     'PXDDI_MODEL_ARCHITECTURE', MODEL_ARCHITECTURE_EDGE_AWARE
@@ -407,6 +411,10 @@ def build_run_manifest() -> dict[str, Any]:
             'batch_size': BATCH_SIZE,
             'early_stopping_patience': EARLY_STOPPING_PATIENCE,
             'early_stopping_min_epochs': EARLY_STOPPING_MIN_EPOCHS,
+            'model_selection_validation_fraction': MODEL_SELECTION_VALIDATION_FRACTION,
+            'validation_role_protocol': (
+                'stratified_disjoint_model_selection_then_posthoc_three_way_v1'
+            ),
             'use_chemberta': USE_CHEMBERTA,
             'model_architecture': MODEL_ARCHITECTURE,
             'feature_schema': FEATURE_SCHEMA,
@@ -936,6 +944,75 @@ def select_validation_threshold(labels: np.ndarray, predictions: np.ndarray) -> 
     return float(thresholds[np.argmax(true_positive_rate - false_positive_rate)])
 
 
+def partition_validation_for_model_selection(
+    dataframe: pd.DataFrame,
+    seed: int = SPLIT_SEED,
+    selection_fraction: float = MODEL_SELECTION_VALIDATION_FRACTION,
+    label_column: str = 'label',
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Make early stopping independent from post-hoc validation decisions.
+
+    Each binary class is shuffled deterministically, then partitioned into a
+    model-selection split and a reserved post-hoc split.  The latter retains at
+    least three examples per class so calibration, threshold selection, and
+    conformal fitting can each use a distinct role.  A small split is an
+    explicit error rather than a silent reuse of model-selection examples.
+    """
+    if label_column not in dataframe:
+        raise ValueError(f'Validation frame is missing {label_column!r}.')
+    if not 0 < selection_fraction < 1:
+        raise ValueError('selection_fraction must lie strictly between zero and one.')
+    targets = dataframe[label_column].to_numpy(dtype=int)
+    if targets.ndim != 1 or len(targets) == 0:
+        raise ValueError('Validation labels must be a non-empty one-dimensional array.')
+    if not np.isin(targets, (0, 1)).all() or len(np.unique(targets)) < 2:
+        raise ValueError('Validation role partitioning requires both binary classes.')
+
+    generator = np.random.default_rng(seed)
+    selection_positions: list[int] = []
+    posthoc_positions: list[int] = []
+    source_counts: dict[str, int] = {}
+    for label in (0, 1):
+        positions = np.flatnonzero(targets == label)
+        source_counts[str(label)] = int(len(positions))
+        if len(positions) < 4:
+            raise ValueError(
+                'Validation role partitioning requires at least four examples '
+                f'of each class; class {label} has {len(positions)}.'
+            )
+        shuffled = generator.permutation(positions)
+        requested_selection = int(round(len(shuffled) * selection_fraction))
+        # Preserve one row per class for each of the three post-hoc roles.
+        selection_count = min(max(1, requested_selection), len(shuffled) - 3)
+        selection_positions.extend(shuffled[:selection_count].tolist())
+        posthoc_positions.extend(shuffled[selection_count:].tolist())
+
+    selection_positions = sorted(selection_positions)
+    posthoc_positions = sorted(posthoc_positions)
+    model_selection = dataframe.iloc[selection_positions].copy().reset_index(drop=True)
+    posthoc = dataframe.iloc[posthoc_positions].copy().reset_index(drop=True)
+    summary = {
+        'status': 'stratified_disjoint_model_selection_and_posthoc',
+        'independent_from_early_stopping': True,
+        'seed': int(seed),
+        'requested_model_selection_fraction': float(selection_fraction),
+        'source_rows': int(len(dataframe)),
+        'source_label_counts': source_counts,
+        'model_selection_rows': int(len(model_selection)),
+        'model_selection_label_counts': {
+            str(label): int((model_selection[label_column] == label).sum())
+            for label in (0, 1)
+        },
+        'posthoc_rows': int(len(posthoc)),
+        'posthoc_label_counts': {
+            str(label): int((posthoc[label_column] == label).sum())
+            for label in (0, 1)
+        },
+        'posthoc_roles': ('calibration', 'threshold', 'conformal'),
+    }
+    return model_selection, posthoc, summary
+
+
 def partition_validation_for_posthoc(
     labels: np.ndarray,
     seed: int = SPLIT_SEED,
@@ -944,8 +1021,8 @@ def partition_validation_for_posthoc(
 
     Keeping these roles separate prevents a post-hoc calibrator, decision
     threshold, and conformal nonconformity distribution from each evaluating
-    themselves.  The model still uses the overall validation split for early
-    stopping, which is recorded separately in the run manifest.
+    themselves. The input must be the reserved post-hoc validation split, not
+    the model-selection split used for early stopping.
     """
     targets = np.asarray(labels, dtype=int)
     if targets.ndim != 1 or len(targets) == 0:
@@ -1266,9 +1343,22 @@ def plot_training_curves(history: dict[str, list[float]], figure_dir: Path) -> N
     axes[0].plot(history['epoch'], history['loss'], color='#0072B2', label='Training loss')
     axes[0].set(title='Training loss', xlabel='Epoch', ylabel='Loss')
     axes[0].grid(alpha=0.25)
-    axes[1].plot(history['epoch'], history['auroc'], color='#D55E00', label='Validation AUROC')
-    axes[1].plot(history['epoch'], history['f1'], color='#009E73', label='Validation F1')
-    axes[1].set(title='Validation performance', xlabel='Epoch', ylabel='Score', ylim=(0, 1))
+    metric_lines = (
+        ('auroc', 'Model-selection AUROC', '#D55E00'),
+        ('average_precision', 'Model-selection PR-AUC', '#CC79A7'),
+        ('f1', 'Model-selection F1', '#009E73'),
+        ('mcc', 'Model-selection MCC', '#56B4E9'),
+        ('balanced_accuracy', 'Model-selection balanced accuracy', '#E69F00'),
+    )
+    for key, label, color in metric_lines:
+        if key in history:
+            axes[1].plot(history['epoch'], history[key], color=color, label=label)
+    axes[1].set(
+        title='Model-selection validation performance',
+        xlabel='Epoch',
+        ylabel='Score',
+        ylim=(0, 1),
+    )
     axes[1].legend()
     axes[1].grid(alpha=0.25)
     figure.tight_layout()
@@ -1513,6 +1603,7 @@ def main() -> None:
         )
         train_split_key = 'scaffold_train'
         validation_split_key = 'scaffold_validation'
+        posthoc_validation_split_key = 'scaffold_posthoc_validation'
         test_split_keys = {'Scaffold-disjoint': 'scaffold_test'}
         evaluation_protocol_summary = {
             'name': 'scaffold_disjoint',
@@ -1525,6 +1616,7 @@ def main() -> None:
         )
         train_split_key = 'transductive_train'
         validation_split_key = 'validation'
+        posthoc_validation_split_key = 'posthoc_validation'
         test_split_keys = {
             'Transductive': 'transductive_test',
             'S1': 's1_test',
@@ -1538,6 +1630,17 @@ def main() -> None:
                 'separately; it requires a distinct training partition.'
             ),
         }
+    model_selection_validation, posthoc_validation, validation_role_partition = (
+        partition_validation_for_model_selection(
+            splits[validation_split_key],
+            seed=SPLIT_SEED,
+        )
+    )
+    # Retain the conventional ``validation`` key for compatibility with the
+    # experiment suite. It now means model-selection validation only.
+    splits[validation_split_key] = model_selection_validation
+    splits[posthoc_validation_split_key] = posthoc_validation
+    evaluation_protocol_summary['validation_role_partition'] = validation_role_partition
     split_manifest = save_split_manifests(splits, RUN_ARTIFACTS_DIR)
 
     graph_cache = GraphCache(
@@ -1549,13 +1652,24 @@ def main() -> None:
     validation_loader = build_loader(
         splits[validation_split_key], toxicity_lookup, shuffle=False, graph_cache=graph_cache
     )
+    posthoc_validation_loader = build_loader(
+        splits[posthoc_validation_split_key],
+        toxicity_lookup,
+        shuffle=False,
+        graph_cache=graph_cache,
+    )
     test_loaders = {
         name: build_loader(
             splits[split_key], toxicity_lookup, shuffle=False, graph_cache=graph_cache
         )
         for name, split_key in test_split_keys.items()
     }
-    all_loaders = {'train': train_loader, 'validation': validation_loader, **test_loaders}
+    all_loaders = {
+        'train': train_loader,
+        'model_selection_validation': validation_loader,
+        'posthoc_validation': posthoc_validation_loader,
+        **test_loaders,
+    }
     unexpected_skips = {
         name: int(loader.dataset.skipped_count)
         for name, loader in all_loaders.items()
@@ -1568,7 +1682,18 @@ def main() -> None:
         )
     validation_labels = np.asarray([record['label'] for record in validation_loader.dataset.metadata])
     if len(validation_labels) == 0 or len(np.unique(validation_labels)) < 2:
-        raise ValueError('Validation split is unusable after SMILES validation; adjust the data split.')
+        raise ValueError(
+            'Model-selection validation is unusable after SMILES validation; '
+            'adjust the data split.'
+        )
+    posthoc_validation_labels = np.asarray([
+        record['label'] for record in posthoc_validation_loader.dataset.metadata
+    ])
+    if len(posthoc_validation_labels) == 0 or len(np.unique(posthoc_validation_labels)) < 2:
+        raise ValueError(
+            'Reserved post-hoc validation is unusable after SMILES validation; '
+            'adjust the data split.'
+        )
 
     model = PxDDIModel(
         in_channels=INPUT_FEATURE_DIM,
@@ -1592,6 +1717,8 @@ def main() -> None:
         'auroc': [],
         'average_precision': [],
         'f1': [],
+        'mcc': [],
+        'balanced_accuracy': [],
         'threshold': [],
         'learning_rate': [],
     }
@@ -1614,11 +1741,16 @@ def main() -> None:
         history['auroc'].append(validation_metrics['auroc'])
         history['average_precision'].append(validation_metrics['average_precision'])
         history['f1'].append(validation_metrics['f1'])
+        history['mcc'].append(validation_metrics['mcc'])
+        history['balanced_accuracy'].append(validation_metrics['balanced_accuracy'])
         history['threshold'].append(threshold)
         history['learning_rate'].append(float(optimizer.param_groups[0]['lr']))
         print(
             f'Epoch {epoch}/{EPOCHS}: loss={loss:.4f}; '
-            f"validation AUROC={validation_metrics['auroc']:.4f}; "
+            f"selection AUROC={validation_metrics['auroc']:.4f}; "
+            f"PR-AUC={validation_metrics['average_precision']:.4f}; "
+            f"MCC={validation_metrics['mcc']:.4f}; "
+            f"balanced accuracy={validation_metrics['balanced_accuracy']:.4f}; "
             f"F1={validation_metrics['f1']:.4f}; "
             f'LR={optimizer.param_groups[0]["lr"]:.6f}'
         )
@@ -1651,10 +1783,14 @@ def main() -> None:
                     ),
                     'use_toxicity_pair_features': USE_TOXICITY_PAIR_FEATURES,
                     'toxicity_loss_weight': TOXICITY_LOSS_WEIGHT,
+                    'toxicity_head_output': 'logits_v1',
                     'use_chemberta': USE_CHEMBERTA,
                     'auroc': float(best_auroc),
                     'model_selection_metric': 'AUROC',
-                    'model_selection_split': 'internal validation used for early stopping',
+                    'model_selection_split': (
+                        f'{validation_split_key}: disjoint model-selection validation '
+                        'used for early stopping'
+                    ),
                     'epoch': epoch,
                     'data_cap': DATA_CAP,
                     'seed': MODEL_SEED,
@@ -1692,7 +1828,9 @@ def main() -> None:
 
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
-    validation_true, validation_raw_predictions = collect_predictions(model, validation_loader)
+    validation_true, validation_raw_predictions = collect_predictions(
+        model, posthoc_validation_loader
+    )
     posthoc_partition = partition_validation_for_posthoc(
         validation_true, seed=SPLIT_SEED
     )
@@ -1703,7 +1841,7 @@ def main() -> None:
         validation_true[calibration_indices],
         validation_raw_predictions[calibration_indices],
         fitted_on=(
-            'validation_calibration_partition'
+            'posthoc_validation_calibration_partition'
             if posthoc_partition['independent_roles']
             else 'reused_validation_insufficient_per_class_count'
         ),
@@ -1716,7 +1854,7 @@ def main() -> None:
         validation_calibrated_predictions[conformal_indices],
         alpha=CONFORMAL_ALPHA,
         fitted_on=(
-            'validation_conformal_partition'
+            'posthoc_validation_conformal_partition'
             if posthoc_partition['independent_roles']
             else 'reused_validation_insufficient_per_class_count'
         ),
@@ -1725,7 +1863,7 @@ def main() -> None:
         conformal, RUN_ARTIFACTS_DIR / 'uncertainty'
     )
     posthoc_partition_artifact = save_posthoc_validation_partition_artifact(
-        validation_loader,
+        posthoc_validation_loader,
         validation_true,
         validation_raw_predictions,
         validation_calibrated_predictions,
@@ -1746,16 +1884,18 @@ def main() -> None:
     )
     checkpoint['threshold'] = frozen_threshold
     checkpoint['calibration'] = calibration
+    checkpoint['toxicity_head_output'] = 'logits_v1'
     checkpoint['conformal'] = conformal
     checkpoint['applicability_domain'] = applicability_domain.export_checkpoint_state()
     checkpoint['posthoc_validation_partition'] = {
         key: value for key, value in posthoc_partition_artifact.items()
         if key not in {'path', 'sha256'}
     }
+    checkpoint['validation_role_partition'] = validation_role_partition
     checkpoint_hash = safe_checkpoint_save(checkpoint, CHECKPOINT_PATH)
     validation_prediction_path = save_prediction_artifact(
         'Validation',
-        validation_loader,
+        posthoc_validation_loader,
         validation_true,
         validation_raw_predictions,
         validation_calibrated_predictions,
@@ -1768,9 +1908,11 @@ def main() -> None:
         'sha256': get_file_hash(validation_prediction_path),
         'rows': int(len(validation_true)),
         'purpose': (
-            'Raw member scores for a fixed-split ensemble are combined before '
-            'the ensemble calibrator, threshold, and conformal rule are fitted.'
+            'Raw member scores from validation reserved before training. They were '
+            'not used for early stopping; a fixed-split ensemble combines them '
+            'before its own calibrator, threshold, and conformal rule are fitted.'
         ),
+        'split_role': 'posthoc_validation_reserved_before_training',
     }
 
     plot_training_curves(history, figure_dir)
@@ -1900,6 +2042,7 @@ def main() -> None:
             },
             'conformal_validation_artifact': conformal_artifact,
             'posthoc_validation_partition': posthoc_partition_artifact,
+            'validation_role_partition': validation_role_partition,
             'applicability_domain': applicability_domain_summary,
         },
         'model_summary': model_summary(model),
@@ -1918,6 +2061,9 @@ def main() -> None:
             'stopped_early': stopped_early,
             'completed_epochs': len(history['epoch']),
             'best_epoch': checkpoint['epoch'],
+            'model_selection_split': validation_split_key,
+            'posthoc_validation_split': posthoc_validation_split_key,
+            'posthoc_reserved_before_training': True,
         },
         'toxicity_bridge': toxicity_summary,
         'input_quality': input_quality_summary,

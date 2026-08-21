@@ -131,6 +131,14 @@ def _prediction_path(manifest: dict[str, Any], split_name: str) -> Path:
         path_value_key = 'prediction_path'
     if not isinstance(detail, dict) or not detail.get(path_value_key):
         raise ValueError(f'Run manifest lacks a {split_name} prediction artifact.')
+    if split_name == 'Validation' and detail.get('split_role') != (
+        'posthoc_validation_reserved_before_training'
+    ):
+        raise ValueError(
+            'Ensemble members must provide validation predictions reserved before '
+            'training; older runs reused early-stopping validation and are not valid '
+            'ensemble members.'
+        )
     path = Path(detail[path_value_key])
     if not path.is_file():
         raise FileNotFoundError(f'Prediction artifact is missing: {path}')
