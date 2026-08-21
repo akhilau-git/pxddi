@@ -45,6 +45,8 @@ from torch_geometric.loader import DataLoader
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_SRC = PROJECT_ROOT / 'src'
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 if str(REPOSITORY_SRC) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_SRC))
 

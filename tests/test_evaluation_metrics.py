@@ -1,5 +1,10 @@
 """Tests for Phase 7 DDI metric and error-analysis utilities."""
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import json
 
 import numpy as np
@@ -12,6 +17,23 @@ from src.evaluation.ddi_metrics import (
     selective_prediction_summary,
     structural_similarity_slices,
 )
+
+
+def test_evaluation_module_supports_colab_direct_script_import_layout(tmp_path):
+    """The training script exposes ``src`` as top-level modules in Colab."""
+    project_root = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment['PYTHONPATH'] = str(project_root / 'src')
+    completed = subprocess.run(
+        [sys.executable, '-c', 'import evaluation.ddi_metrics'],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_binary_metrics_include_complementary_decision_and_calibration_fields():

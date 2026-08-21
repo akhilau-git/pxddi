@@ -28,7 +28,15 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from src.models.calibration import expected_calibration_error
+# The main training script is deliberately executable as
+# ``python src/training/train_full_pipeline_v2.py`` in Colab.  In that mode it
+# places ``src/`` on ``sys.path`` and loads this module as ``evaluation``.
+# Tests and package-style callers instead load it as ``src.evaluation``.  Keep
+# the calibration import compatible with both supported entry points.
+try:
+    from models.calibration import expected_calibration_error
+except ModuleNotFoundError:  # Package-style import used by tests/tools.
+    from src.models.calibration import expected_calibration_error
 
 
 DEFAULT_BOOTSTRAP_METRICS = (

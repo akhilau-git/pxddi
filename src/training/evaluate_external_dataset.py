@@ -11,12 +11,18 @@ import json
 import os
 from pathlib import Path
 from datetime import datetime, timezone
+import sys
 
 import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_prep.build_dataloader import parse_binary_label
 from src.data_prep.prepare_twosides import FEATURE_SCHEMA_LEGACY, smiles_to_graph
