@@ -68,6 +68,7 @@ ECFP_RADIUS = _positive_int_from_environment('PXDDI_ECFP_RADIUS', 2)
 ECFP_NUM_BITS = _positive_int_from_environment('PXDDI_ECFP_NUM_BITS', 1024)
 ECFP_EPOCHS = _positive_int_from_environment('PXDDI_ECFP_EPOCHS', 30)
 ECFP_BATCH_SIZE = _positive_int_from_environment('PXDDI_ECFP_BATCH_SIZE', 1024)
+NEGATIVE_SAMPLING_STRATEGY = os.environ.get('PXDDI_NEGATIVE_SAMPLING_STRATEGY', 'uniform')
 MODEL_SELECTION_VALIDATION_FRACTION = float(
     os.environ.get('PXDDI_MODEL_SELECTION_VALIDATION_FRACTION', '0.5')
 )
@@ -299,7 +300,7 @@ def baseline_manifest() -> dict[str, Any]:
             ),
             'use_toxicity_pair_features': False,
             'toxicity_loss_weight': 0.0,
-            'negative_label_meaning': 'unreported_twosides_sampled',
+            'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
             'model_role': 'non-deployment classical baseline',
         },
     }
@@ -319,13 +320,14 @@ def main() -> None:
     write_json(RUN_ARTIFACTS_DIR / 'run_manifest_initial.json', manifest)
     positives, input_quality_summary = _prepare_positive_edges(audit_dir)
     full_dataset = build_binary_pair_dataset(
-        positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SEED
+        positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SEED,
+        negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY
     )
     dataset_summary = {
         'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
         'sampled_unreported_negative_pairs': int((full_dataset['label'] == 0.0).sum()),
         'total_pair_rows_before_split': int(len(full_dataset)),
-        'negative_label_meaning': 'unreported_twosides_sampled',
+        'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
     }
     write_json(audit_dir / 'dataset_summary.json', dataset_summary)
     splits = create_splits(full_dataset, drug_a_col='source', drug_b_col='target', seed=SEED)

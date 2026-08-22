@@ -182,6 +182,7 @@ if EARLY_STOPPING_MIN_EPOCHS > EPOCHS:
 MODEL_SELECTION_VALIDATION_FRACTION = _open_unit_interval_from_environment(
     'PXDDI_MODEL_SELECTION_VALIDATION_FRACTION', 0.5
 )
+NEGATIVE_SAMPLING_STRATEGY = os.environ.get('PXDDI_NEGATIVE_SAMPLING_STRATEGY', 'uniform')
 USE_CHEMBERTA = False
 MODEL_ARCHITECTURE = os.environ.get(
     'PXDDI_MODEL_ARCHITECTURE', MODEL_ARCHITECTURE_EDGE_AWARE
@@ -1593,13 +1594,14 @@ def main() -> None:
         audit_dir, sampling_seed=SPLIT_SEED
     )
     full_dataset = build_binary_pair_dataset(
-        positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SPLIT_SEED
+        positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SPLIT_SEED,
+        negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY
     )
     dataset_summary = {
         'effective_positive_pairs': (full_dataset['label'] == 1.0).sum(),
         'sampled_unreported_negative_pairs': (full_dataset['label'] == 0.0).sum(),
         'total_pair_rows_before_split': len(full_dataset),
-        'negative_label_meaning': 'unreported_twosides_sampled',
+        'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
     }
     write_json(audit_dir / 'dataset_summary.json', dataset_summary)
     if EVALUATION_PROTOCOL == 'scaffold_disjoint':

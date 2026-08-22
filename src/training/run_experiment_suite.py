@@ -529,6 +529,7 @@ def main() -> None:
                 'PXDDI_ARTIFACTS_BASE': str(artifact_base),
                 'PXDDI_CHECKPOINT_PATH': str(checkpoint_path),
                 'PXDDI_PUBLISH_LATEST_RESULTS': 'false',
+                'PXDDI_NEGATIVE_SAMPLING_STRATEGY': experiment.get('negative_sampling_strategy', 'degree_matched'),
             })
             if experiment['runner'] == 'gnn':
                 environment.update({

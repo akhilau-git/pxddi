@@ -97,6 +97,7 @@ def build_binary_pair_dataset(
     neg_ratio: float = 1.0,
     seed: int = 42,
     max_attempt_multiplier: int = 50,
+    negative_sampling_strategy: str = 'uniform',
 ) -> pd.DataFrame:
     """Create an auditable binary dataset from reported and unreported pairs.
 
@@ -108,6 +109,8 @@ def build_binary_pair_dataset(
         raise ValueError('neg_ratio must be non-negative.')
     if max_attempt_multiplier <= 0:
         raise ValueError('max_attempt_multiplier must be positive.')
+    if negative_sampling_strategy not in ('uniform', 'degree_matched'):
+        raise ValueError(f'Unsupported negative sampling strategy: {negative_sampling_strategy}')
 
     positives = positive_pairs[[source_col, target_col]].copy()
     positives['label'] = 1.0
@@ -129,11 +132,18 @@ def build_binary_pair_dataset(
         return positives.sample(frac=1, random_state=seed).reset_index(drop=True)
 
     rng = np.random.default_rng(seed)
+    
+    sampling_probs = None
+    if negative_sampling_strategy == 'degree_matched':
+        drug_counts = pd.concat([positives[source_col], positives[target_col]]).value_counts()
+        sampling_probs = drug_counts.loc[all_drugs].to_numpy(dtype=float)
+        sampling_probs /= sampling_probs.sum()
+
     negative_keys: set[tuple[str, str]] = set()
     max_attempts = max(target_negatives * max_attempt_multiplier, 1000)
     attempts = 0
     while len(negative_keys) < target_negatives and attempts < max_attempts:
-        source, target = rng.choice(all_drugs, size=2, replace=False)
+        source, target = rng.choice(all_drugs, size=2, replace=False, p=sampling_probs)
         candidate = canonical_pair(source, target)
         if candidate not in positive_keys:
             negative_keys.add(candidate)
