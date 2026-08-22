@@ -20,7 +20,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -156,6 +156,8 @@ def resolve_results_base(
     """Choose a writable output root independently of a shared data shortcut."""
     if configured_path is None:
         configured_path = os.environ.get('PXDDI_RESULTS_BASE')
+        if not configured_path and 'COLAB_RELEASE_TAG' in os.environ:
+            configured_path = '/content/drive/MyDrive/pxddi-results'
     return Path(configured_path) if configured_path else data_base
 
 
@@ -485,7 +487,7 @@ def save_split_manifests(
         manifest[name] = {
             'path': str(split_path),
             'sha256': get_file_hash(split_path),
-            'rows': int(len(frame)),
+            'rows': len(frame),
             'label_counts': {str(label): int(count) for label, count in label_counts.items()},
         }
     write_json(split_dir / 'split_manifest.json', manifest)
@@ -628,7 +630,7 @@ def save_counterion_curation_candidates(exclusions: pd.DataFrame, audit_dir: Pat
                 'approved_parent_smiles': '',
                 'review_notes': '',
             })
-            candidate['occurrence_count'] += int(count)
+            candidate['occurrence_count'] += count
             candidate['observed_as'].add(side)
     candidates = []
     for candidate in occurrences.values():
@@ -648,13 +650,13 @@ def save_counterion_curation_candidates(exclusions: pd.DataFrame, audit_dir: Pat
     candidates_path = audit_dir / 'counterion_curation_candidates.csv'
     pd.DataFrame(candidates, columns=candidate_columns).to_csv(candidates_path, index=False)
     return {
-        'counterion_only_pair_exclusions': int(
+        'counterion_only_pair_exclusions': (
             (
                 exclusions[counterion_columns]
                 == 'counterion_or_inorganic_only_structure'
             ).any(axis=1).sum()
         ) if not exclusions.empty else 0,
-        'unique_counterion_or_inorganic_structures': int(len(candidates)),
+        'unique_counterion_or_inorganic_structures': len(candidates),
         'curation_candidates_path': str(candidates_path),
         'curation_candidates_sha256': get_file_hash(candidates_path),
         'automatic_parent_mapping_applied': False,
@@ -748,16 +750,18 @@ class PxDDIDataset(Dataset):
             if graph_a is None or graph_b is None:
                 self.skipped_count += 1
                 continue
-            toxicity_a = toxicity_lookup.get(canonicalize(source))
-            toxicity_b = toxicity_lookup.get(canonicalize(target))
+            c_src = canonicalize(source)
+            toxicity_a = toxicity_lookup.get(c_src) if c_src is not None else None
+            c_tgt = canonicalize(target)
+            toxicity_b = toxicity_lookup.get(c_tgt) if c_tgt is not None else None
             toxicity_a_known = float(toxicity_a is not None)
             toxicity_b_known = float(toxicity_b is not None)
             self.records.append(
                 (
                     graph_a,
                     graph_b,
-                    0.0 if toxicity_a is None else float(toxicity_a),
-                    0.0 if toxicity_b is None else float(toxicity_b),
+                    0.0 if toxicity_a is None else toxicity_a,
+                    0.0 if toxicity_b is None else toxicity_b,
                     toxicity_a_known,
                     toxicity_b_known,
                     label,
@@ -776,8 +780,8 @@ class PxDDIDataset(Dataset):
     def len(self) -> int:
         return len(self.records)
 
-    def get(self, index: int):
-        return self.records[index]
+    def get(self, idx: int):
+        return self.records[idx]
 
 
 def collate_fn(batch):
@@ -830,13 +834,14 @@ def multi_task_loss(
     toxicity_b_known,
     toxicity_loss_weight: float = TOXICITY_LOSS_WEIGHT,
 ):
-    binary_cross_entropy = torch.nn.BCEWithLogitsLoss(reduction='none')
-    ddi_loss = binary_cross_entropy(risk_prediction, risk_label).mean()
+    bce_with_logits = torch.nn.BCEWithLogitsLoss(reduction='none')
+    bce = torch.nn.BCELoss(reduction='none')
+    ddi_loss = bce_with_logits(risk_prediction, risk_label).mean()
     toxicity_a_loss = (
-        binary_cross_entropy(toxicity_a_prediction, toxicity_a_label) * toxicity_a_known
+        bce(toxicity_a_prediction, toxicity_a_label) * toxicity_a_known
     ).sum() / (toxicity_a_known.sum() + 1e-8)
     toxicity_b_loss = (
-        binary_cross_entropy(toxicity_b_prediction, toxicity_b_label) * toxicity_b_known
+        bce(toxicity_b_prediction, toxicity_b_label) * toxicity_b_known
     ).sum() / (toxicity_b_known.sum() + 1e-8)
     return ddi_loss + toxicity_loss_weight * (toxicity_a_loss + toxicity_b_loss)
 
@@ -918,17 +923,17 @@ def measure_inference_efficiency(model, loader) -> dict[str, Any]:
     if DEVICE.type == 'cuda':
         torch.cuda.synchronize(DEVICE)
     elapsed = time.perf_counter() - start
-    sample_count = int(len(loader.dataset))
+    sample_count = len(loader.dataset)
     return {
         'status': 'measured',
         'measurement_scope': 'full_loader_inference_including_batching_and_device_transfer',
         'sample_count': sample_count,
-        'batch_count': int(batch_count),
-        'wall_clock_seconds': float(elapsed),
-        'pairs_per_second': float(sample_count / elapsed) if elapsed else None,
-        'mean_batch_latency_milliseconds': float(1000 * elapsed / batch_count)
+        'batch_count': batch_count,
+        'wall_clock_seconds': elapsed,
+        'pairs_per_second': sample_count / elapsed if elapsed else None,
+        'mean_batch_latency_milliseconds': 1000 * elapsed / batch_count
         if batch_count else None,
-        'peak_cuda_memory_bytes': int(torch.cuda.max_memory_allocated(DEVICE))
+        'peak_cuda_memory_bytes': torch.cuda.max_memory_allocated(DEVICE)
         if DEVICE.type == 'cuda' else None,
         'interpretation_warning': (
             'Inference efficiency depends on the recorded hardware, batch size, '
@@ -974,14 +979,14 @@ def partition_validation_for_model_selection(
     source_counts: dict[str, int] = {}
     for label in (0, 1):
         positions = np.flatnonzero(targets == label)
-        source_counts[str(label)] = int(len(positions))
+        source_counts[str(label)] = len(positions)
         if len(positions) < 4:
             raise ValueError(
                 'Validation role partitioning requires at least four examples '
                 f'of each class; class {label} has {len(positions)}.'
             )
         shuffled = generator.permutation(positions)
-        requested_selection = int(round(len(shuffled) * selection_fraction))
+        requested_selection = round(len(shuffled) * selection_fraction)
         # Preserve one row per class for each of the three post-hoc roles.
         selection_count = min(max(1, requested_selection), len(shuffled) - 3)
         selection_positions.extend(shuffled[:selection_count].tolist())
@@ -994,18 +999,18 @@ def partition_validation_for_model_selection(
     summary = {
         'status': 'stratified_disjoint_model_selection_and_posthoc',
         'independent_from_early_stopping': True,
-        'seed': int(seed),
-        'requested_model_selection_fraction': float(selection_fraction),
-        'source_rows': int(len(dataframe)),
+        'seed': seed,
+        'requested_model_selection_fraction': selection_fraction,
+        'source_rows': len(dataframe),
         'source_label_counts': source_counts,
-        'model_selection_rows': int(len(model_selection)),
+        'model_selection_rows': len(model_selection),
         'model_selection_label_counts': {
-            str(label): int((model_selection[label_column] == label).sum())
+            str(label): (model_selection[label_column] == label).sum()
             for label in (0, 1)
         },
-        'posthoc_rows': int(len(posthoc)),
+        'posthoc_rows': len(posthoc),
         'posthoc_label_counts': {
-            str(label): int((posthoc[label_column] == label).sum())
+            str(label): (posthoc[label_column] == label).sum()
             for label in (0, 1)
         },
         'posthoc_roles': ('calibration', 'threshold', 'conformal'),
@@ -1066,7 +1071,7 @@ def partition_validation_for_posthoc(
     return {
         'status': 'stratified_disjoint_three_way',
         'independent_roles': True,
-        'seed': int(seed),
+        'seed': seed,
         'indices': indices,
     }
 
@@ -1081,7 +1086,7 @@ def posthoc_validation_partition_summary(
     for role, indices in partition['indices'].items():
         role_labels = targets[indices]
         roles[role] = {
-            'rows': int(len(indices)),
+            'rows': len(indices),
             'negative_count': int((role_labels == 0).sum()),
             'positive_count': int((role_labels == 1).sum()),
         }
@@ -1102,7 +1107,7 @@ def save_posthoc_validation_partition_artifact(
     artifact_dir: Path,
 ) -> dict[str, Any]:
     """Save the exact validation roles used by post-hoc analysis."""
-    if len(loader.dataset.metadata) != len(labels):
+    if len(cast(PxDDIDataset, loader.dataset).metadata) != len(labels):
         raise RuntimeError('Validation provenance does not match post-hoc labels.')
     assignments = np.full(len(labels), 'not_assigned', dtype=object)
     for role, indices in partition['indices'].items():
@@ -1110,7 +1115,7 @@ def save_posthoc_validation_partition_artifact(
             assignments[indices] = assignments[indices] + '|' + role
         else:
             assignments[indices] = role
-    table = pd.DataFrame(loader.dataset.metadata)
+    table = pd.DataFrame(cast(PxDDIDataset, loader.dataset).metadata)
     table['label'] = labels
     table['raw_prediction_score'] = raw_predictions
     table['calibrated_prediction_score'] = calibrated_predictions
@@ -1160,7 +1165,7 @@ def save_prediction_artifact(
     calibration: dict[str, Any],
     additional_columns: dict[str, Any] | None = None,
 ) -> Path:
-    metadata = loader.dataset.metadata
+    metadata = cast(PxDDIDataset, loader.dataset).metadata
     if len(metadata) != len(labels):
         raise RuntimeError('Prediction provenance does not match the evaluated dataset.')
     table = pd.DataFrame(metadata)
@@ -1241,9 +1246,9 @@ def generate_candidate_explanation_artifact(
         examples = []
         for index in selected_indices:
             graph_a, graph_b, *_ = loader.dataset.records[index]
-            metadata = loader.dataset.metadata[index]
+            metadata = cast(PxDDIDataset, loader.dataset).metadata[index]
             example: dict[str, Any] = {
-                'dataset_index': int(index),
+                'dataset_index': index,
                 'source': metadata['source'],
                 'target': metadata['target'],
                 'label': int(labels[index]),
@@ -1291,7 +1296,7 @@ def generate_candidate_explanation_artifact(
                 }
             examples.append(example)
         artifact['splits'][split_name] = {
-            'evaluated_rows': int(len(labels)),
+            'evaluated_rows': len(labels),
             'selected_dataset_indices': selected_indices,
             'examples': examples,
         }
@@ -1328,7 +1333,7 @@ def save_conformal_calibration_artifact(
         'status': 'saved',
         'path': str(path),
         'sha256': get_file_hash(path),
-        'rows': int(len(conformal['validation_nonconformity_scores'])),
+        'rows': len(conformal['validation_nonconformity_scores']),
     }
 
 
@@ -1548,10 +1553,10 @@ def _prepare_positive_edges(
         n=min(DATA_CAP, len(clean_positives)), random_state=sampling_seed
     ).reset_index(drop=True)
     summary = {
-        'raw_unique_positive_pairs': int(len(positives)),
-        'excluded_positive_pairs': int(len(exclusions)),
-        'clean_positive_pairs': int(len(clean_positives)),
-        'sampled_positive_pairs': int(len(sampled)),
+        'raw_unique_positive_pairs': len(positives),
+        'excluded_positive_pairs': len(exclusions),
+        'clean_positive_pairs': len(clean_positives),
+        'sampled_positive_pairs': len(sampled),
         'data_cap': DATA_CAP,
         'exclusion_audit_path': str(exclusions_path),
         'exclusion_audit_sha256': get_file_hash(exclusions_path),
@@ -1591,9 +1596,9 @@ def main() -> None:
         positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SPLIT_SEED
     )
     dataset_summary = {
-        'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
-        'sampled_unreported_negative_pairs': int((full_dataset['label'] == 0.0).sum()),
-        'total_pair_rows_before_split': int(len(full_dataset)),
+        'effective_positive_pairs': (full_dataset['label'] == 1.0).sum(),
+        'sampled_unreported_negative_pairs': (full_dataset['label'] == 0.0).sum(),
+        'total_pair_rows_before_split': len(full_dataset),
         'negative_label_meaning': 'unreported_twosides_sampled',
     }
     write_json(audit_dir / 'dataset_summary.json', dataset_summary)
@@ -1605,7 +1610,7 @@ def main() -> None:
         validation_split_key = 'scaffold_validation'
         posthoc_validation_split_key = 'scaffold_posthoc_validation'
         test_split_keys = {'Scaffold-disjoint': 'scaffold_test'}
-        evaluation_protocol_summary = {
+        evaluation_protocol_summary: dict[str, Any] = {
             'name': 'scaffold_disjoint',
             **scaffold_audit,
         }
@@ -1621,8 +1626,10 @@ def main() -> None:
             'Transductive': 'transductive_test',
             'S1': 's1_test',
             'S2': 's2_test',
+            'S1-dev': 's1_dev',
+            'S2-dev': 's2_dev',
         }
-        evaluation_protocol_summary = {
+        evaluation_protocol_summary: dict[str, Any] = {
             'name': 'standard_transductive_s1_s2',
             'interpretation_warning': (
                 'Standard results include a transductive split and drug-identity '
@@ -1671,23 +1678,23 @@ def main() -> None:
         **test_loaders,
     }
     unexpected_skips = {
-        name: int(loader.dataset.skipped_count)
+        name: cast(PxDDIDataset, loader.dataset).skipped_count
         for name, loader in all_loaders.items()
-        if loader.dataset.skipped_count
+        if cast(PxDDIDataset, loader.dataset).skipped_count
     }
     if unexpected_skips:
         raise RuntimeError(
             'Graph validation changed between the pre-split audit and dataset construction: '
             f'{unexpected_skips}. Review the input audit before training.'
         )
-    validation_labels = np.asarray([record['label'] for record in validation_loader.dataset.metadata])
+    validation_labels = np.asarray([record['label'] for record in cast(PxDDIDataset, validation_loader.dataset).metadata])
     if len(validation_labels) == 0 or len(np.unique(validation_labels)) < 2:
         raise ValueError(
             'Model-selection validation is unusable after SMILES validation; '
             'adjust the data split.'
         )
     posthoc_validation_labels = np.asarray([
-        record['label'] for record in posthoc_validation_loader.dataset.metadata
+        record['label'] for record in cast(PxDDIDataset, posthoc_validation_loader.dataset).metadata
     ])
     if len(posthoc_validation_labels) == 0 or len(np.unique(posthoc_validation_labels)) < 2:
         raise ValueError(
@@ -1815,8 +1822,8 @@ def main() -> None:
         torch.cuda.synchronize(DEVICE)
     training_efficiency = {
         'measurement_scope': 'optimization_and_per_epoch_validation',
-        'wall_clock_seconds': float(time.perf_counter() - training_started_at),
-        'peak_cuda_memory_bytes': int(torch.cuda.max_memory_allocated(DEVICE))
+        'wall_clock_seconds': time.perf_counter() - training_started_at,
+        'peak_cuda_memory_bytes': torch.cuda.max_memory_allocated(DEVICE)
         if DEVICE.type == 'cuda' else None,
         'recorded_batch_size': BATCH_SIZE,
         'parameter_count': int(sum(parameter.numel() for parameter in model.parameters())),
@@ -1872,7 +1879,7 @@ def main() -> None:
     )
     training_smiles = {
         metadata[column]
-        for metadata in train_loader.dataset.metadata
+        for metadata in cast(PxDDIDataset, train_loader.dataset).metadata
         for column in ('source', 'target')
     }
     applicability_domain = MorganApplicabilityDomain(
@@ -1906,7 +1913,7 @@ def main() -> None:
     validation_prediction_summary = {
         'path': str(validation_prediction_path),
         'sha256': get_file_hash(validation_prediction_path),
-        'rows': int(len(validation_true)),
+        'rows': len(validation_true),
         'purpose': (
             'Raw member scores from validation reserved before training. They were '
             'not used for early stopping; a fixed-split ensemble combines them '
@@ -1930,8 +1937,8 @@ def main() -> None:
         )
         conformal_sets = conformal_prediction_sets(calibrated_predictions, conformal)
         applicability_scores = applicability_domain.score_pairs(
-            [metadata['source'] for metadata in loader.dataset.metadata],
-            [metadata['target'] for metadata in loader.dataset.metadata],
+            [metadata['source'] for metadata in cast(PxDDIDataset, loader.dataset).metadata],
+            [metadata['target'] for metadata in cast(PxDDIDataset, loader.dataset).metadata],
         )
         additional_prediction_columns = {
             'predictive_entropy_nats': predictive_entropy(calibrated_predictions),
@@ -1955,7 +1962,7 @@ def main() -> None:
         )
         metrics['prediction_path'] = str(prediction_path)
         metrics['prediction_sha256'] = get_file_hash(prediction_path)
-        metrics['skipped_invalid_smiles'] = int(loader.dataset.skipped_count)
+        metrics['skipped_invalid_smiles'] = cast(PxDDIDataset, loader.dataset).skipped_count
         metrics['test_set_bootstrap_95ci'] = bootstrap_confidence_intervals(
             labels,
             calibrated_predictions,
@@ -1990,7 +1997,7 @@ def main() -> None:
             raw_predictions=raw_predictions,
         )
         metrics['error_analysis'] = save_confident_error_analysis(
-            loader.dataset.metadata,
+            cast(PxDDIDataset, loader.dataset).metadata,
             labels,
             raw_predictions,
             calibrated_predictions,

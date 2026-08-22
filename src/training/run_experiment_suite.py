@@ -514,6 +514,13 @@ def main() -> None:
         for seed in seeds:
             run_root = study_dir / experiment['name'] / f'seed_{seed}'
             artifact_base = run_root / 'artifacts'
+            try:
+                run_dir = find_completed_run(artifact_base)
+                print(f"Skipping {experiment['name']} seed={seed}; already completed at {run_dir}")
+                rows.extend(collect_metric_rows(experiment['name'], seed, run_dir))
+                continue
+            except FileNotFoundError:
+                pass
             checkpoint_suffix = '.npz' if experiment['runner'] == 'ecfp_sgd_logistic' else '.pt'
             checkpoint_path = run_root / 'checkpoints' / f"{experiment['name']}_seed_{seed}{checkpoint_suffix}"
             environment = os.environ.copy()

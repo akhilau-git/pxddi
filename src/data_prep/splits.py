@@ -217,13 +217,26 @@ def create_splits(
     holdout_count = max(1, int(round(holdout_fraction * len(all_drugs))))
     holdout_count = min(holdout_count, len(all_drugs) - 2)
     rng = np.random.default_rng(seed)
-    holdout_drugs = set(rng.choice(all_drugs, size=holdout_count, replace=False))
+    holdout_drugs = rng.choice(all_drugs, size=holdout_count, replace=False)
+    dev_holdout_count = len(holdout_drugs) // 2
+    dev_holdouts = set(holdout_drugs[:dev_holdout_count])
+    test_holdouts = set(holdout_drugs[dev_holdout_count:])
+    all_holdouts = dev_holdouts | test_holdouts
 
-    drug_a_held_out = deduplicated[drug_a_col].isin(holdout_drugs)
-    drug_b_held_out = deduplicated[drug_b_col].isin(holdout_drugs)
-    s1 = deduplicated[drug_a_held_out & drug_b_held_out].copy()
-    s2 = deduplicated[drug_a_held_out ^ drug_b_held_out].copy()
-    seen = deduplicated[~drug_a_held_out & ~drug_b_held_out].copy()
+    drug_a_seen = ~deduplicated[drug_a_col].isin(all_holdouts)
+    drug_b_seen = ~deduplicated[drug_b_col].isin(all_holdouts)
+    dev_drug_a = deduplicated[drug_a_col].isin(dev_holdouts)
+    dev_drug_b = deduplicated[drug_b_col].isin(dev_holdouts)
+    test_drug_a = deduplicated[drug_a_col].isin(test_holdouts)
+    test_drug_b = deduplicated[drug_b_col].isin(test_holdouts)
+
+    s1_dev = deduplicated[dev_drug_a & dev_drug_b].copy()
+    s2_dev = deduplicated[(dev_drug_a & drug_b_seen) | (drug_a_seen & dev_drug_b)].copy()
+    
+    s1_test = deduplicated[test_drug_a & test_drug_b].copy()
+    s2_test = deduplicated[(test_drug_a & drug_b_seen) | (drug_a_seen & test_drug_b)].copy()
+
+    seen = deduplicated[drug_a_seen & drug_b_seen].copy()
 
     train_and_validation, transductive_test = _split_dataframe(
         seen, label_col, test_size=0.20, seed=seed
@@ -239,6 +252,8 @@ def create_splits(
         'transductive_train': transductive_train.reset_index(drop=True),
         'validation': validation.reset_index(drop=True),
         'transductive_test': transductive_test.reset_index(drop=True),
-        's1_test': s1.reset_index(drop=True),
-        's2_test': s2.reset_index(drop=True),
+        's1_dev': s1_dev.reset_index(drop=True),
+        's2_dev': s2_dev.reset_index(drop=True),
+        's1_test': s1_test.reset_index(drop=True),
+        's2_test': s2_test.reset_index(drop=True),
     }

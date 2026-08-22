@@ -516,7 +516,8 @@ def main() -> None:
     history_summary = save_training_history(history, RUN_ARTIFACTS_DIR)
     results: dict[str, dict[str, Any]] = {}
     for name, split_key in (
-        ('Transductive', 'transductive_test'), ('S1', 's1_test'), ('S2', 's2_test')
+        ('Transductive', 'transductive_test'), ('S1', 's1_test'), ('S2', 's2_test'),
+        ('S1-dev', 's1_dev'), ('S2-dev', 's2_dev')
     ):
         labels, raw_predictions = collect_predictions(
             splits[split_key], cache, best_coefficients, best_intercept
