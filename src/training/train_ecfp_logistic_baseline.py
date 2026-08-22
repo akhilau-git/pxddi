@@ -26,12 +26,15 @@ from sklearn.metrics import log_loss
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+REPOSITORY_SRC = PROJECT_ROOT / 'src'
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+if str(REPOSITORY_SRC) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_SRC))
 
-from src.data_prep.splits import build_binary_pair_dataset, create_splits
-from src.models.calibration import apply_calibrator, fit_platt_calibrator
-from src.training.train_full_pipeline_v2 import (
+from data_prep.splits import build_binary_pair_dataset, create_splits
+from models.calibration import apply_calibrator, fit_platt_calibrator
+from training.train_full_pipeline_v2 import (
     _prepare_positive_edges,
     calculate_metrics,
     get_file_hash,
@@ -120,7 +123,7 @@ class MorganFingerprintCache:
         self.misses = 0
 
     def get(self, smiles: str) -> np.ndarray:
-        normalized = str(smiles).strip()
+        normalized = smiles.strip()
         if normalized in self._vectors:
             self.hits += 1
             return self._vectors[normalized]
@@ -326,7 +329,7 @@ def main() -> None:
     dataset_summary = {
         'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
         'sampled_unreported_negative_pairs': int((full_dataset['label'] == 0.0).sum()),
-        'total_pair_rows_before_split': int(len(full_dataset)),
+        'total_pair_rows_before_split': len(full_dataset),
         'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
     }
     write_json(audit_dir / 'dataset_summary.json', dataset_summary)
@@ -506,7 +509,7 @@ def main() -> None:
     validation_prediction_summary = {
         'path': str(validation_prediction_path),
         'sha256': get_file_hash(validation_prediction_path),
-        'rows': int(len(validation_labels)),
+        'rows': len(validation_labels),
         'split_role': 'posthoc_validation_reserved_before_training',
         'purpose': (
             'Reserved validation member scores. This table was not used for '

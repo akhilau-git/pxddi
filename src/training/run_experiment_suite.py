@@ -198,7 +198,7 @@ def bootstrap_mean_confidence_interval(
     generator = np.random.default_rng(seed)
     sampled_means = generator.choice(array, size=(resamples, len(array)), replace=True).mean(axis=1)
     return {
-        'run_count': int(len(array)),
+        'run_count': len(array),
         'mean': float(array.mean()),
         'standard_deviation': float(array.std(ddof=1)),
         'ci_95_lower': float(np.percentile(sampled_means, 2.5)),
@@ -223,7 +223,7 @@ def paired_bootstrap_difference_confidence_interval(
         differences, size=(resamples, len(differences)), replace=True
     ).mean(axis=1)
     return {
-        'matched_seed_count': int(len(differences)),
+        'matched_seed_count': len(differences),
         'mean_difference_candidate_minus_reference': float(differences.mean()),
         'standard_deviation': float(differences.std(ddof=1)),
         'ci_95_lower': float(np.percentile(sampled_means, 2.5)),
@@ -247,7 +247,7 @@ def paired_wilcoxon_signed_rank_test(
         return {
             'status': 'not_run_fewer_than_five_matched_seeds',
             'test': 'two_sided_wilcoxon_signed_rank',
-            'matched_seed_count': int(len(reference_values)),
+            'matched_seed_count': len(reference_values),
             'p_value_raw': None,
         }
     differences = np.asarray(candidate_values, dtype=float) - np.asarray(reference_values, dtype=float)
@@ -255,7 +255,7 @@ def paired_wilcoxon_signed_rank_test(
         return {
             'status': 'all_matched_differences_zero',
             'test': 'two_sided_wilcoxon_signed_rank',
-            'matched_seed_count': int(len(differences)),
+            'matched_seed_count': len(differences),
             'statistic': 0.0,
             'p_value_raw': 1.0,
         }
@@ -265,14 +265,14 @@ def paired_wilcoxon_signed_rank_test(
         return {
             'status': 'not_run_invalid_matched_differences',
             'test': 'two_sided_wilcoxon_signed_rank',
-            'matched_seed_count': int(len(differences)),
+            'matched_seed_count': len(differences),
             'p_value_raw': None,
             'reason': str(error),
         }
     return {
         'status': 'evaluated',
         'test': 'two_sided_wilcoxon_signed_rank',
-        'matched_seed_count': int(len(differences)),
+        'matched_seed_count': len(differences),
         'statistic': float(result.statistic),
         'p_value_raw': float(result.pvalue),
         'interpretation_warning': (
@@ -297,7 +297,7 @@ def holm_adjust_p_values(comparison_rows: list[dict[str, Any]]) -> None:
     for index, row in enumerate(ordered):
         raw_p_value = float(row['statistical_test']['p_value_raw'])
         adjusted_so_far = max(adjusted_so_far, (total - index) * raw_p_value)
-        row['statistical_test']['p_value_holm_adjusted'] = float(min(1.0, adjusted_so_far))
+        row['statistical_test']['p_value_holm_adjusted'] = min(1.0, adjusted_so_far)
         row['statistical_test']['multiple_testing_correction'] = 'holm_family_wise_error_rate'
 
 
@@ -551,9 +551,11 @@ def main() -> None:
     table.to_csv(study_dir / 'experiment_results.csv', index=False)
     summary: dict[str, Any] = {}
     for experiment_name, experiment_table in table.groupby('experiment'):
-        summary[experiment_name] = {}
+        experiment_name_str = str(experiment_name)
+        summary[experiment_name_str] = {}
         for split_name, split_table in experiment_table.groupby('split'):
-            summary[experiment_name][split_name] = {
+            split_name_str = str(split_name)
+            summary[experiment_name_str][split_name_str] = {
                 metric: bootstrap_mean_confidence_interval(split_table[metric].dropna().tolist())
                 for metric in METRIC_NAMES
             }

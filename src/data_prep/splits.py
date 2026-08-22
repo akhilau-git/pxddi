@@ -9,13 +9,15 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 
+from typing import Any, cast
+
 def canonical_pair(drug_a: Hashable, drug_b: Hashable) -> tuple[str, str]:
     """Return a stable, order-independent identifier for a drug pair.
 
     PxDDI is order-independent, so ``A-B`` and ``B-A`` must never be treated
     as distinct observations during negative sampling or data splitting.
     """
-    if pd.isna(drug_a) or pd.isna(drug_b):
+    if pd.isna(cast(Any, drug_a)) or pd.isna(cast(Any, drug_b)):
         raise ValueError('Drug-pair values must not be missing.')
     left, right = str(drug_a), str(drug_b)
     if not left or not right:
@@ -127,7 +129,7 @@ def build_binary_pair_dataset(
         canonical_pair(source, target)
         for source, target in zip(positives[source_col], positives[target_col])
     }
-    target_negatives = int(round(len(positives) * neg_ratio))
+    target_negatives = round(len(positives) * neg_ratio)
     if target_negatives == 0:
         return positives.sample(frac=1, random_state=seed).reset_index(drop=True)
 
@@ -186,12 +188,15 @@ def _split_dataframe(
 
     labels = dataframe[label_col]
     can_stratify = labels.nunique(dropna=False) > 1 and labels.value_counts().min() >= 2
-    return train_test_split(
-        dataframe,
-        test_size=test_size,
-        random_state=seed,
-        shuffle=True,
-        stratify=labels if can_stratify else None,
+    return cast(
+        tuple[pd.DataFrame, pd.DataFrame],
+        train_test_split(
+            dataframe,
+            test_size=test_size,
+            random_state=seed,
+            shuffle=True,
+            stratify=labels if can_stratify else None,
+        )
     )
 
 
@@ -224,7 +229,7 @@ def create_splits(
     if len(all_drugs) < 3:
         raise ValueError('At least three distinct drugs are required for cold-start splits.')
 
-    holdout_count = max(1, int(round(holdout_fraction * len(all_drugs))))
+    holdout_count = max(1, round(holdout_fraction * len(all_drugs)))
     holdout_count = min(holdout_count, len(all_drugs) - 2)
     rng = np.random.default_rng(seed)
     holdout_drugs = rng.choice(all_drugs, size=holdout_count, replace=False)
