@@ -102,9 +102,17 @@ DEFAULT_CHECKPOINT_PATH = (
 CHECKPOINT_PATH = Path(os.environ.get('PXDDI_CHECKPOINT_PATH', DEFAULT_CHECKPOINT_PATH))
 
 
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f'Cannot JSON-encode {type(value).__name__}.')
+
+
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8')
+    path.write_text(json.dumps(payload, default=_json_default, indent=2, sort_keys=True), encoding='utf-8')
 
 
 class MorganFingerprintCache:
@@ -212,14 +220,6 @@ def collect_predictions(
     if not labels:
         return np.asarray([], dtype=int), np.asarray([], dtype=float)
     return np.concatenate(labels), np.concatenate(predictions)
-
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, np.generic):
-        return value.item()
-    raise TypeError(f'Cannot JSON-encode {type(value).__name__}.')
 
 
 def safe_save_baseline_checkpoint(
