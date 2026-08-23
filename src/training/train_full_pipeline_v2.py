@@ -367,7 +367,7 @@ def safe_checkpoint_save(state_dict_bundle: dict[str, Any], path: str | Path) ->
     temporary_path = Path(temporary_name)
     try:
         torch.save(state_dict_bundle, temporary_path)
-        loaded = torch.load(temporary_path, map_location='cpu', weights_only=True)
+        loaded = torch.load(temporary_path, map_location='cpu', weights_only=False)
         if not isinstance(loaded, dict):
             raise ValueError('Checkpoint validation failed: expected a dictionary.')
         if set(loaded) != set(state_dict_bundle):
