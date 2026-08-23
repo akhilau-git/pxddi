@@ -46,6 +46,34 @@ DEFAULT_BOOTSTRAP_METRICS = (
     'mcc',
     'balanced_accuracy',
     'brier_score_calibrated',
+    'ece_calibrated',
+)
+
+DEFAULT_RISK_COVERAGE_LEVELS = tuple(np.linspace(0.1, 1.0, 10))
+
+PAPER_METRIC_TABLE_COLUMNS = (
+    'split',
+    'status',
+    'negative_label_meaning',
+    'sample_count',
+    'positive_count',
+    'negative_count',
+    'positive_prevalence',
+    'threshold',
+    'auroc',
+    'average_precision',
+    'mcc',
+    'balanced_accuracy',
+    'f1',
+    'precision',
+    'recall',
+    'specificity',
+    'negative_predictive_value',
+    'accuracy_secondary_only',
+    'brier_score_calibrated',
+    'ece_calibrated',
+    'calibration_slope_diagnostic',
+    'calibration_intercept_diagnostic',
 )
 
 
@@ -288,6 +316,106 @@ def selective_prediction_summary(
         targets[retained], scores[retained], threshold
     )
     return summary
+
+
+def uncertainty_risk_coverage_curve(
+    labels,
+    predictions,
+    threshold: float,
+    uncertainties,
+    coverage_levels: Iterable[float] = DEFAULT_RISK_COVERAGE_LEVELS,
+) -> dict[str, Any]:
+    """Evaluate whether low-uncertainty examples have lower test-label error.
+
+    Samples are ordered from the least to the most uncertain. Each point uses
+    the requested fraction of least-uncertain samples and reports its observed
+    error against the experimental reported/unreported labels. This is a
+    post-hoc evaluation diagnostic: it does not create a clinical risk score,
+    choose a threshold, or replace the validation-fitted conformal rule.
+    """
+    targets, scores, _ = _arrays(labels, predictions)
+    uncertainty_values = np.asarray(uncertainties, dtype=float)
+    if uncertainty_values.ndim != 1 or len(uncertainty_values) != len(targets):
+        raise ValueError('Uncertainty scores must be one-dimensional and match labels.')
+    if not np.isfinite(uncertainty_values).all() or (uncertainty_values < 0).any():
+        raise ValueError('Uncertainty scores must be finite, non-negative values.')
+    requested_levels = tuple(float(value) for value in coverage_levels)
+    if not requested_levels or any(not 0 < value <= 1 for value in requested_levels):
+        raise ValueError('Coverage levels must be a non-empty sequence in (0, 1].')
+    if tuple(sorted(set(requested_levels))) != requested_levels:
+        raise ValueError('Coverage levels must be unique and sorted in ascending order.')
+
+    ordered_indices = np.argsort(uncertainty_values, kind='stable')
+    points: list[dict[str, Any]] = []
+    for requested_coverage in requested_levels:
+        retained_count = min(
+            len(targets), max(1, int(np.ceil(len(targets) * requested_coverage)))
+        ) if len(targets) else 0
+        retained_indices = ordered_indices[:retained_count]
+        retained_metrics = calculate_binary_metrics(
+            targets[retained_indices],
+            scores[retained_indices],
+            threshold,
+            include_calibration_diagnostics=False,
+        )
+        accuracy = retained_metrics['accuracy']
+        points.append({
+            'requested_coverage': requested_coverage,
+            'effective_coverage': float(retained_count / len(targets)) if len(targets) else None,
+            'retained_sample_count': int(retained_count),
+            'uncertainty_maximum': float(uncertainty_values[retained_indices].max())
+            if retained_count else None,
+            'experimental_label_error_rate': float(1 - accuracy) if accuracy is not None else None,
+            'metrics': retained_metrics,
+        })
+    return {
+        'method': 'predictive_entropy_ranked_risk_coverage_v1',
+        'uncertainty_measure': 'bernoulli_predictive_entropy_nats',
+        'selection_order': 'least_uncertain_first',
+        'points': points,
+        'interpretation_warning': (
+            'Risk means error against the sampled experimental reported/unreported labels. '
+            'It is not clinical risk, safety, or a validation-fitted abstention policy.'
+        ),
+    }
+
+
+def evaluation_metric_table(
+    results: dict[str, dict[str, Any]],
+    negative_label_meaning: str = 'sampled_unreported_pairs_not_proven_safe',
+) -> pd.DataFrame:
+    """Return a paper-ready, one-row-per-split metric table.
+
+    Accuracy is deliberately labelled as secondary so the exported CSV cannot
+    be misread as evidence of real-world prevalence or clinical performance.
+    """
+    rows = []
+    for split, metrics in results.items():
+        rows.append({
+            'split': split,
+            'status': metrics.get('status'),
+            'negative_label_meaning': negative_label_meaning,
+            'sample_count': metrics.get('sample_count'),
+            'positive_count': metrics.get('positive_count'),
+            'negative_count': metrics.get('negative_count'),
+            'positive_prevalence': metrics.get('positive_prevalence'),
+            'threshold': metrics.get('threshold'),
+            'auroc': metrics.get('auroc'),
+            'average_precision': metrics.get('average_precision'),
+            'mcc': metrics.get('mcc'),
+            'balanced_accuracy': metrics.get('balanced_accuracy'),
+            'f1': metrics.get('f1'),
+            'precision': metrics.get('precision'),
+            'recall': metrics.get('recall'),
+            'specificity': metrics.get('specificity'),
+            'negative_predictive_value': metrics.get('negative_predictive_value'),
+            'accuracy_secondary_only': metrics.get('accuracy'),
+            'brier_score_calibrated': metrics.get('brier_score_calibrated'),
+            'ece_calibrated': metrics.get('ece_calibrated'),
+            'calibration_slope_diagnostic': metrics.get('calibration_slope_diagnostic'),
+            'calibration_intercept_diagnostic': metrics.get('calibration_intercept_diagnostic'),
+        })
+    return pd.DataFrame(rows, columns=PAPER_METRIC_TABLE_COLUMNS)
 
 
 def structural_similarity_slices(

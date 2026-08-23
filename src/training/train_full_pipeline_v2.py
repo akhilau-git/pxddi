@@ -79,6 +79,7 @@ from models.ddi_model import (
     MODEL_ARCHITECTURE_LEGACY,
     MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
     MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
+    MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
     PxDDIModel,
 )
 from models.calibration import (
@@ -192,14 +193,17 @@ if MODEL_ARCHITECTURE not in {
     MODEL_ARCHITECTURE_EDGE_AWARE,
     MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
     MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
+    MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
 }:
     raise ValueError(f'Unsupported PXDDI_MODEL_ARCHITECTURE: {MODEL_ARCHITECTURE}.')
 USES_EDGE_FEATURES = MODEL_ARCHITECTURE in {
     MODEL_ARCHITECTURE_EDGE_AWARE,
     MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
     MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
+    MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
 }
 USE_MOTIF_FEATURES = MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE
+USE_FINGERPRINT_FEATURES = MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_GRAPH_FP_FUSION
 USE_CROSS_DRUG_ATTENTION = (
     MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE
 )
@@ -422,6 +426,7 @@ def build_run_manifest() -> dict[str, Any]:
             'model_architecture': MODEL_ARCHITECTURE,
             'feature_schema': FEATURE_SCHEMA,
             'use_motif_features': USE_MOTIF_FEATURES,
+            'use_fingerprint_features': USE_FINGERPRINT_FEATURES,
             'use_cross_drug_attention': USE_CROSS_DRUG_ATTENTION,
             'cross_drug_attention_type': (
                 'pair_isolated_atom_attention_v1'
@@ -525,6 +530,7 @@ def publish_latest_results(
         Path('run_manifest_initial.json'),
         Path('run_manifest.json'),
         Path('results_summary.json'),
+        Path('evaluation_metrics.csv'),
         Path('training_history.csv'),
         Path('audits/toxicity_bridge_conflicts.csv'),
         Path('audits/toxicity_bridge_summary.json'),
@@ -688,9 +694,15 @@ def load_toxicity_lookup(audit_dir: Path) -> tuple[dict[str, float], dict[str, A
 
 class GraphCache:
     """Reuse immutable SMILES graphs across train/validation/test loaders."""
-    def __init__(self, feature_schema: str, include_motif_features: bool = False) -> None:
+    def __init__(
+        self,
+        feature_schema: str,
+        include_motif_features: bool = False,
+        include_fingerprint_features: bool = False,
+    ) -> None:
         self.feature_schema = feature_schema
         self.include_motif_features = include_motif_features
+        self.include_fingerprint_features = include_fingerprint_features
         self._graphs: dict[str, Any] = {}
         self.hits = 0
         self.misses = 0
@@ -706,6 +718,7 @@ class GraphCache:
                 key,
                 feature_schema=self.feature_schema,
                 include_motif_features=self.include_motif_features,
+                include_fingerprint_features=self.include_fingerprint_features,
             )
             self._graphs[key] = graph
         return graph.clone() if graph is not None else None
@@ -715,6 +728,7 @@ class GraphCache:
         return {
             'feature_schema': self.feature_schema,
             'include_motif_features': self.include_motif_features,
+            'include_fingerprint_features': self.include_fingerprint_features,
             'unique_smiles_cached': len(self._graphs),
             'graph_requests': requests,
             'cache_hits': self.hits,
@@ -740,7 +754,9 @@ class PxDDIDataset(Dataset):
         self.metadata: list[dict[str, Any]] = []
         self.skipped_count = 0
         self.graph_cache = graph_cache or GraphCache(
-            FEATURE_SCHEMA, include_motif_features=USE_MOTIF_FEATURES
+            FEATURE_SCHEMA,
+            include_motif_features=USE_MOTIF_FEATURES,
+            include_fingerprint_features=USE_FINGERPRINT_FEATURES,
         )
         for row in dataframe.itertuples(index=False):
             source = getattr(row, source_col)

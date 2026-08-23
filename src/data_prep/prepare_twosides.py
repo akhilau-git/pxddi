@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from rdkit import Chem
+from rdkit import DataStructs
+from rdkit.Chem import rdFingerprintGenerator
+import numpy as np
 import torch
 from torch_geometric.data import Data
 
 from .molecular_motifs import motif_count_vector
 
+
+_MORGAN_GENERATOR = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024, includeChirality=True)
 
 FEATURE_SCHEMA_LEGACY = 'legacy_v1'
 FEATURE_SCHEMA_RICH = 'rich_v2'
@@ -120,6 +125,7 @@ def smiles_to_graph(
     smiles,
     feature_schema: str = FEATURE_SCHEMA_LEGACY,
     include_motif_features: bool = False,
+    include_fingerprint_features: bool = False,
 ):
     """Convert a graph-compatible SMILES into a PyG graph under one schema."""
     reason = graph_compatibility_reason(smiles)
@@ -153,4 +159,9 @@ def smiles_to_graph(
         graph.motif_features = torch.tensor(
             motif_count_vector(molecule), dtype=torch.float
         ).unsqueeze(0)
+    if include_fingerprint_features:
+        bit_vector = _MORGAN_GENERATOR.GetFingerprint(molecule)
+        vector = np.zeros(1024, dtype=np.float32)
+        DataStructs.ConvertToNumpyArray(bit_vector, vector)
+        graph.fingerprint_features = torch.tensor(vector, dtype=torch.float).unsqueeze(0)
     return graph

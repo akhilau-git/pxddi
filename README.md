@@ -158,14 +158,17 @@ unseen) results. Its `results_summary.json` now records:
   only for comparison with prior papers; it is not a headline claim because
   zero-labelled pairs are sampled *unreported* pairs, not known-safe pairs.
 - **Confidence intervals:** stratified 95% bootstrap intervals for AUROC,
-  average precision, F1, MCC, balanced accuracy, and Brier score. These are
-  within-test-split intervals, separate from the matched five-seed intervals
-  produced by the experiment suite.
+  average precision, F1, MCC, balanced accuracy, Brier score, and ECE. These
+  are within-test-split intervals, separate from the matched five-seed
+  intervals produced by the experiment suite.
 - **Audit outputs:** confidence-ranked false-positive and false-negative CSVs;
   prediction metrics by three nearest-training-drug structural-similarity
   bands; conformal abstention coverage and retained-subset metrics; total
   training time, full-loader inference throughput, parameter count, and peak
-  CUDA memory when a GPU is present.
+  CUDA memory when a GPU is present. Each run also writes a paper-ready
+  `evaluation_metrics.csv` (one row per split) and an entropy-ranked
+  risk–coverage diagnostic. The latter measures experimental-label error after
+  retaining the least-uncertain pairs first; it is not clinical risk.
 
 Calibration slope/intercept are explicitly labelled as **post-hoc diagnostic
 metrics**: they are calculated on the evaluation partition and are not used to

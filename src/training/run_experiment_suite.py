@@ -43,7 +43,7 @@ SPLIT_NAMES = (
 )
 METRIC_NAMES = (
     'auroc', 'average_precision', 'f1', 'mcc', 'balanced_accuracy',
-    'brier_score_calibrated',
+    'brier_score_calibrated', 'ece_calibrated',
 )
 
 EXPERIMENTS = (
@@ -108,6 +108,20 @@ EXPERIMENTS = (
         'name': 'cross_attention_edge_aware_multitask',
         'runner': 'gnn',
         'architecture': 'cross_attention_edge_aware_gat_v1',
+        'use_toxicity_pair_features': True,
+        'toxicity_loss_weight': 0.3,
+    },
+    {
+        'name': 'graph_fp_fusion_ddi_only',
+        'runner': 'gnn',
+        'architecture': 'graph_fp_fusion_v1',
+        'use_toxicity_pair_features': False,
+        'toxicity_loss_weight': 0.0,
+    },
+    {
+        'name': 'graph_fp_fusion_multitask',
+        'runner': 'gnn',
+        'architecture': 'graph_fp_fusion_v1',
         'use_toxicity_pair_features': True,
         'toxicity_loss_weight': 0.3,
     },

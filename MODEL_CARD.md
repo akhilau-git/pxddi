@@ -49,7 +49,8 @@ The Phase 7 evaluator is implemented but has not yet generated accepted
 candidate results. It will report AUROC, average precision, MCC, Brier/ECE,
 validation-thresholded decision metrics, stratified test-set bootstrap
 intervals, structural-novelty slices, confidence-ranked errors, conformal
-abstention coverage, and hardware-specific efficiency records. These are
+abstention coverage, entropy-ranked risk–coverage diagnostics, a per-split
+metric table, and hardware-specific efficiency records. These are
 research measurements on reported-versus-unreported labels, not clinical
 performance measures.
 

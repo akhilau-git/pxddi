@@ -230,6 +230,7 @@ def test_publish_latest_results_overwrites_the_easy_to_find_result_copy(tmp_path
         'run_manifest_initial.json',
         'run_manifest.json',
         'results_summary.json',
+        'evaluation_metrics.csv',
         'training_history.csv',
         'audits/toxicity_bridge_conflicts.csv',
         'audits/toxicity_bridge_summary.json',
@@ -247,6 +248,9 @@ def test_publish_latest_results_overwrites_the_easy_to_find_result_copy(tmp_path
     publish_latest_results(run_dir, latest_dir)
 
     assert (latest_dir / 'figures/training_curves.png').read_bytes() == b'first figure'
+    assert (latest_dir / 'evaluation_metrics.csv').read_text(encoding='utf-8') == (
+        'first:evaluation_metrics.csv'
+    )
     (figure_dir / 'training_curves.png').write_bytes(b'new figure')
     publish_latest_results(run_dir, latest_dir)
 

@@ -13,9 +13,11 @@ import pandas as pd
 from src.evaluation.ddi_metrics import (
     bootstrap_confidence_intervals,
     calculate_binary_metrics,
+    evaluation_metric_table,
     save_confident_error_analysis,
     selective_prediction_summary,
     structural_similarity_slices,
+    uncertainty_risk_coverage_curve,
 )
 
 
@@ -66,7 +68,39 @@ def test_bootstrap_intervals_are_stratified_and_json_serializable():
     assert intervals['resamples'] == 30
     assert intervals['metrics']['auroc']['point_estimate'] == 1.0
     assert intervals['metrics']['mcc']['valid_resamples'] == 30
+    assert intervals['metrics']['ece_calibrated']['valid_resamples'] == 30
     json.dumps(intervals)
+
+
+def test_uncertainty_risk_coverage_retains_least_uncertain_examples_first():
+    labels = np.array([0, 1, 0, 1])
+    scores = np.array([0.1, 0.9, 0.7, 0.4])
+    uncertainties = np.array([0.01, 0.02, 0.8, 0.9])
+
+    summary = uncertainty_risk_coverage_curve(
+        labels, scores, threshold=0.5, uncertainties=uncertainties,
+        coverage_levels=(0.5, 1.0),
+    )
+
+    first_point, full_point = summary['points']
+    assert first_point['retained_sample_count'] == 2
+    assert first_point['experimental_label_error_rate'] == 0.0
+    assert full_point['retained_sample_count'] == 4
+    assert full_point['experimental_label_error_rate'] == 0.5
+
+
+def test_evaluation_metric_table_marks_accuracy_as_secondary_and_keeps_split_rows():
+    metrics = calculate_binary_metrics(
+        np.array([0, 0, 1, 1]), np.array([0.1, 0.4, 0.6, 0.9]), threshold=0.5
+    )
+
+    table = evaluation_metric_table({'s1_test': metrics})
+
+    assert table.to_dict('records')[0]['split'] == 's1_test'
+    assert table.to_dict('records')[0]['accuracy_secondary_only'] == 1.0
+    assert table.to_dict('records')[0]['negative_label_meaning'] == (
+        'sampled_unreported_pairs_not_proven_safe'
+    )
 
 
 def test_selective_summary_keeps_coverage_with_retained_metrics():

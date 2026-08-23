@@ -10,6 +10,7 @@ MODEL_ARCHITECTURE_LEGACY = 'legacy_gat_v1'
 MODEL_ARCHITECTURE_EDGE_AWARE = 'edge_aware_gat_v2'
 MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE = 'motif_edge_aware_gat_v1'
 MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE = 'cross_attention_edge_aware_gat_v1'
+MODEL_ARCHITECTURE_GRAPH_FP_FUSION = 'graph_fp_fusion_v1'
 
 
 def architecture_uses_edge_features(architecture_version: str) -> bool:
@@ -18,6 +19,7 @@ def architecture_uses_edge_features(architecture_version: str) -> bool:
         MODEL_ARCHITECTURE_EDGE_AWARE,
         MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
         MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
+        MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
     }
 
 
@@ -29,6 +31,11 @@ def architecture_requires_motif_features(architecture_version: str) -> bool:
 def architecture_requires_cross_drug_attention(architecture_version: str) -> bool:
     """Return whether a checkpoint needs pair-isolated atom-level attention."""
     return architecture_version == MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE
+
+
+def architecture_requires_fingerprint_features(architecture_version: str) -> bool:
+    """Return whether a checkpoint needs molecular ECFP fingerprints."""
+    return architecture_version == MODEL_ARCHITECTURE_GRAPH_FP_FUSION
 
 
 def model_from_checkpoint(checkpoint):
@@ -93,6 +100,15 @@ class PxDDIModel(nn.Module):
         else:
             self.motif_encoder = None
 
+        if architecture_requires_fingerprint_features(architecture_version):
+            self.fp_encoder = nn.Sequential(
+                nn.Linear(1024, 128),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+            )
+        else:
+            self.fp_encoder = None
+
         self.cross_drug_attention = (
             CrossDrugAttention(hidden_channels)
             if architecture_requires_cross_drug_attention(architecture_version)
@@ -103,7 +119,9 @@ class PxDDIModel(nn.Module):
         self.patient_encoder = PatientContextEncoder(n_comorbidities, hidden_channels)
         pair_embedding_channels = hidden_channels + (
             motif_hidden_channels if self.motif_encoder is not None else 0
-        ) + (hidden_channels if self.cross_drug_attention is not None else 0)
+        ) + (hidden_channels if self.cross_drug_attention is not None else 0) + (
+            128 if self.fp_encoder is not None else 0
+        )
         risk_input_channels = pair_embedding_channels * 2 + (
             2 if use_toxicity_pair_features else 0
         )
@@ -152,6 +170,14 @@ class PxDDIModel(nn.Module):
             eb_for_risk = torch.cat((eb, motif_b), dim=1)
         else:
             ea_for_risk, eb_for_risk = ea, eb
+
+        if self.fp_encoder is not None:
+            if not hasattr(drug_a, 'fingerprint_features') or not hasattr(drug_b, 'fingerprint_features'):
+                raise ValueError('The fusion candidate requires fingerprint_features on both drug graphs.')
+            fp_a = self.fp_encoder(drug_a.fingerprint_features.float())
+            fp_b = self.fp_encoder(drug_b.fingerprint_features.float())
+            ea_for_risk = torch.cat((ea_for_risk, fp_a), dim=1)
+            eb_for_risk = torch.cat((eb_for_risk, fp_b), dim=1)
 
         if self.cross_drug_attention is not None:
             ea_for_risk = torch.cat((ea_for_risk, cross_a), dim=1)
