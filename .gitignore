@@ -73,6 +73,8 @@ yarn-error.log*
 
 # Run outputs and local checkpoint backups live in Drive/local storage, not Git.
 backend/artifacts/
+backend/plots/
+backend/pxddi-results/
 backend/checkpoints/*_before_*.pt
 backend/checkpoints/*_run_*.pt
 backend/checkpoints/candidates/

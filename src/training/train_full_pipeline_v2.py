@@ -835,14 +835,16 @@ def multi_task_loss(
     toxicity_b_known,
     toxicity_loss_weight: float = TOXICITY_LOSS_WEIGHT,
 ):
+    # All three model heads return raw logits.  Applying BCELoss to the
+    # auxiliary heads would both fail for valid logits outside [0, 1] and use
+    # a different loss contract from the interaction head.
     bce_with_logits = torch.nn.BCEWithLogitsLoss(reduction='none')
-    bce = torch.nn.BCELoss(reduction='none')
     ddi_loss = bce_with_logits(risk_prediction, risk_label).mean()
     toxicity_a_loss = (
-        bce(toxicity_a_prediction, toxicity_a_label) * toxicity_a_known
+        bce_with_logits(toxicity_a_prediction, toxicity_a_label) * toxicity_a_known
     ).sum() / (toxicity_a_known.sum() + 1e-8)
     toxicity_b_loss = (
-        bce(toxicity_b_prediction, toxicity_b_label) * toxicity_b_known
+        bce_with_logits(toxicity_b_prediction, toxicity_b_label) * toxicity_b_known
     ).sum() / (toxicity_b_known.sum() + 1e-8)
     return ddi_loss + toxicity_loss_weight * (toxicity_a_loss + toxicity_b_loss)
 
