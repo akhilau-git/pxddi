@@ -1671,7 +1671,9 @@ def main() -> None:
     split_manifest = save_split_manifests(splits, RUN_ARTIFACTS_DIR)
 
     graph_cache = GraphCache(
-        FEATURE_SCHEMA, include_motif_features=USE_MOTIF_FEATURES
+        FEATURE_SCHEMA,
+        include_motif_features=USE_MOTIF_FEATURES,
+        include_fingerprint_features=USE_FINGERPRINT_FEATURES,
     )
     train_loader = build_loader(
         splits[train_split_key], toxicity_lookup, shuffle=True, graph_cache=graph_cache
