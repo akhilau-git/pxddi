@@ -214,6 +214,14 @@ def collect_predictions(
     return np.concatenate(labels), np.concatenate(predictions)
 
 
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f'Cannot JSON-encode {type(value).__name__}.')
+
+
 def safe_save_baseline_checkpoint(
     coefficients: np.ndarray,
     intercept: float,
@@ -233,7 +241,7 @@ def safe_save_baseline_checkpoint(
                 destination,
                 coefficients=np.asarray(coefficients, dtype=np.float32),
                 intercept=np.asarray([intercept], dtype=np.float32),
-                metadata_json=np.asarray(json.dumps(metadata, sort_keys=True)),
+                metadata_json=np.asarray(json.dumps(metadata, default=_json_default, sort_keys=True)),
             )
         with np.load(temporary_path, allow_pickle=False) as loaded:
             if loaded['coefficients'].shape != np.asarray(coefficients).shape:
