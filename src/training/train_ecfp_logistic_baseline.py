@@ -335,8 +335,8 @@ def main() -> None:
         negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY
     )
     dataset_summary = {
-        'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
-        'sampled_unreported_negative_pairs': int((full_dataset['label'] == 0.0).sum()),
+        'effective_positive_pairs': (full_dataset['label'] == 1.0).sum(),
+        'sampled_unreported_negative_pairs': (full_dataset['label'] == 0.0).sum(),
         'total_pair_rows_before_split': len(full_dataset),
         'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
     }
