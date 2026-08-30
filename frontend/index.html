@@ -1,6 +1,120 @@
-<!DOCTYPE html><html><head><title>PxDDI</title></head><body>
-<h2>Drug Interaction Risk Checker</h2>
-<input id="smilesA" placeholder="Drug A SMILES"><br>
-<input id="smilesB" placeholder="Drug B SMILES"><br>
-<button onclick="checkRisk()">Check Interaction</button>
-<p id="result"></p><script src="app.js"></script></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuditDDI: Chemical Interaction Prediction</title>
+    <!-- Import Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Link to our new premium stylesheet -->
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <div class="background-blobs">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+    </div>
+
+    <header class="app-header">
+        <h1>AuditDDI</h1>
+        <p class="subtitle">Auditable Graph-Fingerprint Framework for DDI Prediction</p>
+    </header>
+
+    <main class="app-container">
+        <!-- Left Column: Input Form -->
+        <section class="glass-card input-section">
+            <div class="card-header">
+                <h2>Predict Interaction</h2>
+                <p>Enter the SMILES strings for the drug pair.</p>
+            </div>
+            
+            <form id="prediction-form" onsubmit="event.preventDefault(); checkRisk();">
+                <div class="input-group">
+                    <label for="smilesA">Drug A SMILES</label>
+                    <input type="text" id="smilesA" placeholder="e.g. CC(=O)OC1=CC=CC=C1C(=O)O" required autocomplete="off">
+                </div>
+
+                <div class="input-group">
+                    <label for="smilesB">Drug B SMILES</label>
+                    <input type="text" id="smilesB" placeholder="e.g. CN1C=NC2=C1C(=O)N(C(=O)N2C)C" required autocomplete="off">
+                </div>
+
+                <button type="submit" id="predict-btn" class="primary-btn">
+                    <span class="btn-text">Analyze Pair</span>
+                    <span class="loader hidden"></span>
+                </button>
+            </form>
+            <div class="disclaimer">
+                ⚠️ <strong>Research Only:</strong> This is an uncalibrated experimental prototype. Do not use for clinical decisions.
+            </div>
+        </section>
+
+        <!-- Right Column: Results -->
+        <section class="glass-card results-section" id="results-container">
+            <div class="empty-state" id="empty-state">
+                <div class="icon-molecule">
+                    <!-- SVG Molecule Icon -->
+                    <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="9" cy="9" r="2"></circle>
+                        <circle cx="15" cy="15" r="2"></circle>
+                        <circle cx="9" cy="15" r="2"></circle>
+                        <line x1="9" y1="11" x2="9" y2="13"></line>
+                        <line x1="10.41" y1="10.41" x2="13.59" y2="13.59"></line>
+                        <line x1="13.59" y1="15" x2="11" y2="15"></line>
+                        <line x1="17" y1="9" x2="10.5" y2="9"></line>
+                        <circle cx="19" cy="9" r="2"></circle>
+                    </svg>
+                </div>
+                <h3>Awaiting Input</h3>
+                <p>Run a prediction to see the interaction analysis.</p>
+            </div>
+
+            <div class="results-content hidden" id="results-content">
+                <h2>Analysis Complete</h2>
+                
+                <div class="metric-card risk-card" id="risk-card">
+                    <h3 class="metric-label">Interaction Probability</h3>
+                    <div class="metric-value" id="risk-value">--%</div>
+                    <div class="risk-bar-container">
+                        <div class="risk-bar" id="risk-bar"></div>
+                    </div>
+                    <p class="metric-desc" id="risk-desc">Calculating...</p>
+                </div>
+
+                <div class="toxicity-grid">
+                    <div class="metric-card tox-card">
+                        <h3 class="metric-label">Drug A Baseline Toxicity</h3>
+                        <div class="metric-value small" id="toxA-value">--%</div>
+                    </div>
+                    <div class="metric-card tox-card">
+                        <h3 class="metric-label">Drug B Baseline Toxicity</h3>
+                        <div class="metric-value small" id="toxB-value">--%</div>
+                    </div>
+                </div>
+
+                <div class="meta-info">
+                    <p><strong>Architecture:</strong> <span id="meta-arch">--</span></p>
+                    <p><strong>Model AUROC:</strong> <span id="meta-auroc">--</span></p>
+                    <p><strong>Request ID:</strong> <span id="meta-reqid" class="code-font">--</span></p>
+                </div>
+            </div>
+            
+            <!-- Error State -->
+            <div class="error-state hidden" id="error-state">
+                <svg viewBox="0 0 24 24" width="48" height="48" stroke="#ff4d4d" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+                <h3>Analysis Failed</h3>
+                <p id="error-message">An error occurred during prediction.</p>
+                <button class="secondary-btn" onclick="resetForm()">Try Again</button>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

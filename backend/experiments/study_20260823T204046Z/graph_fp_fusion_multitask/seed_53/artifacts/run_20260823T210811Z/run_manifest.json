@@ -1,0 +1,1927 @@
+{
+  "calibration": {
+    "clip_epsilon": 1e-06,
+    "coefficient": 0.8986940097954008,
+    "fitted_on": "posthoc_validation_calibration_partition",
+    "fitted_partition_brier_calibrated": 0.107903355491897,
+    "fitted_partition_brier_raw": 0.10971795663928635,
+    "fitted_partition_ece_calibrated": 0.024318073732290137,
+    "fitted_partition_ece_raw": 0.04418904329360366,
+    "fitted_partition_sample_count": 1191,
+    "input_transform": "logit_of_clipped_raw_probability",
+    "intercept": -0.28835917351442664,
+    "method": "platt_logistic_regression",
+    "status": "fitted"
+  },
+  "candidate_explanations": {
+    "method": "single_component_occlusion_v1",
+    "reason": "Set PXDDI_RUN_CANDIDATE_EXPLANATIONS=1 to generate a bounded offline audit.",
+    "status": "disabled"
+  },
+  "checkpoint": {
+    "epoch": 16,
+    "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/checkpoints/graph_fp_fusion_multitask_seed_53.pt",
+    "sha256": "5c2ed56fa6ad219b267a44baaa82b8246b4429f0e89ca45624a501a7f44e96d3",
+    "validation_auroc": 0.9256760486949539,
+    "validation_selected_threshold": 0.42850215989437923
+  },
+  "completed_at_utc": "2026-08-23T21:35:54.790632+00:00",
+  "configuration": {
+    "batch_size": 128,
+    "candidate_explanations": {
+      "enabled": false,
+      "method": "single_component_occlusion_v1",
+      "samples_per_split": 4,
+      "top_k": 5,
+      "uses_raw_model_probabilities": true
+    },
+    "cross_drug_attention_type": null,
+    "data_cap": 200000,
+    "early_stopping_min_epochs": 40,
+    "early_stopping_patience": 30,
+    "edge_feature_dim": 14,
+    "epochs": 200,
+    "error_analysis": {
+      "maximum_rows_per_error_type": 100,
+      "method": "confidence_ranked_threshold_errors"
+    },
+    "evaluation_protocol": "standard",
+    "feature_schema": "rich_v2",
+    "hidden_channels": 128,
+    "model_architecture": "graph_fp_fusion_v1",
+    "model_seed": 53,
+    "model_selection_validation_fraction": 0.5,
+    "motif_feature_dim": null,
+    "motif_feature_schema": null,
+    "motif_hidden_channels": null,
+    "negative_label_meaning": "unreported_twosides_sampled",
+    "split_seed": 53,
+    "test_set_bootstrap": {
+      "method": "stratified_nonparametric_bootstrap",
+      "metrics": [
+        "auroc",
+        "average_precision",
+        "f1",
+        "mcc",
+        "balanced_accuracy",
+        "brier_score_calibrated"
+      ],
+      "resamples": 1000,
+      "seed": 53
+    },
+    "toxicity_conflict_policy": "exclude_conflicting_structures",
+    "toxicity_loss_weight": 0.3,
+    "uncertainty": {
+      "applicability_domain_method": "nearest_train_ecfp_tanimoto_v1",
+      "applicability_domain_minimum_similarity": 0.4,
+      "conformal_alpha": 0.1,
+      "conformal_method": "split_conformal_binary_v1"
+    },
+    "use_chemberta": false,
+    "use_cross_drug_attention": false,
+    "use_fingerprint_features": true,
+    "use_motif_features": false,
+    "use_toxicity_pair_features": true,
+    "validation_role_protocol": "stratified_disjoint_model_selection_then_posthoc_three_way_v1"
+  },
+  "created_at_utc": "2026-08-23T21:08:11.162909+00:00",
+  "dataset": {
+    "effective_positive_pairs": 61898,
+    "negative_label_meaning": "unreported_twosides_sampled_degree_matched",
+    "sampled_unreported_negative_pairs": 61898,
+    "total_pair_rows_before_split": 123796
+  },
+  "device": "cuda",
+  "early_stopping": {
+    "best_epoch": 16,
+    "completed_epochs": 46,
+    "enabled": true,
+    "minimum_epochs": 40,
+    "model_selection_split": "validation",
+    "patience": 30,
+    "posthoc_reserved_before_training": true,
+    "posthoc_validation_split": "posthoc_validation",
+    "stopped_early": true
+  },
+  "efficiency": {
+    "inference_by_evaluation_split": {
+      "S1": {
+        "batch_count": 6,
+        "interpretation_warning": "Inference efficiency depends on the recorded hardware, batch size, PyTorch/PyG versions, and whether data are already in memory.",
+        "mean_batch_latency_milliseconds": 43.88902499999858,
+        "measurement_scope": "full_loader_inference_including_batching_and_device_transfer",
+        "pairs_per_second": 2836.700063398629,
+        "peak_cuda_memory_bytes": 121947136,
+        "sample_count": 747,
+        "status": "measured",
+        "wall_clock_seconds": 0.2633341499999915
+      },
+      "S1-dev": {
+        "batch_count": 5,
+        "interpretation_warning": "Inference efficiency depends on the recorded hardware, batch size, PyTorch/PyG versions, and whether data are already in memory.",
+        "mean_batch_latency_milliseconds": 40.95375940005397,
+        "measurement_scope": "full_loader_inference_including_batching_and_device_transfer",
+        "pairs_per_second": 3105.941966339539,
+        "peak_cuda_memory_bytes": 134532608,
+        "sample_count": 636,
+        "status": "measured",
+        "wall_clock_seconds": 0.20476879700026984
+      },
+      "S2": {
+        "batch_count": 128,
+        "interpretation_warning": "Inference efficiency depends on the recorded hardware, batch size, PyTorch/PyG versions, and whether data are already in memory.",
+        "mean_batch_latency_milliseconds": 30.713727796872092,
+        "measurement_scope": "full_loader_inference_including_batching_and_device_transfer",
+        "pairs_per_second": 4149.20327622941,
+        "peak_cuda_memory_bytes": 133559296,
+        "sample_count": 16312,
+        "status": "measured",
+        "wall_clock_seconds": 3.931357157999628
+      },
+      "S2-dev": {
+        "batch_count": 121,
+        "interpretation_warning": "Inference efficiency depends on the recorded hardware, batch size, PyTorch/PyG versions, and whether data are already in memory.",
+        "mean_batch_latency_milliseconds": 36.70177395867563,
+        "measurement_scope": "full_loader_inference_including_batching_and_device_transfer",
+        "pairs_per_second": 3471.131786662911,
+        "peak_cuda_memory_bytes": 146200064,
+        "sample_count": 15415,
+        "status": "measured",
+        "wall_clock_seconds": 4.440914648999751
+      },
+      "Transductive": {
+        "batch_count": 140,
+        "interpretation_warning": "Inference efficiency depends on the recorded hardware, batch size, PyTorch/PyG versions, and whether data are already in memory.",
+        "mean_batch_latency_milliseconds": 30.908306635715885,
+        "measurement_scope": "full_loader_inference_including_batching_and_device_transfer",
+        "pairs_per_second": 4126.260160054879,
+        "peak_cuda_memory_bytes": 127943168,
+        "sample_count": 17855,
+        "status": "measured",
+        "wall_clock_seconds": 4.327162929000224
+      }
+    },
+    "training": {
+      "interpretation_warning": "Training efficiency is hardware- and data-size-specific. Compare it only across runs with the same runtime environment and split manifest.",
+      "measurement_scope": "optimization_and_per_epoch_validation",
+      "parameter_count": 268002,
+      "peak_cuda_memory_bytes": 201107456,
+      "recorded_batch_size": 128,
+      "wall_clock_seconds": 1253.7282982319998
+    }
+  },
+  "evaluation_protocol": {
+    "interpretation_warning": "Standard results include a transductive split and drug-identity cold-start S1/S2 partitions. Run scaffold-disjoint evaluation separately; it requires a distinct training partition.",
+    "name": "standard_transductive_s1_s2",
+    "validation_role_partition": {
+      "independent_from_early_stopping": true,
+      "model_selection_label_counts": {
+        "0": 1786,
+        "1": 1785
+      },
+      "model_selection_rows": 3571,
+      "posthoc_label_counts": {
+        "0": 1786,
+        "1": 1785
+      },
+      "posthoc_roles": [
+        "calibration",
+        "threshold",
+        "conformal"
+      ],
+      "posthoc_rows": 3571,
+      "requested_model_selection_fraction": 0.5,
+      "seed": 53,
+      "source_label_counts": {
+        "0": 3572,
+        "1": 3570
+      },
+      "source_rows": 7142,
+      "status": "stratified_disjoint_model_selection_and_posthoc"
+    }
+  },
+  "graph_cache": {
+    "cache_hit_rate": 0.9973893432911434,
+    "cache_hits": 244127,
+    "cache_misses": 639,
+    "feature_schema": "rich_v2",
+    "graph_requests": 244766,
+    "include_fingerprint_features": true,
+    "include_motif_features": false,
+    "unique_smiles_cached": 639
+  },
+  "input_data_base": "/content/drive/MyDrive/pxddi-data",
+  "input_quality": {
+    "clean_positive_pairs": 61898,
+    "counterion_curation": {
+      "automatic_parent_mapping_applied": false,
+      "counterion_only_pair_exclusions": 1575,
+      "curation_candidates_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/audits/counterion_curation_candidates.csv",
+      "curation_candidates_sha256": "44addbe3468c15b1848856c90d3e7a111c0db99e118a9fc5d83abcae08fb190e",
+      "unique_counterion_or_inorganic_structures": 6
+    },
+    "data_cap": 200000,
+    "excluded_positive_pairs": 1575,
+    "exclusion_audit_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/audits/invalid_smiles_exclusions.csv",
+    "exclusion_audit_sha256": "ec18fd75bdff494806fe16e634db2bc4fb205b7043fcd4c798ed2cfc16bf9b02",
+    "raw_unique_positive_pairs": 63473,
+    "sampled_positive_pairs": 61898
+  },
+  "input_sha256": {
+    "toxicity_bridge": "99c2fd75a06f03615874c9b3f43a0bd5277c68abde6fd963d163b037065f4732",
+    "training_source": "d668538ea62fd3f93fb6f836bce41e7fe3b258e8642329577c75d30c03388526",
+    "twosides_edges": "b05f1c17a8c26966f468ae96a775c8621d6824613aba811f669dc62c8a3bba69"
+  },
+  "latest_results_directory": null,
+  "model_seed": 53,
+  "model_summary": {
+    "cross_drug_attention_type": null,
+    "edge_feature_dim": 14,
+    "encoder_class": "EdgeAwareMolecularEncoder",
+    "feature_schema": "rich_v2",
+    "hidden_channels": 128,
+    "input_atom_features": 44,
+    "model_architecture": "graph_fp_fusion_v1",
+    "model_class": "PxDDIModel",
+    "motif_feature_dim": null,
+    "motif_feature_schema": null,
+    "motif_hidden_channels": null,
+    "motif_metadata": null,
+    "output_heads": [
+      "interaction_risk",
+      "drug_a_toxicity",
+      "drug_b_toxicity"
+    ],
+    "pair_representation": "embedding_sum + absolute_embedding_difference + toxicity_sum + absolute_toxicity_difference",
+    "total_parameters": 268002,
+    "trainable_parameters": 268002,
+    "use_chemberta": false,
+    "use_cross_drug_attention": false,
+    "use_motif_features": false,
+    "use_toxicity_pair_features": true
+  },
+  "random_seed": 53,
+  "repository_git_commit": "2612e2c01e3c3375effcb2fcb3556b4496a14024",
+  "results": {
+    "S1": {
+      "accuracy": 0.5394912985274432,
+      "applicability_domain": {
+        "interpretation_warning": "This is nearest-training-drug structural similarity only. It does not measure DDI-pair novelty, prove prediction reliability, or establish clinical applicability.",
+        "minimum_tanimoto_similarity": 0.4,
+        "structural_ood_count": 451,
+        "structural_ood_rate": 0.6037483266398929
+      },
+      "auroc": 0.6041442217912807,
+      "average_precision": 0.572194274497084,
+      "balanced_accuracy": 0.5283990519284637,
+      "brier_score_calibrated": 0.3072312781293129,
+      "brier_score_raw": 0.3039405573405594,
+      "calibration_intercept_diagnostic": 0.13716407350820747,
+      "calibration_slope_diagnostic": 0.20770291508594327,
+      "confusion_matrix": [
+        [
+          304,
+          86
+        ],
+        [
+          258,
+          99
+        ]
+      ],
+      "ece_calibrated": 0.25847568883314376,
+      "ece_raw": 0.2548035775012695,
+      "error_analysis": {
+        "false_negatives_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/error_analysis/s1_false_negatives.csv",
+        "false_positives_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/error_analysis/s1_false_positives.csv",
+        "interpretation_warning": "False positives are unreported pairs predicted as reported; they are not established safe pairs. False negatives are reported pairs predicted below the validation-selected research threshold.",
+        "maximum_rows_per_error_type": 100,
+        "method": "confidence_ranked_threshold_errors",
+        "saved_false_negatives": 100,
+        "saved_false_positives": 86,
+        "threshold": 0.42850215989437923,
+        "total_false_negatives": 258,
+        "total_false_positives": 86
+      },
+      "f1": 0.36531365313653136,
+      "false_negative_rate": 0.7226890756302521,
+      "false_positive_rate": 0.2205128205128205,
+      "inference_efficiency": {
+        "batch_count": 6,
+        "interpretation_warning": "Inference efficiency depends on the recorded hardware, batch size, PyTorch/PyG versions, and whether data are already in memory.",
+        "mean_batch_latency_milliseconds": 43.88902499999858,
+        "measurement_scope": "full_loader_inference_including_batching_and_device_transfer",
+        "pairs_per_second": 2836.700063398629,
+        "peak_cuda_memory_bytes": 121947136,
+        "sample_count": 747,
+        "status": "measured",
+        "wall_clock_seconds": 0.2633341499999915
+      },
+      "mcc": 0.06572736579548581,
+      "negative_count": 390,
+      "negative_predictive_value": 0.5409252669039146,
+      "positive_count": 357,
+      "positive_prevalence": 0.4779116465863454,
+      "precision": 0.5351351351351351,
+      "prediction_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/predictions/s1_predictions.csv",
+      "prediction_sha256": "c301341e5510f6aae5f501f4f5624729aadf2fc7ca611db1134bfc30d63e9385",
+      "recall": 0.2773109243697479,
+      "sample_count": 747,
+      "selective_prediction": {
+        "abstained_sample_count": 106,
+        "abstention_rate": 0.14190093708165996,
+        "interpretation_warning": "Selective metrics describe only examples retained by the pre-fitted abstention rule. They must always be reported with coverage.",
+        "metrics": {
+          "accuracy": 0.5585023400936038,
+          "auroc": 0.6425719238785329,
+          "average_precision": 0.6132023962635287,
+          "balanced_accuracy": 0.5518319406299305,
+          "brier_score_calibrated": 0.3169429903762172,
+          "brier_score_raw": 0.3169429903762172,
+          "calibration_intercept_diagnostic": 0.2625831005119051,
+          "calibration_slope_diagnostic": 0.238034642685975,
+          "confusion_matrix": [
+            [
+              288,
+              39
+            ],
+            [
+              244,
+              70
+            ]
+          ],
+          "ece_calibrated": 0.283093690321044,
+          "ece_raw": 0.283093690321044,
+          "f1": 0.3309692671394799,
+          "false_negative_rate": 0.7770700636942676,
+          "false_positive_rate": 0.11926605504587157,
+          "mcc": 0.13794218483357185,
+          "negative_count": 327,
+          "negative_predictive_value": 0.5413533834586466,
+          "positive_count": 314,
+          "positive_prevalence": 0.48985959438377535,
+          "precision": 0.6422018348623854,
+          "recall": 0.2229299363057325,
+          "sample_count": 641,
+          "sensitivity": 0.2229299363057325,
+          "specificity": 0.8807339449541285,
+          "status": "evaluated",
+          "threshold": 0.42850215989437923
+        },
+        "retained_coverage": 0.85809906291834,
+        "retained_sample_count": 641,
+        "rule": "pre_fitted_conformal_prediction_set_is_singleton",
+        "total_sample_count": 747
+      },
+      "sensitivity": 0.2773109243697479,
+      "skipped_invalid_smiles": 0,
+      "specificity": 0.7794871794871795,
+      "status": "evaluated",
+      "structural_similarity_slices": {
+        "bands": {
+          "0.4_to_0.7": {
+            "metrics": {
+              "accuracy": 0.5441176470588235,
+              "auroc": 0.618232224396608,
+              "average_precision": 0.6431229321373,
+              "balanced_accuracy": 0.5568601869971732,
+              "brier_score_calibrated": 0.32632405617865506,
+              "brier_score_raw": 0.3240595744136712,
+              "calibration_intercept_diagnostic": 0.28855921248333166,
+              "calibration_slope_diagnostic": 0.17635937158700105,
+              "confusion_matrix": [
+                [
+                  92,
+                  34
+                ],
+                [
+                  90,
+                  56
+                ]
+              ],
+              "ece_calibrated": 0.2861033004770154,
+              "ece_raw": 0.28876012844386206,
+              "f1": 0.4745762711864407,
+              "false_negative_rate": 0.6164383561643836,
+              "false_positive_rate": 0.2698412698412698,
+              "mcc": 0.12051553443967465,
+              "negative_count": 126,
+              "negative_predictive_value": 0.5054945054945055,
+              "positive_count": 146,
+              "positive_prevalence": 0.5367647058823529,
+              "precision": 0.6222222222222222,
+              "recall": 0.3835616438356164,
+              "sample_count": 272,
+              "sensitivity": 0.3835616438356164,
+              "specificity": 0.7301587301587301,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 272,
+            "similarity_maximum": 0.6538461538461539,
+            "similarity_minimum": 0.41379310344827586
+          },
+          "at_least_0.7": {
+            "metrics": {
+              "accuracy": 0.5,
+              "auroc": 0.5314685314685315,
+              "average_precision": 0.5327682192771708,
+              "balanced_accuracy": 0.4755244755244755,
+              "brier_score_calibrated": 0.3407716583862166,
+              "brier_score_raw": 0.34712090511418064,
+              "calibration_intercept_diagnostic": 0.028990857202509802,
+              "calibration_slope_diagnostic": 0.13777529175811487,
+              "confusion_matrix": [
+                [
+                  10,
+                  3
+                ],
+                [
+                  9,
+                  2
+                ]
+              ],
+              "ece_calibrated": 0.3347834667080385,
+              "ece_raw": 0.34776357780598716,
+              "f1": 0.25,
+              "false_negative_rate": 0.8181818181818182,
+              "false_positive_rate": 0.23076923076923078,
+              "mcc": -0.06005763395600164,
+              "negative_count": 13,
+              "negative_predictive_value": 0.5263157894736842,
+              "positive_count": 11,
+              "positive_prevalence": 0.4583333333333333,
+              "precision": 0.4,
+              "recall": 0.18181818181818182,
+              "sample_count": 24,
+              "sensitivity": 0.18181818181818182,
+              "specificity": 0.7692307692307693,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 24,
+            "similarity_maximum": 0.7727272727272727,
+            "similarity_minimum": 0.7076923076923077
+          },
+          "below_0.4": {
+            "metrics": {
+              "accuracy": 0.5388026607538803,
+              "auroc": 0.5971513944223107,
+              "average_precision": 0.5115225756170207,
+              "balanced_accuracy": 0.504890438247012,
+              "brier_score_calibrated": 0.29393148931426466,
+              "brier_score_raw": 0.2895088478273592,
+              "calibration_intercept_diagnostic": 0.07874685435121635,
+              "calibration_slope_diagnostic": 0.24506123121126017,
+              "confusion_matrix": [
+                [
+                  202,
+                  49
+                ],
+                [
+                  159,
+                  41
+                ]
+              ],
+              "ece_calibrated": 0.23931079082839682,
+              "ece_raw": 0.2313402570430974,
+              "f1": 0.2827586206896552,
+              "false_negative_rate": 0.795,
+              "false_positive_rate": 0.1952191235059761,
+              "mcc": 0.012157793927034193,
+              "negative_count": 251,
+              "negative_predictive_value": 0.5595567867036011,
+              "positive_count": 200,
+              "positive_prevalence": 0.4434589800443459,
+              "precision": 0.45555555555555555,
+              "recall": 0.205,
+              "sample_count": 451,
+              "sensitivity": 0.205,
+              "specificity": 0.8047808764940239,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 451,
+            "similarity_maximum": 0.36764705882352944,
+            "similarity_minimum": 0.1111111111111111
+          }
+        },
+        "interpretation_warning": "Similarity slices are structural-novelty diagnostics. They do not prove a model is reliable within a band or clinical applicability.",
+        "method": "minimum_of_two_nearest_train_drug_ecfp_tanimoto_similarities"
+      },
+      "test_set_bootstrap_95ci": {
+        "confidence_level": 0.95,
+        "interpretation_warning": "These are within-split sample confidence intervals. They do not replace independent repeated-seed experiments or external validation.",
+        "method": "stratified_nonparametric_bootstrap",
+        "metrics": {
+          "auroc": {
+            "ci_95_lower": 0.5639757954463837,
+            "ci_95_upper": 0.6441221360339008,
+            "point_estimate": 0.6041442217912807,
+            "valid_resamples": 1000
+          },
+          "average_precision": {
+            "ci_95_lower": 0.5340857864378074,
+            "ci_95_upper": 0.6172782793062401,
+            "point_estimate": 0.572194274497084,
+            "valid_resamples": 1000
+          },
+          "balanced_accuracy": {
+            "ci_95_lower": 0.49876939237233353,
+            "ci_95_upper": 0.5593438914027149,
+            "point_estimate": 0.5283990519284637,
+            "valid_resamples": 1000
+          },
+          "brier_score_calibrated": {
+            "ci_95_lower": 0.28894302851803455,
+            "ci_95_upper": 0.325807213752527,
+            "point_estimate": 0.3072312781293129,
+            "valid_resamples": 1000
+          },
+          "ece_calibrated": {
+            "ci_95_lower": 0.2323317597151648,
+            "ci_95_upper": 0.2893772305049348,
+            "point_estimate": 0.25847568883314376,
+            "valid_resamples": 1000
+          },
+          "f1": {
+            "ci_95_lower": 0.31616679566563466,
+            "ci_95_upper": 0.4177600094965151,
+            "point_estimate": 0.36531365313653136,
+            "valid_resamples": 1000
+          },
+          "mcc": {
+            "ci_95_lower": -0.002855911285845031,
+            "ci_95_upper": 0.13752185659860477,
+            "point_estimate": 0.06572736579548581,
+            "valid_resamples": 1000
+          }
+        },
+        "resamples": 1000,
+        "seed": 53,
+        "status": "evaluated",
+        "stratification": "experimental_binary_label"
+      },
+      "threshold": 0.42850215989437923,
+      "uncertainty": {
+        "abstention_rate": 0.14190093708165996,
+        "alpha": 0.1,
+        "interpretation_warning": "Internal split-conformal sets require exchangeability for their marginal coverage statement. They are not clinical confidence, do not establish out-of-distribution safety, and do not make an unreported pair safe.",
+        "method": "split_conformal_binary_v1",
+        "observed_coverage": 0.6211512717536813,
+        "sample_count": 747
+      }
+    },
+    "S1-dev": {
+      "accuracy": 0.5723270440251572,
+      "applicability_domain": {
+        "interpretation_warning": "This is nearest-training-drug structural similarity only. It does not measure DDI-pair novelty, prove prediction reliability, or establish clinical applicability.",
+        "minimum_tanimoto_similarity": 0.4,
+        "structural_ood_count": 441,
+        "structural_ood_rate": 0.6933962264150944
+      },
+      "auroc": 0.5991666666666666,
+      "average_precision": 0.5990953119830941,
+      "balanced_accuracy": 0.5779166666666666,
+      "brier_score_calibrated": 0.3051725704031679,
+      "brier_score_raw": 0.3020054254427386,
+      "calibration_intercept_diagnostic": 0.18649684420114074,
+      "calibration_slope_diagnostic": 0.149461300716865,
+      "confusion_matrix": [
+        [
+          203,
+          97
+        ],
+        [
+          175,
+          161
+        ]
+      ],
+      "ece_calibrated": 0.23897946343411025,
+      "ece_raw": 0.2165232977307103,
+      "error_analysis": {
+        "false_negatives_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/error_analysis/s1-dev_false_negatives.csv",
+        "false_positives_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/error_analysis/s1-dev_false_positives.csv",
+        "interpretation_warning": "False positives are unreported pairs predicted as reported; they are not established safe pairs. False negatives are reported pairs predicted below the validation-selected research threshold.",
+        "maximum_rows_per_error_type": 100,
+        "method": "confidence_ranked_threshold_errors",
+        "saved_false_negatives": 100,
+        "saved_false_positives": 97,
+        "threshold": 0.42850215989437923,
+        "total_false_negatives": 175,
+        "total_false_positives": 97
+      },
+      "f1": 0.5420875420875421,
+      "false_negative_rate": 0.5208333333333334,
+      "false_positive_rate": 0.3233333333333333,
+      "inference_efficiency": {
+        "batch_count": 5,
+        "interpretation_warning": "Inference efficiency depends on the recorded hardware, batch size, PyTorch/PyG versions, and whether data are already in memory.",
+        "mean_batch_latency_milliseconds": 40.95375940005397,
+        "measurement_scope": "full_loader_inference_including_batching_and_device_transfer",
+        "pairs_per_second": 3105.941966339539,
+        "peak_cuda_memory_bytes": 134532608,
+        "sample_count": 636,
+        "status": "measured",
+        "wall_clock_seconds": 0.20476879700026984
+      },
+      "mcc": 0.15842907028998374,
+      "negative_count": 300,
+      "negative_predictive_value": 0.5370370370370371,
+      "positive_count": 336,
+      "positive_prevalence": 0.5283018867924528,
+      "precision": 0.624031007751938,
+      "prediction_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/predictions/s1-dev_predictions.csv",
+      "prediction_sha256": "f32b8ac59de2ad53034a6a98c33972729570d03c85a3ef809b3ead21e3fec08e",
+      "recall": 0.4791666666666667,
+      "sample_count": 636,
+      "selective_prediction": {
+        "abstained_sample_count": 123,
+        "abstention_rate": 0.19339622641509435,
+        "interpretation_warning": "Selective metrics describe only examples retained by the pre-fitted abstention rule. They must always be reported with coverage.",
+        "metrics": {
+          "accuracy": 0.5692007797270955,
+          "auroc": 0.5968595141823487,
+          "average_precision": 0.5822741426501523,
+          "balanced_accuracy": 0.5710029489557049,
+          "brier_score_calibrated": 0.3169907083031102,
+          "brier_score_raw": 0.3169907083031102,
+          "calibration_intercept_diagnostic": 0.10180298589146988,
+          "calibration_slope_diagnostic": 0.14067448046381364,
+          "confusion_matrix": [
+            [
+              192,
+              62
+            ],
+            [
+              159,
+              100
+            ]
+          ],
+          "ece_calibrated": 0.2562716464577534,
+          "ece_raw": 0.2562716464577534,
+          "f1": 0.4750593824228028,
+          "false_negative_rate": 0.6138996138996139,
+          "false_positive_rate": 0.2440944881889764,
+          "mcc": 0.15274326055660942,
+          "negative_count": 254,
+          "negative_predictive_value": 0.5470085470085471,
+          "positive_count": 259,
+          "positive_prevalence": 0.5048732943469786,
+          "precision": 0.6172839506172839,
+          "recall": 0.3861003861003861,
+          "sample_count": 513,
+          "sensitivity": 0.3861003861003861,
+          "specificity": 0.7559055118110236,
+          "status": "evaluated",
+          "threshold": 0.42850215989437923
+        },
+        "retained_coverage": 0.8066037735849056,
+        "retained_sample_count": 513,
+        "rule": "pre_fitted_conformal_prediction_set_is_singleton",
+        "total_sample_count": 636
+      },
+      "sensitivity": 0.4791666666666667,
+      "skipped_invalid_smiles": 0,
+      "specificity": 0.6766666666666666,
+      "status": "evaluated",
+      "structural_similarity_slices": {
+        "bands": {
+          "0.4_to_0.7": {
+            "metrics": {
+              "accuracy": 0.6402116402116402,
+              "auroc": 0.6445039590125756,
+              "average_precision": 0.6888524341056756,
+              "balanced_accuracy": 0.64526082906381,
+              "brier_score_calibrated": 0.2830464268419018,
+              "brier_score_raw": 0.2768171437816263,
+              "calibration_intercept_diagnostic": 0.3992303862498136,
+              "calibration_slope_diagnostic": 0.1540165269661497,
+              "confusion_matrix": [
+                [
+                  51,
+                  25
+                ],
+                [
+                  43,
+                  70
+                ]
+              ],
+              "ece_calibrated": 0.24333074888584538,
+              "ece_raw": 0.22284594208874275,
+              "f1": 0.6730769230769231,
+              "false_negative_rate": 0.3805309734513274,
+              "false_positive_rate": 0.32894736842105265,
+              "mcc": 0.28490416789790984,
+              "negative_count": 76,
+              "negative_predictive_value": 0.5425531914893617,
+              "positive_count": 113,
+              "positive_prevalence": 0.5978835978835979,
+              "precision": 0.7368421052631579,
+              "recall": 0.6194690265486725,
+              "sample_count": 189,
+              "sensitivity": 0.6194690265486725,
+              "specificity": 0.6710526315789473,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 189,
+            "similarity_maximum": 0.6883116883116883,
+            "similarity_minimum": 0.4222222222222222
+          },
+          "at_least_0.7": {
+            "metrics": {
+              "accuracy": 0.5,
+              "auroc": 0.25,
+              "average_precision": 0.325,
+              "balanced_accuracy": 0.375,
+              "brier_score_calibrated": 0.4359323575286162,
+              "brier_score_raw": 0.46290888744922926,
+              "calibration_intercept_diagnostic": -1.5679693376107697,
+              "calibration_slope_diagnostic": -0.31464383908868865,
+              "confusion_matrix": [
+                [
+                  3,
+                  1
+                ],
+                [
+                  2,
+                  0
+                ]
+              ],
+              "ece_calibrated": 0.5245498211271957,
+              "ece_raw": 0.5473361992820476,
+              "f1": 0.0,
+              "false_negative_rate": 1.0,
+              "false_positive_rate": 0.25,
+              "mcc": -0.31622776601683794,
+              "negative_count": 4,
+              "negative_predictive_value": 0.6,
+              "positive_count": 2,
+              "positive_prevalence": 0.3333333333333333,
+              "precision": 0.0,
+              "recall": 0.0,
+              "sample_count": 6,
+              "sensitivity": 0.0,
+              "specificity": 0.75,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 6,
+            "similarity_maximum": 0.8709677419354839,
+            "similarity_minimum": 0.7391304347826086
+          },
+          "below_0.4": {
+            "metrics": {
+              "accuracy": 0.54421768707483,
+              "auroc": 0.5721308103661045,
+              "average_precision": 0.5484434247461989,
+              "balanced_accuracy": 0.54451871657754,
+              "brier_score_calibrated": 0.31287615863520096,
+              "brier_score_raw": 0.31061124054911343,
+              "calibration_intercept_diagnostic": 0.09615518700731075,
+              "calibration_slope_diagnostic": 0.13572128647342593,
+              "confusion_matrix": [
+                [
+                  149,
+                  71
+                ],
+                [
+                  130,
+                  91
+                ]
+              ],
+              "ece_calibrated": 0.2397759612036729,
+              "ece_raw": 0.2208143537663464,
+              "f1": 0.4751958224543081,
+              "false_negative_rate": 0.5882352941176471,
+              "false_positive_rate": 0.32272727272727275,
+              "mcc": 0.09234651268206474,
+              "negative_count": 220,
+              "negative_predictive_value": 0.5340501792114696,
+              "positive_count": 221,
+              "positive_prevalence": 0.5011337868480725,
+              "precision": 0.5617283950617284,
+              "recall": 0.4117647058823529,
+              "sample_count": 441,
+              "sensitivity": 0.4117647058823529,
+              "specificity": 0.6772727272727272,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 441,
+            "similarity_maximum": 0.375,
+            "similarity_minimum": 0.2
+          }
+        },
+        "interpretation_warning": "Similarity slices are structural-novelty diagnostics. They do not prove a model is reliable within a band or clinical applicability.",
+        "method": "minimum_of_two_nearest_train_drug_ecfp_tanimoto_similarities"
+      },
+      "test_set_bootstrap_95ci": {
+        "confidence_level": 0.95,
+        "interpretation_warning": "These are within-split sample confidence intervals. They do not replace independent repeated-seed experiments or external validation.",
+        "method": "stratified_nonparametric_bootstrap",
+        "metrics": {
+          "auroc": {
+            "ci_95_lower": 0.5529464285714286,
+            "ci_95_upper": 0.6428187003968254,
+            "point_estimate": 0.5991666666666666,
+            "valid_resamples": 1000
+          },
+          "average_precision": {
+            "ci_95_lower": 0.5605833414410609,
+            "ci_95_upper": 0.6457249521362219,
+            "point_estimate": 0.5990953119830941,
+            "valid_resamples": 1000
+          },
+          "balanced_accuracy": {
+            "ci_95_lower": 0.5388660714285715,
+            "ci_95_upper": 0.6120297619047619,
+            "point_estimate": 0.5779166666666666,
+            "valid_resamples": 1000
+          },
+          "brier_score_calibrated": {
+            "ci_95_lower": 0.28294817235354697,
+            "ci_95_upper": 0.3297369266889492,
+            "point_estimate": 0.3051725704031679,
+            "valid_resamples": 1000
+          },
+          "ece_calibrated": {
+            "ci_95_lower": 0.20664933303392866,
+            "ci_95_upper": 0.2749201733201602,
+            "point_estimate": 0.23897946343411025,
+            "valid_resamples": 1000
+          },
+          "f1": {
+            "ci_95_lower": 0.493036858974359,
+            "ci_95_upper": 0.587036156859152,
+            "point_estimate": 0.5420875420875421,
+            "valid_resamples": 1000
+          },
+          "mcc": {
+            "ci_95_lower": 0.08029533193224045,
+            "ci_95_upper": 0.22822935996922944,
+            "point_estimate": 0.15842907028998374,
+            "valid_resamples": 1000
+          }
+        },
+        "resamples": 1000,
+        "seed": 53,
+        "status": "evaluated",
+        "stratification": "experimental_binary_label"
+      },
+      "threshold": 0.42850215989437923,
+      "uncertainty": {
+        "abstention_rate": 0.19339622641509435,
+        "alpha": 0.1,
+        "interpretation_warning": "Internal split-conformal sets require exchangeability for their marginal coverage statement. They are not clinical confidence, do not establish out-of-distribution safety, and do not make an unreported pair safe.",
+        "method": "split_conformal_binary_v1",
+        "observed_coverage": 0.6525157232704403,
+        "sample_count": 636
+      }
+    },
+    "S2": {
+      "accuracy": 0.7070255026974007,
+      "applicability_domain": {
+        "interpretation_warning": "This is nearest-training-drug structural similarity only. It does not measure DDI-pair novelty, prove prediction reliability, or establish clinical applicability.",
+        "minimum_tanimoto_similarity": 0.4,
+        "structural_ood_count": 5908,
+        "structural_ood_rate": 0.36218734673859737
+      },
+      "auroc": 0.7693222844237524,
+      "average_precision": 0.7698862625984295,
+      "balanced_accuracy": 0.7052095743326667,
+      "brier_score_calibrated": 0.21457305943515545,
+      "brier_score_raw": 0.21309451803948273,
+      "calibration_intercept_diagnostic": 0.164476954196346,
+      "calibration_slope_diagnostic": 0.4315057301362587,
+      "confusion_matrix": [
+        [
+          6604,
+          1720
+        ],
+        [
+          3059,
+          4929
+        ]
+      ],
+      "ece_calibrated": 0.1323642064388723,
+      "ece_raw": 0.12436554176815083,
+      "error_analysis": {
+        "false_negatives_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/error_analysis/s2_false_negatives.csv",
+        "false_positives_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/error_analysis/s2_false_positives.csv",
+        "interpretation_warning": "False positives are unreported pairs predicted as reported; they are not established safe pairs. False negatives are reported pairs predicted below the validation-selected research threshold.",
+        "maximum_rows_per_error_type": 100,
+        "method": "confidence_ranked_threshold_errors",
+        "saved_false_negatives": 100,
+        "saved_false_positives": 100,
+        "threshold": 0.42850215989437923,
+        "total_false_negatives": 3059,
+        "total_false_positives": 1720
+      },
+      "f1": 0.6734986677597868,
+      "false_negative_rate": 0.3829494241362043,
+      "false_positive_rate": 0.20663142719846228,
+      "inference_efficiency": {
+        "batch_count": 128,
+        "interpretation_warning": "Inference efficiency depends on the recorded hardware, batch size, PyTorch/PyG versions, and whether data are already in memory.",
+        "mean_batch_latency_milliseconds": 30.713727796872092,
+        "measurement_scope": "full_loader_inference_including_batching_and_device_transfer",
+        "pairs_per_second": 4149.20327622941,
+        "peak_cuda_memory_bytes": 133559296,
+        "sample_count": 16312,
+        "status": "measured",
+        "wall_clock_seconds": 3.931357157999628
+      },
+      "mcc": 0.4175211911018868,
+      "negative_count": 8324,
+      "negative_predictive_value": 0.6834316464865984,
+      "positive_count": 7988,
+      "positive_prevalence": 0.4897008337420304,
+      "precision": 0.7413144833809595,
+      "prediction_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/predictions/s2_predictions.csv",
+      "prediction_sha256": "2ead4dc11eb3e68666fde747893089577e7280f6a8d1e6b241e4af3756ee1c81",
+      "recall": 0.6170505758637957,
+      "sample_count": 16312,
+      "selective_prediction": {
+        "abstained_sample_count": 2216,
+        "abstention_rate": 0.13585090730750368,
+        "interpretation_warning": "Selective metrics describe only examples retained by the pre-fitted abstention rule. They must always be reported with coverage.",
+        "metrics": {
+          "accuracy": 0.7274404086265607,
+          "auroc": 0.7799715540784886,
+          "average_precision": 0.777424862356507,
+          "balanced_accuracy": 0.7200912441487484,
+          "brier_score_calibrated": 0.208912903773901,
+          "brier_score_raw": 0.208912903773901,
+          "calibration_intercept_diagnostic": 0.11486815679507278,
+          "calibration_slope_diagnostic": 0.42449342787551375,
+          "confusion_matrix": [
+            [
+              6386,
+              1029
+            ],
+            [
+              2813,
+              3868
+            ]
+          ],
+          "ece_calibrated": 0.13762597286988615,
+          "ece_raw": 0.13762597286988615,
+          "f1": 0.6681637588529971,
+          "false_negative_rate": 0.42104475377937434,
+          "false_positive_rate": 0.1387727579231288,
+          "mcc": 0.4616084106708276,
+          "negative_count": 7415,
+          "negative_predictive_value": 0.6942058919447766,
+          "positive_count": 6681,
+          "positive_prevalence": 0.47396424517593644,
+          "precision": 0.7898713498060037,
+          "recall": 0.5789552462206257,
+          "sample_count": 14096,
+          "sensitivity": 0.5789552462206257,
+          "specificity": 0.8612272420768712,
+          "status": "evaluated",
+          "threshold": 0.42850215989437923
+        },
+        "retained_coverage": 0.8641490926924963,
+        "retained_sample_count": 14096,
+        "rule": "pre_fitted_conformal_prediction_set_is_singleton",
+        "total_sample_count": 16312
+      },
+      "sensitivity": 0.6170505758637957,
+      "skipped_invalid_smiles": 0,
+      "specificity": 0.7933685728015377,
+      "status": "evaluated",
+      "structural_similarity_slices": {
+        "bands": {
+          "0.4_to_0.7": {
+            "metrics": {
+              "accuracy": 0.7203177257525084,
+              "auroc": 0.7934252058686273,
+              "average_precision": 0.8326371003580211,
+              "balanced_accuracy": 0.7277589383829586,
+              "brier_score_calibrated": 0.20780096804426665,
+              "brier_score_raw": 0.20392667265523018,
+              "calibration_intercept_diagnostic": 0.38128597918702034,
+              "calibration_slope_diagnostic": 0.46063489523343004,
+              "confusion_matrix": [
+                [
+                  2605,
+                  634
+                ],
+                [
+                  1373,
+                  2564
+                ]
+              ],
+              "ece_calibrated": 0.14273238547007808,
+              "ece_raw": 0.12602089075431083,
+              "f1": 0.7187105816398038,
+              "false_negative_rate": 0.348742697485395,
+              "false_positive_rate": 0.19573942574868786,
+              "mcc": 0.4560600051283708,
+              "negative_count": 3239,
+              "negative_predictive_value": 0.654851684263449,
+              "positive_count": 3937,
+              "positive_prevalence": 0.5486343366778149,
+              "precision": 0.8017510944340213,
+              "recall": 0.651257302514605,
+              "sample_count": 7176,
+              "sensitivity": 0.651257302514605,
+              "specificity": 0.8042605742513121,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 7176,
+            "similarity_maximum": 0.6538461538461539,
+            "similarity_minimum": 0.41379310344827586
+          },
+          "at_least_0.7": {
+            "metrics": {
+              "accuracy": 0.6840148698884758,
+              "auroc": 0.7531924771369298,
+              "average_precision": 0.6968439845708898,
+              "balanced_accuracy": 0.6754943629031631,
+              "brier_score_calibrated": 0.2314852150854576,
+              "brier_score_raw": 0.23181299969870406,
+              "calibration_intercept_diagnostic": -0.10077429221650612,
+              "calibration_slope_diagnostic": 0.3351088185193698,
+              "confusion_matrix": [
+                [
+                  1349,
+                  441
+                ],
+                [
+                  579,
+                  859
+                ]
+              ],
+              "ece_calibrated": 0.16858220825118883,
+              "ece_raw": 0.16578891188799594,
+              "f1": 0.6274653031409788,
+              "false_negative_rate": 0.40264255910987484,
+              "false_positive_rate": 0.24636871508379887,
+              "mcc": 0.35569186631302385,
+              "negative_count": 1790,
+              "negative_predictive_value": 0.6996887966804979,
+              "positive_count": 1438,
+              "positive_prevalence": 0.4454770755885997,
+              "precision": 0.6607692307692308,
+              "recall": 0.5973574408901252,
+              "sample_count": 3228,
+              "sensitivity": 0.5973574408901252,
+              "specificity": 0.7536312849162011,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 3228,
+            "similarity_maximum": 0.8431372549019608,
+            "similarity_minimum": 0.7058823529411765
+          },
+          "below_0.4": {
+            "metrics": {
+              "accuracy": 0.7034529451591063,
+              "auroc": 0.7453231101409028,
+              "average_precision": 0.7182463717343279,
+              "balanced_accuracy": 0.6902989430111031,
+              "brier_score_calibrated": 0.21355817950655748,
+              "brier_score_raw": 0.21400264256240592,
+              "calibration_intercept_diagnostic": 0.07905845201630704,
+              "calibration_slope_diagnostic": 0.4665323957239579,
+              "confusion_matrix": [
+                [
+                  2650,
+                  645
+                ],
+                [
+                  1107,
+                  1506
+                ]
+              ],
+              "ece_calibrated": 0.10924216231413159,
+              "ece_raw": 0.10718692543437347,
+              "f1": 0.6322418136020151,
+              "false_negative_rate": 0.42365097588978184,
+              "false_positive_rate": 0.19575113808801214,
+              "mcc": 0.39284658603169303,
+              "negative_count": 3295,
+              "negative_predictive_value": 0.7053500133084908,
+              "positive_count": 2613,
+              "positive_prevalence": 0.4422816519972918,
+              "precision": 0.700139470013947,
+              "recall": 0.5763490241102182,
+              "sample_count": 5908,
+              "sensitivity": 0.5763490241102182,
+              "specificity": 0.8042488619119879,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 5908,
+            "similarity_maximum": 0.36764705882352944,
+            "similarity_minimum": 0.1111111111111111
+          }
+        },
+        "interpretation_warning": "Similarity slices are structural-novelty diagnostics. They do not prove a model is reliable within a band or clinical applicability.",
+        "method": "minimum_of_two_nearest_train_drug_ecfp_tanimoto_similarities"
+      },
+      "test_set_bootstrap_95ci": {
+        "confidence_level": 0.95,
+        "interpretation_warning": "These are within-split sample confidence intervals. They do not replace independent repeated-seed experiments or external validation.",
+        "method": "stratified_nonparametric_bootstrap",
+        "metrics": {
+          "auroc": {
+            "ci_95_lower": 0.7622318883103006,
+            "ci_95_upper": 0.7762791763555352,
+            "point_estimate": 0.7693222844237524,
+            "valid_resamples": 1000
+          },
+          "average_precision": {
+            "ci_95_lower": 0.7618281639014491,
+            "ci_95_upper": 0.7779165354833701,
+            "point_estimate": 0.7698862625984295,
+            "valid_resamples": 1000
+          },
+          "balanced_accuracy": {
+            "ci_95_lower": 0.6988946057240594,
+            "ci_95_upper": 0.7119822265534295,
+            "point_estimate": 0.7052095743326667,
+            "valid_resamples": 1000
+          },
+          "brier_score_calibrated": {
+            "ci_95_lower": 0.21032238097610123,
+            "ci_95_upper": 0.21873457242771202,
+            "point_estimate": 0.21457305943515545,
+            "valid_resamples": 1000
+          },
+          "ece_calibrated": {
+            "ci_95_lower": 0.1270899050826678,
+            "ci_95_upper": 0.13877336406007287,
+            "point_estimate": 0.1323642064388723,
+            "valid_resamples": 1000
+          },
+          "f1": {
+            "ci_95_lower": 0.6653782503709342,
+            "ci_95_upper": 0.6819198099865768,
+            "point_estimate": 0.6734986677597868,
+            "valid_resamples": 1000
+          },
+          "mcc": {
+            "ci_95_lower": 0.40510055837159464,
+            "ci_95_upper": 0.431131138530089,
+            "point_estimate": 0.4175211911018868,
+            "valid_resamples": 1000
+          }
+        },
+        "resamples": 1000,
+        "seed": 53,
+        "status": "evaluated",
+        "stratification": "experimental_binary_label"
+      },
+      "threshold": 0.42850215989437923,
+      "uncertainty": {
+        "abstention_rate": 0.13585090730750368,
+        "alpha": 0.1,
+        "interpretation_warning": "Internal split-conformal sets require exchangeability for their marginal coverage statement. They are not clinical confidence, do not establish out-of-distribution safety, and do not make an unreported pair safe.",
+        "method": "split_conformal_binary_v1",
+        "observed_coverage": 0.7644678764100049,
+        "sample_count": 16312
+      }
+    },
+    "S2-dev": {
+      "accuracy": 0.6594875121634771,
+      "applicability_domain": {
+        "interpretation_warning": "This is nearest-training-drug structural similarity only. It does not measure DDI-pair novelty, prove prediction reliability, or establish clinical applicability.",
+        "minimum_tanimoto_similarity": 0.4,
+        "structural_ood_count": 6794,
+        "structural_ood_rate": 0.4407395394096659
+      },
+      "auroc": 0.7238991936402114,
+      "average_precision": 0.7234484209495087,
+      "balanced_accuracy": 0.6608632834643962,
+      "brier_score_calibrated": 0.2448012545719308,
+      "brier_score_raw": 0.2441895361196643,
+      "calibration_intercept_diagnostic": 0.09978369365489446,
+      "calibration_slope_diagnostic": 0.30545925702864707,
+      "confusion_matrix": [
+        [
+          5392,
+          2127
+        ],
+        [
+          3122,
+          4774
+        ]
+      ],
+      "ece_calibrated": 0.17037996035227548,
+      "ece_raw": 0.16698237836735286,
+      "error_analysis": {
+        "false_negatives_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/error_analysis/s2-dev_false_negatives.csv",
+        "false_positives_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/error_analysis/s2-dev_false_positives.csv",
+        "interpretation_warning": "False positives are unreported pairs predicted as reported; they are not established safe pairs. False negatives are reported pairs predicted below the validation-selected research threshold.",
+        "maximum_rows_per_error_type": 100,
+        "method": "confidence_ranked_threshold_errors",
+        "saved_false_negatives": 100,
+        "saved_false_positives": 100,
+        "threshold": 0.42850215989437923,
+        "total_false_negatives": 3122,
+        "total_false_positives": 2127
+      },
+      "f1": 0.645265932283571,
+      "false_negative_rate": 0.3953900709219858,
+      "false_positive_rate": 0.282883362149222,
+      "inference_efficiency": {
+        "batch_count": 121,
+        "interpretation_warning": "Inference efficiency depends on the recorded hardware, batch size, PyTorch/PyG versions, and whether data are already in memory.",
+        "mean_batch_latency_milliseconds": 36.70177395867563,
+        "measurement_scope": "full_loader_inference_including_batching_and_device_transfer",
+        "pairs_per_second": 3471.131786662911,
+        "peak_cuda_memory_bytes": 146200064,
+        "sample_count": 15415,
+        "status": "measured",
+        "wall_clock_seconds": 4.440914648999751
+      },
+      "mcc": 0.32340572256970274,
+      "negative_count": 7519,
+      "negative_predictive_value": 0.6333098426121682,
+      "positive_count": 7896,
+      "positive_prevalence": 0.5122283490107039,
+      "precision": 0.6917837994493552,
+      "prediction_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/predictions/s2-dev_predictions.csv",
+      "prediction_sha256": "70467ff35347224da0d1b9c8f3904f0f4979cd140025c1c25df4bd67dfe0293a",
+      "recall": 0.6046099290780141,
+      "sample_count": 15415,
+      "selective_prediction": {
+        "abstained_sample_count": 2146,
+        "abstention_rate": 0.1392150502757055,
+        "interpretation_warning": "Selective metrics describe only examples retained by the pre-fitted abstention rule. They must always be reported with coverage.",
+        "metrics": {
+          "accuracy": 0.6770668475393775,
+          "auroc": 0.7395386741100971,
+          "average_precision": 0.7338420676064793,
+          "balanced_accuracy": 0.6779824520706172,
+          "brier_score_calibrated": 0.24374796322062683,
+          "brier_score_raw": 0.24374796322062683,
+          "calibration_intercept_diagnostic": 0.06801755576246189,
+          "calibration_slope_diagnostic": 0.3034282286694297,
+          "confusion_matrix": [
+            [
+              5167,
+              1411
+            ],
+            [
+              2874,
+              3817
+            ]
+          ],
+          "ece_calibrated": 0.18695570037696693,
+          "ece_raw": 0.18695570037696693,
+          "f1": 0.6404899739911066,
+          "false_negative_rate": 0.42953220744283366,
+          "false_positive_rate": 0.2145028884159319,
+          "mcc": 0.3642309196874362,
+          "negative_count": 6578,
+          "negative_predictive_value": 0.6425817684367616,
+          "positive_count": 6691,
+          "positive_prevalence": 0.5042580450674504,
+          "precision": 0.7301071155317521,
+          "recall": 0.5704677925571664,
+          "sample_count": 13269,
+          "sensitivity": 0.5704677925571664,
+          "specificity": 0.7854971115840681,
+          "status": "evaluated",
+          "threshold": 0.42850215989437923
+        },
+        "retained_coverage": 0.8607849497242945,
+        "retained_sample_count": 13269,
+        "rule": "pre_fitted_conformal_prediction_set_is_singleton",
+        "total_sample_count": 15415
+      },
+      "sensitivity": 0.6046099290780141,
+      "skipped_invalid_smiles": 0,
+      "specificity": 0.7171166378507781,
+      "status": "evaluated",
+      "structural_similarity_slices": {
+        "bands": {
+          "0.4_to_0.7": {
+            "metrics": {
+              "accuracy": 0.6522315510384445,
+              "auroc": 0.7202612660681241,
+              "average_precision": 0.7546607973362711,
+              "balanced_accuracy": 0.6515756850435976,
+              "brier_score_calibrated": 0.2443636529718,
+              "brier_score_raw": 0.24437290450410454,
+              "calibration_intercept_diagnostic": 0.1474824388799379,
+              "calibration_slope_diagnostic": 0.2999409913262264,
+              "confusion_matrix": [
+                [
+                  1951,
+                  1071
+                ],
+                [
+                  1290,
+                  2477
+                ]
+              ],
+              "ece_calibrated": 0.1728237029786659,
+              "ece_raw": 0.1736451711232712,
+              "f1": 0.6772385509227614,
+              "false_negative_rate": 0.34244757101141493,
+              "false_positive_rate": 0.3544010589013898,
+              "mcc": 0.3016291111893534,
+              "negative_count": 3022,
+              "negative_predictive_value": 0.6019746991669238,
+              "positive_count": 3767,
+              "positive_prevalence": 0.5548681690970688,
+              "precision": 0.6981397970687712,
+              "recall": 0.6575524289885851,
+              "sample_count": 6789,
+              "sensitivity": 0.6575524289885851,
+              "specificity": 0.6455989410986102,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 6789,
+            "similarity_maximum": 0.6883116883116883,
+            "similarity_minimum": 0.4222222222222222
+          },
+          "at_least_0.7": {
+            "metrics": {
+              "accuracy": 0.5709606986899564,
+              "auroc": 0.6462194583693667,
+              "average_precision": 0.6169721045869792,
+              "balanced_accuracy": 0.5634216913009207,
+              "brier_score_calibrated": 0.324329514613394,
+              "brier_score_raw": 0.32575770639437107,
+              "calibration_intercept_diagnostic": -0.04335528252835317,
+              "calibration_slope_diagnostic": 0.1490032564309889,
+              "confusion_matrix": [
+                [
+                  669,
+                  302
+                ],
+                [
+                  484,
+                  377
+                ]
+              ],
+              "ece_calibrated": 0.2955567479435091,
+              "ece_raw": 0.2960002574962421,
+              "f1": 0.4896103896103896,
+              "false_negative_rate": 0.562137049941928,
+              "false_positive_rate": 0.3110195674562307,
+              "mcc": 0.13107789699393613,
+              "negative_count": 971,
+              "negative_predictive_value": 0.5802254986990459,
+              "positive_count": 861,
+              "positive_prevalence": 0.46997816593886466,
+              "precision": 0.5552282768777614,
+              "recall": 0.437862950058072,
+              "sample_count": 1832,
+              "sensitivity": 0.437862950058072,
+              "specificity": 0.6889804325437693,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 1832,
+            "similarity_maximum": 0.92,
+            "similarity_minimum": 0.7391304347826086
+          },
+          "below_0.4": {
+            "metrics": {
+              "accuracy": 0.6906093612010598,
+              "auroc": 0.7498005722136867,
+              "average_precision": 0.7266067542185082,
+              "balanced_accuracy": 0.6868376272502015,
+              "brier_score_calibrated": 0.22379376338372473,
+              "brier_score_raw": 0.22201147078183275,
+              "calibration_intercept_diagnostic": 0.12054871761459376,
+              "calibration_slope_diagnostic": 0.4035206674347125,
+              "confusion_matrix": [
+                [
+                  2772,
+                  754
+                ],
+                [
+                  1348,
+                  1920
+                ]
+              ],
+              "ece_calibrated": 0.13607100273564351,
+              "ece_raw": 0.12553485782215779,
+              "f1": 0.6462470548636823,
+              "false_negative_rate": 0.412484700122399,
+              "false_positive_rate": 0.21384004537719795,
+              "mcc": 0.3821617415568713,
+              "negative_count": 3526,
+              "negative_predictive_value": 0.6728155339805825,
+              "positive_count": 3268,
+              "positive_prevalence": 0.4810126582278481,
+              "precision": 0.7180254300673149,
+              "recall": 0.587515299877601,
+              "sample_count": 6794,
+              "sensitivity": 0.587515299877601,
+              "specificity": 0.7861599546228021,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 6794,
+            "similarity_maximum": 0.375,
+            "similarity_minimum": 0.2
+          }
+        },
+        "interpretation_warning": "Similarity slices are structural-novelty diagnostics. They do not prove a model is reliable within a band or clinical applicability.",
+        "method": "minimum_of_two_nearest_train_drug_ecfp_tanimoto_similarities"
+      },
+      "test_set_bootstrap_95ci": {
+        "confidence_level": 0.95,
+        "interpretation_warning": "These are within-split sample confidence intervals. They do not replace independent repeated-seed experiments or external validation.",
+        "method": "stratified_nonparametric_bootstrap",
+        "metrics": {
+          "auroc": {
+            "ci_95_lower": 0.7165178908298908,
+            "ci_95_upper": 0.7322999227269976,
+            "point_estimate": 0.7238991936402114,
+            "valid_resamples": 1000
+          },
+          "average_precision": {
+            "ci_95_lower": 0.7147175132857697,
+            "ci_95_upper": 0.7326624252153493,
+            "point_estimate": 0.7234484209495087,
+            "valid_resamples": 1000
+          },
+          "balanced_accuracy": {
+            "ci_95_lower": 0.6538734856751952,
+            "ci_95_upper": 0.6685239467395196,
+            "point_estimate": 0.6608632834643962,
+            "valid_resamples": 1000
+          },
+          "brier_score_calibrated": {
+            "ci_95_lower": 0.23976063132218506,
+            "ci_95_upper": 0.24941098889801253,
+            "point_estimate": 0.2448012545719308,
+            "valid_resamples": 1000
+          },
+          "ece_calibrated": {
+            "ci_95_lower": 0.16333247016923144,
+            "ci_95_upper": 0.17720565189737816,
+            "point_estimate": 0.17037996035227548,
+            "valid_resamples": 1000
+          },
+          "f1": {
+            "ci_95_lower": 0.6370478095828952,
+            "ci_95_upper": 0.6538438079016434,
+            "point_estimate": 0.645265932283571,
+            "valid_resamples": 1000
+          },
+          "mcc": {
+            "ci_95_lower": 0.3094156856947506,
+            "ci_95_upper": 0.33888205440360286,
+            "point_estimate": 0.32340572256970274,
+            "valid_resamples": 1000
+          }
+        },
+        "resamples": 1000,
+        "seed": 53,
+        "status": "evaluated",
+        "stratification": "experimental_binary_label"
+      },
+      "threshold": 0.42850215989437923,
+      "uncertainty": {
+        "abstention_rate": 0.1392150502757055,
+        "alpha": 0.1,
+        "interpretation_warning": "Internal split-conformal sets require exchangeability for their marginal coverage statement. They are not clinical confidence, do not establish out-of-distribution safety, and do not make an unreported pair safe.",
+        "method": "split_conformal_binary_v1",
+        "observed_coverage": 0.7220240025948751,
+        "sample_count": 15415
+      }
+    },
+    "Transductive": {
+      "accuracy": 0.843293195183422,
+      "applicability_domain": {
+        "interpretation_warning": "This is nearest-training-drug structural similarity only. It does not measure DDI-pair novelty, prove prediction reliability, or establish clinical applicability.",
+        "minimum_tanimoto_similarity": 0.4,
+        "structural_ood_count": 0,
+        "structural_ood_rate": 0.0
+      },
+      "auroc": 0.9257119456965318,
+      "average_precision": 0.934876430729952,
+      "balanced_accuracy": 0.8432956922970756,
+      "brier_score_calibrated": 0.10888773227065232,
+      "brier_score_raw": 0.11037366866644731,
+      "calibration_intercept_diagnostic": 0.04320231778085347,
+      "calibration_slope_diagnostic": 1.0580653307904697,
+      "confusion_matrix": [
+        [
+          7451,
+          1479
+        ],
+        [
+          1319,
+          7606
+        ]
+      ],
+      "ece_calibrated": 0.010981053371741349,
+      "ece_raw": 0.02907884407663424,
+      "error_analysis": {
+        "false_negatives_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/error_analysis/transductive_false_negatives.csv",
+        "false_positives_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/error_analysis/transductive_false_positives.csv",
+        "interpretation_warning": "False positives are unreported pairs predicted as reported; they are not established safe pairs. False negatives are reported pairs predicted below the validation-selected research threshold.",
+        "maximum_rows_per_error_type": 100,
+        "method": "confidence_ranked_threshold_errors",
+        "saved_false_negatives": 100,
+        "saved_false_positives": 100,
+        "threshold": 0.42850215989437923,
+        "total_false_negatives": 1319,
+        "total_false_positives": 1479
+      },
+      "f1": 0.8446418656302055,
+      "false_negative_rate": 0.14778711484593837,
+      "false_positive_rate": 0.1656215005599104,
+      "inference_efficiency": {
+        "batch_count": 140,
+        "interpretation_warning": "Inference efficiency depends on the recorded hardware, batch size, PyTorch/PyG versions, and whether data are already in memory.",
+        "mean_batch_latency_milliseconds": 30.908306635715885,
+        "measurement_scope": "full_loader_inference_including_batching_and_device_transfer",
+        "pairs_per_second": 4126.260160054879,
+        "peak_cuda_memory_bytes": 127943168,
+        "sample_count": 17855,
+        "status": "measured",
+        "wall_clock_seconds": 4.327162929000224
+      },
+      "mcc": 0.6866982314430871,
+      "negative_count": 8930,
+      "negative_predictive_value": 0.8496009122006841,
+      "positive_count": 8925,
+      "positive_prevalence": 0.49985998319798375,
+      "precision": 0.8372041827187672,
+      "prediction_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/predictions/transductive_predictions.csv",
+      "prediction_sha256": "ee2cc5e4fa67f3db2b7b887c081ae19ec6931dd0fed8e4f689c713cf82de6e94",
+      "recall": 0.8522128851540616,
+      "sample_count": 17855,
+      "selective_prediction": {
+        "abstained_sample_count": 2276,
+        "abstention_rate": 0.12747129655558667,
+        "interpretation_warning": "Selective metrics describe only examples retained by the pre-fitted abstention rule. They must always be reported with coverage.",
+        "metrics": {
+          "accuracy": 0.8870274086911869,
+          "auroc": 0.944332695720379,
+          "average_precision": 0.9523691766172746,
+          "balanced_accuracy": 0.8870214466575652,
+          "brier_score_calibrated": 0.08901145127419954,
+          "brier_score_raw": 0.08901145127419954,
+          "calibration_intercept_diagnostic": 0.045240720345277,
+          "calibration_slope_diagnostic": 1.0578646773918567,
+          "confusion_matrix": [
+            [
+              7152,
+              639
+            ],
+            [
+              1121,
+              6667
+            ]
+          ],
+          "ece_calibrated": 0.011488487247315408,
+          "ece_raw": 0.011488487247315408,
+          "f1": 0.8833973764409699,
+          "false_negative_rate": 0.14393939393939395,
+          "false_positive_rate": 0.08201771274547555,
+          "mcc": 0.775538308549368,
+          "negative_count": 7791,
+          "negative_predictive_value": 0.8644989725613441,
+          "positive_count": 7788,
+          "positive_prevalence": 0.4999037165414982,
+          "precision": 0.9125376402956474,
+          "recall": 0.8560606060606061,
+          "sample_count": 15579,
+          "sensitivity": 0.8560606060606061,
+          "specificity": 0.9179822872545245,
+          "status": "evaluated",
+          "threshold": 0.42850215989437923
+        },
+        "retained_coverage": 0.8725287034444134,
+        "retained_sample_count": 15579,
+        "rule": "pre_fitted_conformal_prediction_set_is_singleton",
+        "total_sample_count": 17855
+      },
+      "sensitivity": 0.8522128851540616,
+      "skipped_invalid_smiles": 0,
+      "specificity": 0.8343784994400896,
+      "status": "evaluated",
+      "structural_similarity_slices": {
+        "bands": {
+          "0.4_to_0.7": {
+            "metrics": null,
+            "sample_count": 0
+          },
+          "at_least_0.7": {
+            "metrics": {
+              "accuracy": 0.843293195183422,
+              "auroc": 0.9257119456965318,
+              "average_precision": 0.934876430729952,
+              "balanced_accuracy": 0.8432956922970756,
+              "brier_score_calibrated": 0.10888773227065232,
+              "brier_score_raw": 0.11037366866644731,
+              "calibration_intercept_diagnostic": 0.04320231778085347,
+              "calibration_slope_diagnostic": 1.0580653307904697,
+              "confusion_matrix": [
+                [
+                  7451,
+                  1479
+                ],
+                [
+                  1319,
+                  7606
+                ]
+              ],
+              "ece_calibrated": 0.010981053371741349,
+              "ece_raw": 0.02907884407663424,
+              "f1": 0.8446418656302055,
+              "false_negative_rate": 0.14778711484593837,
+              "false_positive_rate": 0.1656215005599104,
+              "mcc": 0.6866982314430871,
+              "negative_count": 8930,
+              "negative_predictive_value": 0.8496009122006841,
+              "positive_count": 8925,
+              "positive_prevalence": 0.49985998319798375,
+              "precision": 0.8372041827187672,
+              "recall": 0.8522128851540616,
+              "sample_count": 17855,
+              "sensitivity": 0.8522128851540616,
+              "specificity": 0.8343784994400896,
+              "status": "evaluated",
+              "threshold": 0.42850215989437923
+            },
+            "sample_count": 17855,
+            "similarity_maximum": 1.0,
+            "similarity_minimum": 1.0
+          },
+          "below_0.4": {
+            "metrics": null,
+            "sample_count": 0
+          }
+        },
+        "interpretation_warning": "Similarity slices are structural-novelty diagnostics. They do not prove a model is reliable within a band or clinical applicability.",
+        "method": "minimum_of_two_nearest_train_drug_ecfp_tanimoto_similarities"
+      },
+      "test_set_bootstrap_95ci": {
+        "confidence_level": 0.95,
+        "interpretation_warning": "These are within-split sample confidence intervals. They do not replace independent repeated-seed experiments or external validation.",
+        "method": "stratified_nonparametric_bootstrap",
+        "metrics": {
+          "auroc": {
+            "ci_95_lower": 0.9224065874950204,
+            "ci_95_upper": 0.929323855634079,
+            "point_estimate": 0.9257119456965318,
+            "valid_resamples": 1000
+          },
+          "average_precision": {
+            "ci_95_lower": 0.9320370894151183,
+            "ci_95_upper": 0.9380113827220659,
+            "point_estimate": 0.934876430729952,
+            "valid_resamples": 1000
+          },
+          "balanced_accuracy": {
+            "ci_95_lower": 0.8387591891179765,
+            "ci_95_upper": 0.8483357682378662,
+            "point_estimate": 0.8432956922970756,
+            "valid_resamples": 1000
+          },
+          "brier_score_calibrated": {
+            "ci_95_lower": 0.10612944999433256,
+            "ci_95_upper": 0.11130877714723686,
+            "point_estimate": 0.10888773227065232,
+            "valid_resamples": 1000
+          },
+          "ece_calibrated": {
+            "ci_95_lower": 0.008687304177008975,
+            "ci_95_upper": 0.016401877214466606,
+            "point_estimate": 0.010981053371741349,
+            "valid_resamples": 1000
+          },
+          "f1": {
+            "ci_95_lower": 0.8400551086401987,
+            "ci_95_upper": 0.8497585290738201,
+            "point_estimate": 0.8446418656302055,
+            "valid_resamples": 1000
+          },
+          "mcc": {
+            "ci_95_lower": 0.6776274130667407,
+            "ci_95_upper": 0.6967510182722354,
+            "point_estimate": 0.6866982314430871,
+            "valid_resamples": 1000
+          }
+        },
+        "resamples": 1000,
+        "seed": 53,
+        "status": "evaluated",
+        "stratification": "experimental_binary_label"
+      },
+      "threshold": 0.42850215989437923,
+      "uncertainty": {
+        "abstention_rate": 0.12747129655558667,
+        "alpha": 0.1,
+        "interpretation_warning": "Internal split-conformal sets require exchangeability for their marginal coverage statement. They are not clinical confidence, do not establish out-of-distribution safety, and do not make an unreported pair safe.",
+        "method": "split_conformal_binary_v1",
+        "observed_coverage": 0.9014281713805656,
+        "sample_count": 17855
+      }
+    }
+  },
+  "results_base": "/content/drive/MyDrive/pxddi-results",
+  "run_id": "20260823T210811Z",
+  "runtime_environment": {
+    "cuda_available": true,
+    "cuda_version": "12.8",
+    "gpu_name": "Tesla T4",
+    "package_versions": {
+      "matplotlib": "3.10.0",
+      "numpy": "2.1.3",
+      "pandas": "2.2.3",
+      "rdkit": "2026.3.5",
+      "scikit_learn": "1.6.1",
+      "torch": "2.11.0+cu128",
+      "torch_geometric": "2.7.0"
+    },
+    "platform": "Linux-6.6.122+-x86_64-with-glibc2.35",
+    "python_implementation": "CPython",
+    "python_version": "3.13.15"
+  },
+  "split_manifest": {
+    "posthoc_validation": {
+      "label_counts": {
+        "0.0": 1786,
+        "1.0": 1785
+      },
+      "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/splits/posthoc_validation.csv",
+      "rows": 3571,
+      "sha256": "60c7b8ed5d51e64072e9252fc3d3a4362672f33a65b57c37c89871e6c2288f25"
+    },
+    "s1_dev": {
+      "label_counts": {
+        "0.0": 300,
+        "1.0": 336
+      },
+      "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/splits/s1_dev.csv",
+      "rows": 636,
+      "sha256": "0f31ed1ee1e0ed839307e134d6e8e9119244fa9a491881ec106097fc940f18c3"
+    },
+    "s1_test": {
+      "label_counts": {
+        "0.0": 390,
+        "1.0": 357
+      },
+      "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/splits/s1_test.csv",
+      "rows": 747,
+      "sha256": "3604d990839b9d7b31b04860286de5d8c5f0e7bba1916d9797e4ddb11e070551"
+    },
+    "s2_dev": {
+      "label_counts": {
+        "0.0": 7519,
+        "1.0": 7896
+      },
+      "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/splits/s2_dev.csv",
+      "rows": 15415,
+      "sha256": "5675bbde651f39ad13c4641112fbeddc719e0c57656517f277783ab692d04959"
+    },
+    "s2_test": {
+      "label_counts": {
+        "0.0": 8324,
+        "1.0": 7988
+      },
+      "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/splits/s2_test.csv",
+      "rows": 16312,
+      "sha256": "38f7afe51fe759cb22374c665f2664aee992befff13a71068d6ef4a44bdd93ba"
+    },
+    "transductive_test": {
+      "label_counts": {
+        "0.0": 8930,
+        "1.0": 8925
+      },
+      "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/splits/transductive_test.csv",
+      "rows": 17855,
+      "sha256": "fd469994d7f704a557153504c55268a1992e003062618aa6d4aa96f4c5ed9cee"
+    },
+    "transductive_train": {
+      "label_counts": {
+        "0.0": 32148,
+        "1.0": 32128
+      },
+      "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/splits/transductive_train.csv",
+      "rows": 64276,
+      "sha256": "2ba229ee2b2d5dc743c6d16fb3eee55ab00c93fa08bfdf83720de1105321a93c"
+    },
+    "validation": {
+      "label_counts": {
+        "0.0": 1786,
+        "1.0": 1785
+      },
+      "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/splits/validation.csv",
+      "rows": 3571,
+      "sha256": "d0f398611eb56b193c9d62b0d0d13095fa88a6749cdd8875a4be0d1647dbca8e"
+    }
+  },
+  "split_seed": 53,
+  "toxicity_bridge": {
+    "conflict_policy": "exclude_conflicting_structures",
+    "conflict_report_path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/audits/toxicity_bridge_conflicts.csv",
+    "conflicting_canonical_structures": 58,
+    "duplicate_canonical_structures": 58,
+    "excluded_conflicting_structures": 58,
+    "resolved_unique_canonical_structures": 281,
+    "rows_with_canonical_smiles": 402,
+    "source_bridge_sha256": "99c2fd75a06f03615874c9b3f43a0bd5277c68abde6fd963d163b037065f4732",
+    "source_rows": 500,
+    "unique_canonical_structures": 339
+  },
+  "training_history": {
+    "epoch_count": 46,
+    "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/training_history.csv",
+    "sha256": "f8bf60286ee7a37a739071bb03b143fe61dca111ef1d585cb6333f434dbdc194"
+  },
+  "uncertainty": {
+    "applicability_domain": {
+      "fingerprint": "ECFP/Morgan",
+      "include_chirality": true,
+      "interpretation_warning": "This is nearest-training-drug structural similarity only. It does not measure DDI-pair novelty, prove prediction reliability, or establish clinical applicability.",
+      "method": "nearest_train_ecfp_tanimoto_v1",
+      "minimum_tanimoto_similarity": 0.4,
+      "num_bits": 1024,
+      "radius": 2,
+      "reference_unique_training_drugs": 543
+    },
+    "conformal": {
+      "alpha": 0.1,
+      "fitted_on": "posthoc_validation_conformal_partition",
+      "interpretation_warning": "Internal split-conformal sets require exchangeability for their marginal coverage statement. They are not clinical confidence, do not establish out-of-distribution safety, and do not make an unreported pair safe.",
+      "method": "split_conformal_binary_v1",
+      "nonconformity_threshold": 0.6115792267401392,
+      "quantile_rank": 1072,
+      "status": "fitted",
+      "validation_sample_count": 1190
+    },
+    "conformal_validation_artifact": {
+      "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/uncertainty/conformal_validation_nonconformity.csv",
+      "rows": 1190,
+      "sha256": "55c4bfd62946f46015bc944c03f094ff1880925e2481e758d3c4952a4322daac",
+      "status": "saved"
+    },
+    "posthoc_validation_partition": {
+      "independent_roles": true,
+      "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/uncertainty/posthoc_validation_partition.csv",
+      "reason": null,
+      "roles": {
+        "calibration": {
+          "negative_count": 596,
+          "positive_count": 595,
+          "rows": 1191
+        },
+        "conformal": {
+          "negative_count": 595,
+          "positive_count": 595,
+          "rows": 1190
+        },
+        "threshold": {
+          "negative_count": 595,
+          "positive_count": 595,
+          "rows": 1190
+        }
+      },
+      "sha256": "fc40733280a682329e3a3f863de5a401e4930c38cafbb23df8fc62112f4aa168",
+      "status": "stratified_disjoint_three_way"
+    },
+    "validation_role_partition": {
+      "independent_from_early_stopping": true,
+      "model_selection_label_counts": {
+        "0": 1786,
+        "1": 1785
+      },
+      "model_selection_rows": 3571,
+      "posthoc_label_counts": {
+        "0": 1786,
+        "1": 1785
+      },
+      "posthoc_roles": [
+        "calibration",
+        "threshold",
+        "conformal"
+      ],
+      "posthoc_rows": 3571,
+      "requested_model_selection_fraction": 0.5,
+      "seed": 53,
+      "source_label_counts": {
+        "0": 3572,
+        "1": 3570
+      },
+      "source_rows": 7142,
+      "status": "stratified_disjoint_model_selection_and_posthoc"
+    }
+  },
+  "validation_predictions": {
+    "path": "backend/experiments/study_20260823T204046Z/graph_fp_fusion_multitask/seed_53/artifacts/run_20260823T210811Z/predictions/validation_predictions.csv",
+    "purpose": "Raw member scores from validation reserved before training. They were not used for early stopping; a fixed-split ensemble combines them before its own calibrator, threshold, and conformal rule are fitted.",
+    "rows": 3571,
+    "sha256": "7a54c6a3d920f81e2749531bbe161a65e3cb38b6af8b292160568921f143fa9f",
+    "split_role": "posthoc_validation_reserved_before_training"
+  }
+}

@@ -126,6 +126,8 @@ def smiles_to_graph(
     feature_schema: str = FEATURE_SCHEMA_LEGACY,
     include_motif_features: bool = False,
     include_fingerprint_features: bool = False,
+    target_features: np.ndarray | None = None,
+    genomic_features: np.ndarray | None = None,
 ):
     """Convert a graph-compatible SMILES into a PyG graph under one schema."""
     reason = graph_compatibility_reason(smiles)
@@ -164,4 +166,8 @@ def smiles_to_graph(
         vector = np.zeros(1024, dtype=np.float32)
         DataStructs.ConvertToNumpyArray(bit_vector, vector)
         graph.fingerprint_features = torch.tensor(vector, dtype=torch.float).unsqueeze(0)
+    if target_features is not None:
+        graph.target_features = torch.tensor(target_features, dtype=torch.float).unsqueeze(0)
+    if genomic_features is not None:
+        graph.genomic_features = torch.tensor(genomic_features, dtype=torch.float).unsqueeze(0)
     return graph

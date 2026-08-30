@@ -1,0 +1,74 @@
+{
+  "posthoc_validation": {
+    "label_counts": {
+      "0.0": 1799,
+      "1.0": 1720
+    },
+    "path": "backend/experiments/study_20260823T225208Z/graph_fp_fusion_multitask/seed_71/artifacts/run_20260823T225225Z/splits/posthoc_validation.csv",
+    "rows": 3519,
+    "sha256": "71742f9c42d48ba647a648d984f75890e1456499954bd078b4707ceaa817ca26"
+  },
+  "s1_dev": {
+    "label_counts": {
+      "0.0": 321,
+      "1.0": 286
+    },
+    "path": "backend/experiments/study_20260823T225208Z/graph_fp_fusion_multitask/seed_71/artifacts/run_20260823T225225Z/splits/s1_dev.csv",
+    "rows": 607,
+    "sha256": "57a764fd20362ecd15b1e9e9a77349d87138967a114b6ab882f89e6a6efa475d"
+  },
+  "s1_test": {
+    "label_counts": {
+      "0.0": 281,
+      "1.0": 568
+    },
+    "path": "backend/experiments/study_20260823T225208Z/graph_fp_fusion_multitask/seed_71/artifacts/run_20260823T225225Z/splits/s1_test.csv",
+    "rows": 849,
+    "sha256": "e47258b39795897e99a3e5af93806913339ca6f16ac4ff59ecf42d39b1732963"
+  },
+  "s2_dev": {
+    "label_counts": {
+      "0.0": 8054,
+      "1.0": 6986
+    },
+    "path": "backend/experiments/study_20260823T225208Z/graph_fp_fusion_multitask/seed_71/artifacts/run_20260823T225225Z/splits/s2_dev.csv",
+    "rows": 15040,
+    "sha256": "cd694fc48a00cf2bcb1ab36593c2431c3ecc94b66cf7c12260756777e189d463"
+  },
+  "s2_test": {
+    "label_counts": {
+      "0.0": 7560,
+      "1.0": 10213
+    },
+    "path": "backend/experiments/study_20260823T225208Z/graph_fp_fusion_multitask/seed_71/artifacts/run_20260823T225225Z/splits/s2_test.csv",
+    "rows": 17773,
+    "sha256": "039afe1b0958c0bac91bb1c27d8601a83d21384577f07b2e4899973f82fa13d8"
+  },
+  "transductive_test": {
+    "label_counts": {
+      "0.0": 8994,
+      "1.0": 8600
+    },
+    "path": "backend/experiments/study_20260823T225208Z/graph_fp_fusion_multitask/seed_71/artifacts/run_20260823T225225Z/splits/transductive_test.csv",
+    "rows": 17594,
+    "sha256": "2918d0c16e1443b600febd602443c637be64d726e5a32c07275dacded8749fa4"
+  },
+  "transductive_train": {
+    "label_counts": {
+      "0.0": 32379,
+      "1.0": 30957
+    },
+    "path": "backend/experiments/study_20260823T225208Z/graph_fp_fusion_multitask/seed_71/artifacts/run_20260823T225225Z/splits/transductive_train.csv",
+    "rows": 63336,
+    "sha256": "ee99b9b5e02b5b04dafc3fac69bd856af1540bb570b7346821a4ed303455f7d4"
+  },
+  "validation": {
+    "label_counts": {
+      "0.0": 1799,
+      "1.0": 1720
+    },
+    "path": "backend/experiments/study_20260823T225208Z/graph_fp_fusion_multitask/seed_71/artifacts/run_20260823T225225Z/splits/validation.csv",
+    "rows": 3519,
+    "sha256": "9576a285767fb205f72d804913b0126338c273356dc91aeb9d943cd56d4025a4"
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "posthoc_validation": {
+    "label_counts": {
+      "0.0": 1786,
+      "1.0": 1785
+    },
+    "path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260823T124017Z/legacy_gat_multitask/seed_53/artifacts/run_20260823T135650Z/splits/posthoc_validation.csv",
+    "rows": 3571,
+    "sha256": "60c7b8ed5d51e64072e9252fc3d3a4362672f33a65b57c37c89871e6c2288f25"
+  },
+  "s1_dev": {
+    "label_counts": {
+      "0.0": 300,
+      "1.0": 336
+    },
+    "path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260823T124017Z/legacy_gat_multitask/seed_53/artifacts/run_20260823T135650Z/splits/s1_dev.csv",
+    "rows": 636,
+    "sha256": "0f31ed1ee1e0ed839307e134d6e8e9119244fa9a491881ec106097fc940f18c3"
+  },
+  "s1_test": {
+    "label_counts": {
+      "0.0": 390,
+      "1.0": 357
+    },
+    "path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260823T124017Z/legacy_gat_multitask/seed_53/artifacts/run_20260823T135650Z/splits/s1_test.csv",
+    "rows": 747,
+    "sha256": "3604d990839b9d7b31b04860286de5d8c5f0e7bba1916d9797e4ddb11e070551"
+  },
+  "s2_dev": {
+    "label_counts": {
+      "0.0": 7519,
+      "1.0": 7896
+    },
+    "path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260823T124017Z/legacy_gat_multitask/seed_53/artifacts/run_20260823T135650Z/splits/s2_dev.csv",
+    "rows": 15415,
+    "sha256": "5675bbde651f39ad13c4641112fbeddc719e0c57656517f277783ab692d04959"
+  },
+  "s2_test": {
+    "label_counts": {
+      "0.0": 8324,
+      "1.0": 7988
+    },
+    "path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260823T124017Z/legacy_gat_multitask/seed_53/artifacts/run_20260823T135650Z/splits/s2_test.csv",
+    "rows": 16312,
+    "sha256": "38f7afe51fe759cb22374c665f2664aee992befff13a71068d6ef4a44bdd93ba"
+  },
+  "transductive_test": {
+    "label_counts": {
+      "0.0": 8930,
+      "1.0": 8925
+    },
+    "path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260823T124017Z/legacy_gat_multitask/seed_53/artifacts/run_20260823T135650Z/splits/transductive_test.csv",
+    "rows": 17855,
+    "sha256": "fd469994d7f704a557153504c55268a1992e003062618aa6d4aa96f4c5ed9cee"
+  },
+  "transductive_train": {
+    "label_counts": {
+      "0.0": 32148,
+      "1.0": 32128
+    },
+    "path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260823T124017Z/legacy_gat_multitask/seed_53/artifacts/run_20260823T135650Z/splits/transductive_train.csv",
+    "rows": 64276,
+    "sha256": "2ba229ee2b2d5dc743c6d16fb3eee55ab00c93fa08bfdf83720de1105321a93c"
+  },
+  "validation": {
+    "label_counts": {
+      "0.0": 1786,
+      "1.0": 1785
+    },
+    "path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260823T124017Z/legacy_gat_multitask/seed_53/artifacts/run_20260823T135650Z/splits/validation.csv",
+    "rows": 3571,
+    "sha256": "d0f398611eb56b193c9d62b0d0d13095fa88a6749cdd8875a4be0d1647dbca8e"
+  }
+}

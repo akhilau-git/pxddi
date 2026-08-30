@@ -1,0 +1,92 @@
+{
+  "S1": {
+    "auroc": 0.49826729647395934,
+    "average_precision": 0.5085272749654004,
+    "brier_score_calibrated": 0.40145515580049695,
+    "brier_score_raw": 0.49793031128901805,
+    "confusion_matrix": [
+      [
+        973,
+        422
+      ],
+      [
+        1024,
+        442
+      ]
+    ],
+    "ece_calibrated": 0.3794998978321536,
+    "ece_raw": 0.49763796260800014,
+    "f1": 0.37939914163090127,
+    "mcc": -0.0010977126481970143,
+    "negative_count": 1395,
+    "positive_count": 1466,
+    "precision": 0.5115740740740741,
+    "prediction_path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260820T095611Z/ecfp_sgd_logistic/seed_42/artifacts/run_20260820T095620Z/predictions/s1_predictions.csv",
+    "prediction_sha256": "dee89f2b2971ab11e6b9945e2dd56a6bc5243a7dbe102e5ee2aeea8e8b620b0a",
+    "recall": 0.3015006821282401,
+    "sample_count": 2861,
+    "specificity": 0.6974910394265234,
+    "status": "evaluated",
+    "threshold": 0.48023811648639086
+  },
+  "S2": {
+    "auroc": 0.6648337232009346,
+    "average_precision": 0.631219471169626,
+    "brier_score_calibrated": 0.2854446075853132,
+    "brier_score_raw": 0.3569151492074475,
+    "confusion_matrix": [
+      [
+        11930,
+        3841
+      ],
+      [
+        7823,
+        8378
+      ]
+    ],
+    "ece_calibrated": 0.23337778165202042,
+    "ece_raw": 0.35446467227265116,
+    "f1": 0.5895847994370161,
+    "mcc": 0.28148221780674726,
+    "negative_count": 15771,
+    "positive_count": 16201,
+    "precision": 0.6856534904656683,
+    "prediction_path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260820T095611Z/ecfp_sgd_logistic/seed_42/artifacts/run_20260820T095620Z/predictions/s2_predictions.csv",
+    "prediction_sha256": "7434f366fa7eb0f177bd662177d856025367db0383e60d704a02d288afdf2c96",
+    "recall": 0.5171285723103513,
+    "sample_count": 31972,
+    "specificity": 0.7564517151734196,
+    "status": "evaluated",
+    "threshold": 0.48023811648639086
+  },
+  "Transductive": {
+    "auroc": 0.9140862773140827,
+    "average_precision": 0.8890594109899251,
+    "brier_score_calibrated": 0.10677946338586197,
+    "brier_score_raw": 0.13305627294019406,
+    "confusion_matrix": [
+      [
+        7608,
+        1339
+      ],
+      [
+        1150,
+        7696
+      ]
+    ],
+    "ece_calibrated": 0.03292413881745682,
+    "ece_raw": 0.12966212397278087,
+    "f1": 0.8608019685699905,
+    "mcc": 0.720414335375164,
+    "negative_count": 8947,
+    "positive_count": 8846,
+    "precision": 0.8517985611510791,
+    "prediction_path": "/content/drive/MyDrive/pxddi-data/experiments/study_20260820T095611Z/ecfp_sgd_logistic/seed_42/artifacts/run_20260820T095620Z/predictions/transductive_predictions.csv",
+    "prediction_sha256": "1a5dcc5cfd0c19fff37a913d30fd7b8c4afe16751be289d70bb988c911b38229",
+    "recall": 0.8699977390911147,
+    "sample_count": 17793,
+    "specificity": 0.8503408963898513,
+    "status": "evaluated",
+    "threshold": 0.48023811648639086
+  }
+}

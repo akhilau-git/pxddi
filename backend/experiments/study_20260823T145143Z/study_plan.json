@@ -1,0 +1,23 @@
+{
+  "epochs_per_run": 200,
+  "experiments": [
+    {
+      "architecture": "graph_fp_fusion_v1",
+      "name": "graph_fp_fusion_multitask",
+      "runner": "gnn",
+      "toxicity_loss_weight": 0.3,
+      "use_toxicity_pair_features": true
+    }
+  ],
+  "experiments_base": "/content/drive/MyDrive/pxddi-data/experiments",
+  "input_data_base": "/content/drive/MyDrive/pxddi-data",
+  "preset": "paper",
+  "promotion_policy": "No candidate is promoted to checkpoints/pxddi_model.pt by this suite. Review S1/S2, calibration, and repeated-seed results first.",
+  "reference_experiment": "graph_fp_fusion_multitask",
+  "seeds": [
+    37,
+    53,
+    71
+  ],
+  "study_id": "study_20260823T145143Z"
+}

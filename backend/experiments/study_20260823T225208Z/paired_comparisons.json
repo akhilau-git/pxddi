@@ -1,0 +1,5 @@
+{
+  "comparisons": [],
+  "reference_experiment": "graph_fp_fusion_multitask",
+  "warning": "A confidence interval is reported only with two or more matched seeds. Wilcoxon tests run only with at least five matched seeds, then Holm correction controls the study-wide family-wise error rate. Screening results remain directional evidence, not statistical proof."
+}
