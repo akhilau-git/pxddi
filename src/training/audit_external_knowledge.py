@@ -26,8 +26,13 @@ from data_prep.chembl_pipeline import (
     load_chembl_uniprot_target_metadata,
 )
 from data_prep.pharmgkb_pipeline import (
+    aggregate_twosides_pharmgkb_gene_profiles,
+    build_twosides_structure_catalog,
+    load_pharmgkb_chemical_catalog,
     load_pharmgkb_chemical_gene_evidence,
     load_twosides_drug_catalog,
+    resolve_pharmgkb_catalog_to_twosides_structures,
+    resolve_pharmgkb_evidence_to_chemical_catalog,
     resolve_pharmgkb_evidence_to_twosides,
 )
 
@@ -73,6 +78,32 @@ def _load_pxddi_smiles(edges_path: Path) -> list[object]:
         raise FileNotFoundError(f'TWOSIDES pair table was not found: {edges_path}')
     edges = pd.read_csv(edges_path, usecols=['source', 'target'], dtype=str, keep_default_na=False)
     return edges[['source', 'target']].to_numpy().ravel().tolist()
+
+
+def resolve_pharmgkb_chemical_catalog_path(pharmgkb_dir: Path) -> Path | None:
+    """Find an explicitly named PharmGKB chemical catalogue, if supplied.
+
+    The caller may set ``PXDDI_PHARMGKB_CHEMICAL_CATALOG`` for a non-standard
+    filename. We do not guess from arbitrary Pharmacogenomics tables, because
+    a direct chemical name plus SMILES field is required for the exact identity
+    mapping used below.
+    """
+    configured = os.environ.get('PXDDI_PHARMGKB_CHEMICAL_CATALOG')
+    if configured:
+        source = Path(configured)
+        if not source.is_file():
+            raise FileNotFoundError(
+                'PXDDI_PHARMGKB_CHEMICAL_CATALOG was set but is not a file: '
+                f'{source}'
+            )
+        return source
+    candidates = [
+        pharmgkb_dir / 'chemicals.tsv',
+        pharmgkb_dir / 'chemicals.csv',
+        pharmgkb_dir / 'chemical.tsv',
+        pharmgkb_dir / 'chemical.csv',
+    ]
+    return next((path for path in candidates if path.is_file()), None)
 
 
 def main() -> None:
@@ -132,11 +163,66 @@ def main() -> None:
             'reason': catalog_summary['reason'],
         }
 
+    # The supplied TWOSIDES catalogue normally has only a drug ID, so the
+    # name-based diagnostic above is expected to be unavailable.  A direct
+    # PharmGKB chemical catalogue gives us a stronger route: evidence name ->
+    # PharmGKB-owned canonical SMILES -> canonical SMILES in TWOSIDES edges.
+    chemical_catalog_path = resolve_pharmgkb_chemical_catalog_path(pharmgkb_dir)
+    if chemical_catalog_path is None:
+        summary['pharmgkb_structure_mapping'] = {
+            'status': 'not_attempted',
+            'reason': (
+                'No explicit PharmGKB chemicals.tsv/chemicals.csv catalogue was found. '
+                'Add a direct PharmGKB chemical name+SMILES export or set '
+                'PXDDI_PHARMGKB_CHEMICAL_CATALOG; no external lookup or fuzzy mapping '
+                'was attempted.'
+            ),
+        }
+    else:
+        chemical_catalog, chemical_catalog_summary = load_pharmgkb_chemical_catalog(
+            chemical_catalog_path
+        )
+        summary['pharmgkb_chemical_catalog'] = chemical_catalog_summary
+        if chemical_catalog_summary['mapping_ready']:
+            named_evidence, name_summary = resolve_pharmgkb_evidence_to_chemical_catalog(
+                evidence, chemical_catalog
+            )
+            twosides_structures, twosides_structure_summary = build_twosides_structure_catalog(
+                edges_path
+            )
+            resolved_structure_evidence, structure_summary = (
+                resolve_pharmgkb_catalog_to_twosides_structures(
+                    named_evidence, twosides_structures
+                )
+            )
+            resolution_path = output_dir / 'pharmgkb_to_twosides_structure_resolution.csv'
+            resolved_structure_evidence.to_csv(resolution_path, index=False)
+            gene_profiles, gene_profile_summary = aggregate_twosides_pharmgkb_gene_profiles(
+                resolved_structure_evidence
+            )
+            gene_profile_path = output_dir / 'pharmgkb_twosides_gene_profiles.csv'
+            gene_profiles.to_csv(gene_profile_path, index=False)
+            summary['twosides_structure_catalog'] = twosides_structure_summary
+            summary['pharmgkb_to_twosides_structure_mapping'] = {
+                **name_summary,
+                **structure_summary,
+                'resolution_csv': str(resolution_path),
+            }
+            summary['pharmgkb_twosides_gene_profiles'] = {
+                **gene_profile_summary,
+                'gene_profiles_csv': str(gene_profile_path),
+            }
+        else:
+            summary['pharmgkb_structure_mapping'] = {
+                'status': 'not_attempted',
+                'reason': chemical_catalog_summary['reason'],
+            }
+
     summary['next_gate'] = (
-        'Enable a biological-feature candidate only if the exact-name resolution '
-        'coverage is sufficient and its mapping audit is manually accepted. The '
-        'current ChEMBL files still require a molecule-target activity export for '
-        'true target features.'
+        'Enable a biological-feature candidate only if the direct PharmGKB '
+        'name-to-structure and exact-structure-to-TWOSIDES coverage are sufficient '
+        'and their mapping audit is manually accepted. The current ChEMBL files '
+        'still require a molecule-target activity export for true target features.'
     )
     summary_path = output_dir / 'external_knowledge_audit_summary.json'
     _write_json(summary_path, summary)
