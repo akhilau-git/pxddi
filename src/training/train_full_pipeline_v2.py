@@ -95,6 +95,7 @@ from models.candidate_explainability import (
     select_representative_indices,
 )
 from models.applicability_domain import MorganApplicabilityDomain
+from models.encoder_pretraining import load_pretrained_edge_aware_encoder
 from models.uncertainty import (
     conformal_prediction_sets,
     fit_split_conformal_binary,
@@ -247,6 +248,16 @@ DEFAULT_CHECKPOINT_PATH = (
     )
 )
 CHECKPOINT_PATH = Path(os.environ.get('PXDDI_CHECKPOINT_PATH', DEFAULT_CHECKPOINT_PATH))
+PRETRAINED_ENCODER_PATH = (
+    Path(os.environ['PXDDI_PRETRAINED_ENCODER_PATH'])
+    if os.environ.get('PXDDI_PRETRAINED_ENCODER_PATH')
+    else None
+)
+if PRETRAINED_ENCODER_PATH is not None and not USES_EDGE_FEATURES:
+    raise ValueError(
+        'PXDDI_PRETRAINED_ENCODER_PATH can initialize only a rich edge-aware '
+        'candidate, not the legacy GAT architecture.'
+    )
 RUN_ID = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
 ARTIFACTS_BASE = Path(os.environ.get('PXDDI_ARTIFACTS_BASE', RESULTS_BASE / 'artifacts'))
 RUN_ARTIFACTS_DIR = ARTIFACTS_BASE / f'run_{RUN_ID}'
@@ -391,6 +402,8 @@ def build_run_manifest() -> dict[str, Any]:
         'toxicity_bridge': TOXICITY_BRIDGE,
         'training_source': Path(__file__),
     }
+    if PRETRAINED_ENCODER_PATH is not None:
+        required_paths['pretrained_encoder'] = PRETRAINED_ENCODER_PATH
     if USE_MOTIF_FEATURES:
         required_paths['motif_definitions_source'] = (
             PROJECT_ROOT / 'src' / 'data_prep' / 'molecular_motifs.py'
@@ -442,6 +455,10 @@ def build_run_manifest() -> dict[str, Any]:
             'edge_feature_dim': (
                 NUM_BOND_FEATURES
                 if USES_EDGE_FEATURES else None
+            ),
+            'pretrained_encoder_checkpoint_path': (
+                str(PRETRAINED_ENCODER_PATH)
+                if PRETRAINED_ENCODER_PATH is not None else None
             ),
             'negative_label_meaning': 'unreported_twosides_sampled',
             'toxicity_conflict_policy': 'exclude_conflicting_structures',
@@ -1737,6 +1754,27 @@ def main() -> None:
         motif_feature_dim=MOTIF_FEATURE_DIM if USE_MOTIF_FEATURES else None,
         motif_hidden_channels=MOTIF_HIDDEN_CHANNELS if USE_MOTIF_FEATURES else None,
     ).to(DEVICE)
+    pretraining_initialization: dict[str, Any] | None = None
+    if PRETRAINED_ENCODER_PATH is not None:
+        pretraining_initialization = load_pretrained_edge_aware_encoder(
+            model.encoder,
+            PRETRAINED_ENCODER_PATH,
+            expected_in_channels=INPUT_FEATURE_DIM,
+            expected_edge_feature_dim=NUM_BOND_FEATURES,
+            expected_hidden_channels=HIDDEN_CHANNELS,
+            expected_split_audit={
+                'twosides_edges_sha256': get_file_hash(TWOSIDES_EDGES),
+                'data_cap': DATA_CAP,
+                'split_seed': SPLIT_SEED,
+                'negative_sampling_strategy': NEGATIVE_SAMPLING_STRATEGY,
+            },
+            map_location=DEVICE,
+        )
+        pretraining_initialization['sha256'] = get_file_hash(PRETRAINED_ENCODER_PATH)
+        print(
+            'Initialized edge-aware encoder from audited ChEMBL pretraining: '
+            f'{PRETRAINED_ENCODER_PATH}'
+        )
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
     scaler = torch.amp.GradScaler('cuda') if DEVICE.type == 'cuda' else None
@@ -1826,6 +1864,7 @@ def main() -> None:
                     'model_seed': MODEL_SEED,
                     'split_seed': SPLIT_SEED,
                     'threshold': threshold,
+                    'pretraining_initialization': pretraining_initialization,
                 },
                 CHECKPOINT_PATH,
             )
@@ -1921,6 +1960,7 @@ def main() -> None:
         if key not in {'path', 'sha256'}
     }
     checkpoint['validation_role_partition'] = validation_role_partition
+    checkpoint['pretraining_initialization'] = pretraining_initialization
     checkpoint_hash = safe_checkpoint_save(checkpoint, CHECKPOINT_PATH)
     validation_prediction_path = save_prediction_artifact(
         'Validation',
@@ -2075,6 +2115,7 @@ def main() -> None:
             'applicability_domain': applicability_domain_summary,
         },
         'model_summary': model_summary(model),
+        'pretraining_initialization': pretraining_initialization,
         'evaluation_protocol': evaluation_protocol_summary,
         'efficiency': {
             'training': training_efficiency,

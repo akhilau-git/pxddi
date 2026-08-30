@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from rdkit import Chem
+from rdkit import Chem, rdBase
 
 
 CHEMREPS_REQUIRED_COLUMNS = {
@@ -36,7 +36,11 @@ def _canonicalize_smiles(value: object) -> str | None:
     """Canonicalise one SMILES value without accepting malformed chemistry."""
     if not isinstance(value, str) or not value.strip():
         return None
-    molecule = Chem.MolFromSmiles(value.strip())
+    # Large public chemical corpora contain a small number of malformed or
+    # unsupported records.  They are counted and excluded by callers; blocking
+    # RDKit's per-row diagnostic avoids burying the actual audit result.
+    with rdBase.BlockLogs():
+        molecule = Chem.MolFromSmiles(value.strip())
     if molecule is None:
         return None
     return Chem.MolToSmiles(molecule, canonical=True)

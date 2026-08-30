@@ -15,7 +15,7 @@ import unicodedata
 from typing import Any
 
 import pandas as pd
-from rdkit import Chem
+from rdkit import Chem, rdBase
 
 
 RELATIONSHIP_COLUMNS = {
@@ -46,7 +46,8 @@ def normalise_drug_name(value: object) -> str | None:
 def _canonicalize_smiles(value: object) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
-    molecule = Chem.MolFromSmiles(value.strip())
+    with rdBase.BlockLogs():
+        molecule = Chem.MolFromSmiles(value.strip())
     return Chem.MolToSmiles(molecule, canonical=True) if molecule is not None else None
 
 

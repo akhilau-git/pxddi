@@ -13,6 +13,7 @@ from src.data_prep.pharmgkb_pipeline import (
     load_twosides_drug_catalog,
     resolve_pharmgkb_evidence_to_twosides,
 )
+from src.training.audit_external_knowledge import resolve_data_base
 
 
 def test_chembl_chemreps_audit_is_structure_only(tmp_path):
@@ -75,3 +76,9 @@ def test_catalog_without_recognised_columns_is_reported_not_guessed(tmp_path):
     assert catalog.empty
     assert summary['mapping_ready'] is False
     assert 'no fuzzy mapping' in summary['reason'].lower()
+
+
+def test_external_audit_data_root_must_be_an_existing_directory(tmp_path):
+    assert resolve_data_base(tmp_path) == tmp_path
+    with pytest.raises(FileNotFoundError, match='PXDDI_DATA_BASE'):
+        resolve_data_base(tmp_path / 'missing')

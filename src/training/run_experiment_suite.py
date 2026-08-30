@@ -30,6 +30,9 @@ RUNNER_SCRIPTS = {
 }
 DRIVE_BASE = Path(os.environ.get('PXDDI_DATA_BASE', '/content/drive/MyDrive/pxddi-data'))
 PRESET = os.environ.get('PXDDI_EXPERIMENT_PRESET', 'screening').strip().lower()
+EXPERIMENT_SPLIT_SEED = int(os.environ.get('PXDDI_EXPERIMENT_SPLIT_SEED', '42'))
+if EXPERIMENT_SPLIT_SEED <= 0:
+    raise ValueError('PXDDI_EXPERIMENT_SPLIT_SEED must be a positive integer.')
 REFERENCE_EXPERIMENT = os.environ.get(
     'PXDDI_EXPERIMENT_REFERENCE', 'legacy_gat_multitask'
 ).strip()
@@ -82,6 +85,14 @@ EXPERIMENTS = (
         'architecture': 'edge_aware_gat_v2',
         'use_toxicity_pair_features': True,
         'toxicity_loss_weight': 0.3,
+    },
+    {
+        'name': 'edge_aware_chembl_pretrained_multitask',
+        'runner': 'gnn',
+        'architecture': 'edge_aware_gat_v2',
+        'use_toxicity_pair_features': True,
+        'toxicity_loss_weight': 0.3,
+        'requires_chembl_pretrained_encoder': True,
     },
     {
         'name': 'motif_edge_aware_ddi_only',
@@ -178,7 +189,10 @@ def selected_experiments(requested_names: str | None = None) -> tuple[dict[str, 
         value = os.environ.get('PXDDI_EXPERIMENT_NAMES')
     if value is None or not value.strip():
         names = (
-            tuple(by_name)
+            tuple(
+                name for name, experiment in by_name.items()
+                if not experiment.get('requires_chembl_pretrained_encoder', False)
+            )
             if PRESET == 'screening'
             else ('legacy_gat_multitask', 'edge_aware_multitask')
         )
@@ -514,6 +528,7 @@ def main() -> None:
         'input_data_base': str(DRIVE_BASE),
         'experiments_base': str(experiments_base),
         'seeds': seeds,
+        'fixed_split_seed': EXPERIMENT_SPLIT_SEED,
         'epochs_per_run': epochs,
         'experiments': experiments,
         'reference_experiment': reference_experiment,
@@ -540,6 +555,8 @@ def main() -> None:
             environment = os.environ.copy()
             environment.update({
                 'PXDDI_SEED': str(seed),
+                'PXDDI_MODEL_SEED': str(seed),
+                'PXDDI_SPLIT_SEED': str(EXPERIMENT_SPLIT_SEED),
                 'PXDDI_ARTIFACTS_BASE': str(artifact_base),
                 'PXDDI_CHECKPOINT_PATH': str(checkpoint_path),
                 'PXDDI_PUBLISH_LATEST_RESULTS': 'false',
@@ -552,6 +569,15 @@ def main() -> None:
                     'PXDDI_USE_TOXICITY_PAIR_FEATURES': str(experiment['use_toxicity_pair_features']).lower(),
                     'PXDDI_TOXICITY_LOSS_WEIGHT': str(experiment['toxicity_loss_weight']),
                 })
+                if experiment.get('requires_chembl_pretrained_encoder', False):
+                    pretraining_path = os.environ.get('PXDDI_CHEMBL_PRETRAINED_ENCODER_PATH')
+                    if not pretraining_path:
+                        raise ValueError(
+                            'edge_aware_chembl_pretrained_multitask requires '
+                            'PXDDI_CHEMBL_PRETRAINED_ENCODER_PATH to point to a '
+                            'completed audited pretraining checkpoint.'
+                        )
+                    environment['PXDDI_PRETRAINED_ENCODER_PATH'] = pretraining_path
             else:
                 environment['PXDDI_ECFP_EPOCHS'] = str(experiment['epochs'])
             training_script = RUNNER_SCRIPTS[experiment['runner']]

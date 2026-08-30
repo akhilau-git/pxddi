@@ -32,8 +32,36 @@ from data_prep.pharmgkb_pipeline import (
 )
 
 
-DATA_BASE = Path(os.environ.get('PXDDI_DATA_BASE', '/content/drive/MyDrive/pxddi-data'))
 RESULTS_BASE = Path(os.environ.get('PXDDI_RESULTS_BASE', '/content/drive/MyDrive/pxddi-results'))
+
+
+def resolve_data_base(configured_path: str | Path) -> Path:
+    """Resolve a Drive data root, including a commonly pasted shortcut path.
+
+    Google Drive shortcuts live at ``/content/drive/.shortcut-targets-by-id``.
+    A frequent Colab mistake is to append that absolute shortcut below
+    ``/content/drive/MyDrive/pxddi-data``.  When the direct location exists,
+    repair only that unambiguous malformed form and report it to the user.
+    """
+    data_base = Path(configured_path)
+    if data_base.is_dir():
+        return data_base
+    parts = data_base.parts
+    marker = '.shortcut-targets-by-id'
+    if marker in parts:
+        shortcut_start = parts.index(marker)
+        corrected = Path('/content/drive').joinpath(*parts[shortcut_start:])
+        if corrected.is_dir():
+            print(
+                'Corrected PXDDI_DATA_BASE from a nested Drive-shortcut path to: '
+                f'{corrected}'
+            )
+            return corrected
+    raise FileNotFoundError(
+        f'PXDDI_DATA_BASE is not a readable directory: {data_base}. '
+        'Set it to either the real /content/drive/MyDrive/... folder or the '
+        'absolute /content/drive/.shortcut-targets-by-id/... shortcut path.'
+    )
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -48,9 +76,12 @@ def _load_pxddi_smiles(edges_path: Path) -> list[object]:
 
 
 def main() -> None:
-    chembl_dir = DATA_BASE / 'chembl'
-    pharmgkb_dir = DATA_BASE / 'pharmgkb'
-    twosides_dir = DATA_BASE / 'twosides'
+    data_base = resolve_data_base(
+        os.environ.get('PXDDI_DATA_BASE', '/content/drive/MyDrive/pxddi-data')
+    )
+    chembl_dir = data_base / 'chembl'
+    pharmgkb_dir = data_base / 'pharmgkb'
+    twosides_dir = data_base / 'twosides'
     chemreps_path = chembl_dir / 'chembl_37_chemreps.txt.gz'
     target_metadata_path = chembl_dir / 'chembl_uniprot_mapping.txt'
     relationships_path = pharmgkb_dir / 'relationships.tsv'
@@ -62,7 +93,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=False)
     summary: dict[str, object] = {
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
-        'data_base': str(DATA_BASE),
+        'data_base': str(data_base),
         'purpose': (
             'Audit external structural and biological evidence before any new '
             'candidate feature is trained. No DDI labels were changed.'

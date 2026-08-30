@@ -168,6 +168,21 @@ def test_cross_attention_candidate_ablation_can_be_selected_explicitly():
     ]
 
 
+def test_chembl_pretrained_candidate_requires_explicit_selection():
+    selected = selected_experiments('edge_aware_chembl_pretrained_multitask')
+
+    assert selected[0]['requires_chembl_pretrained_encoder'] is True
+
+
+def test_screening_default_does_not_silently_require_a_pretraining_checkpoint(monkeypatch):
+    monkeypatch.setattr('src.training.run_experiment_suite.PRESET', 'screening')
+
+    assert all(
+        not item.get('requires_chembl_pretrained_encoder', False)
+        for item in selected_experiments('')
+    )
+
+
 def test_experiment_outputs_can_be_separated_from_the_read_only_data_root(tmp_path):
     writable_output_root = tmp_path / 'my_drive' / 'pxddi_results'
 
