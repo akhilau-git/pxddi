@@ -12,7 +12,8 @@ structures. The supplied ChEMBL files do **not** contain molecule--target
 activity records, so this phase uses only unlabelled molecular structures.
 
 Before selection, the pretraining script recreates the PxDDI standard split
-from the source hash, data cap, split seed, and negative-sampling strategy. It
+from the source hash, data cap, split seed, negative-sampling strategy, and
+the `split_aware_standard_v1` sampling protocol. It
 excludes every molecule outside `transductive_train`, including transductive
 validation/test, S1-dev/test, and S2-dev/test molecules. It saves that split
 audit inside the encoder checkpoint. Fine-tuning rejects a checkpoint unless
@@ -33,6 +34,7 @@ Drive and pulling the current repository revision:
 %env PXDDI_DATA_CAP=200000
 %env PXDDI_SPLIT_SEED=42
 %env PXDDI_NEGATIVE_SAMPLING_STRATEGY=degree_matched
+%env PXDDI_NEGATIVE_SAMPLING_PROTOCOL=split_aware_standard_v1
 %env PXDDI_HIDDEN_CHANNELS=128
 ```
 
@@ -59,6 +61,7 @@ The final output prints the encoder checkpoint path. Keep it in your writable
 - `split_seed` 42;
 - `data_cap` 200000;
 - `negative_sampling_strategy` `degree_matched`;
+- `negative_sampling_protocol` `split_aware_standard_v1`;
 - a checkpoint SHA-256.
 
 ## Step 2 — One-seed screening comparison
@@ -73,6 +76,7 @@ same split. It does not promote either candidate.
 %env PXDDI_EXPERIMENT_PRESET=screening
 %env PXDDI_EXPERIMENT_SEEDS=42
 %env PXDDI_EXPERIMENT_SPLIT_SEED=42
+%env PXDDI_EXPERIMENT_NEGATIVE_SAMPLING_PROTOCOL=split_aware_standard_v1
 %env PXDDI_EXPERIMENT_EPOCHS=200
 %env PXDDI_EXPERIMENT_NAMES=edge_aware_multitask,edge_aware_chembl_pretrained_multitask
 %env PXDDI_EXPERIMENT_REFERENCE=edge_aware_multitask

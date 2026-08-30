@@ -95,11 +95,13 @@ def test_study_comparability_rejects_models_with_different_splits():
             'experiment': 'legacy', 'seed': 42, 'split': 'S1',
             'twosides_input_sha256': 'same', 'split_manifest_signature': 'split_a',
             'negative_label_meaning': 'unreported_twosides_sampled',
+            'negative_sampling_protocol': 'split_aware_standard_v1',
         },
         {
             'experiment': 'candidate', 'seed': 42, 'split': 'S1',
             'twosides_input_sha256': 'same', 'split_manifest_signature': 'split_b',
             'negative_label_meaning': 'unreported_twosides_sampled',
+            'negative_sampling_protocol': 'split_aware_standard_v1',
         },
     ])
 

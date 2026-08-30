@@ -72,7 +72,12 @@ from data_prep.molecular_motifs import (
     motif_metadata,
 )
 from data_prep.pubchem_bridge import canonicalize, resolve_toxicity_bridge
-from data_prep.splits import build_binary_pair_dataset, create_splits, deduplicate_unordered_pairs
+from data_prep.splits import (
+    build_binary_pair_dataset,
+    create_split_aware_binary_splits,
+    create_splits,
+    deduplicate_unordered_pairs,
+)
 from data_prep.scaffold_splits import create_scaffold_disjoint_splits
 from models.ddi_model import (
     MODEL_ARCHITECTURE_EDGE_AWARE,
@@ -185,6 +190,19 @@ MODEL_SELECTION_VALIDATION_FRACTION = _open_unit_interval_from_environment(
     'PXDDI_MODEL_SELECTION_VALIDATION_FRACTION', 0.5
 )
 NEGATIVE_SAMPLING_STRATEGY = os.environ.get('PXDDI_NEGATIVE_SAMPLING_STRATEGY', 'uniform')
+NEGATIVE_SAMPLING_PROTOCOL = os.environ.get(
+    'PXDDI_NEGATIVE_SAMPLING_PROTOCOL', 'split_aware_standard_v1'
+).strip().lower()
+if NEGATIVE_SAMPLING_PROTOCOL not in {'split_aware_standard_v1', 'legacy_pre_split_v1'}:
+    raise ValueError(
+        'PXDDI_NEGATIVE_SAMPLING_PROTOCOL must be split_aware_standard_v1 or '
+        'legacy_pre_split_v1.'
+    )
+NEGATIVE_LABEL_MEANING = (
+    'unreported_twosides_split_aware_sampled'
+    if NEGATIVE_SAMPLING_PROTOCOL == 'split_aware_standard_v1'
+    else f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}'
+)
 USE_CHEMBERTA = False
 MODEL_ARCHITECTURE = os.environ.get(
     'PXDDI_MODEL_ARCHITECTURE', MODEL_ARCHITECTURE_EDGE_AWARE
@@ -460,7 +478,8 @@ def build_run_manifest() -> dict[str, Any]:
                 str(PRETRAINED_ENCODER_PATH)
                 if PRETRAINED_ENCODER_PATH is not None else None
             ),
-            'negative_label_meaning': 'unreported_twosides_sampled',
+            'negative_label_meaning': NEGATIVE_LABEL_MEANING,
+            'negative_sampling_protocol': NEGATIVE_SAMPLING_PROTOCOL,
             'toxicity_conflict_policy': 'exclude_conflicting_structures',
             'evaluation_protocol': EVALUATION_PROTOCOL,
             'test_set_bootstrap': {
@@ -1566,8 +1585,11 @@ def model_summary(model: PxDDIModel) -> dict[str, Any]:
 
 
 def _prepare_positive_edges(
-    audit_dir: Path, sampling_seed: int = SPLIT_SEED
-) -> tuple[pd.DataFrame, dict[str, Any]]:
+    audit_dir: Path,
+    sampling_seed: int = SPLIT_SEED,
+    *,
+    return_all_clean_positives: bool = False,
+) -> tuple[pd.DataFrame, dict[str, Any]] | tuple[pd.DataFrame, dict[str, Any], pd.DataFrame]:
     """Deduplicate and validate positive pairs before negative sampling or splitting."""
     edges = pd.read_csv(TWOSIDES_EDGES)
     required_columns = {'source', 'target'}
@@ -1605,6 +1627,8 @@ def _prepare_positive_edges(
         f"{summary['excluded_positive_pairs']} excluded; "
         f"{summary['sampled_positive_pairs']} used for sampling."
     )
+    if return_all_clean_positives:
+        return sampled, summary, clean_positives.reset_index(drop=True)
     return sampled, summary
 
 
@@ -1625,21 +1649,27 @@ def main() -> None:
     write_json(RUN_ARTIFACTS_DIR / 'run_manifest_initial.json', manifest)
 
     toxicity_lookup, toxicity_summary = load_toxicity_lookup(audit_dir)
-    positives, input_quality_summary = _prepare_positive_edges(
-        audit_dir, sampling_seed=SPLIT_SEED
+    positives, input_quality_summary, all_clean_positives = _prepare_positive_edges(
+        audit_dir, sampling_seed=SPLIT_SEED, return_all_clean_positives=True
     )
-    full_dataset = build_binary_pair_dataset(
-        positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SPLIT_SEED,
-        negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY
-    )
-    dataset_summary = {
-        'effective_positive_pairs': (full_dataset['label'] == 1.0).sum(),
-        'sampled_unreported_negative_pairs': (full_dataset['label'] == 0.0).sum(),
-        'total_pair_rows_before_split': len(full_dataset),
-        'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
-    }
-    write_json(audit_dir / 'dataset_summary.json', dataset_summary)
     if EVALUATION_PROTOCOL == 'scaffold_disjoint':
+        if NEGATIVE_SAMPLING_PROTOCOL != 'legacy_pre_split_v1':
+            raise ValueError(
+                'Scaffold-disjoint evaluation has its own split geometry and currently '
+                'requires PXDDI_NEGATIVE_SAMPLING_PROTOCOL=legacy_pre_split_v1. '
+                'Do not compare it directly with standard split-aware results.'
+            )
+        full_dataset = build_binary_pair_dataset(
+            positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SPLIT_SEED,
+            negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY
+        )
+        dataset_summary = {
+            'protocol': 'legacy_pre_split_v1_scaffold_only',
+            'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
+            'sampled_unreported_negative_pairs': int((full_dataset['label'] == 0.0).sum()),
+            'total_pair_rows_before_split': int(len(full_dataset)),
+            'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
+        }
         splits, scaffold_audit = create_scaffold_disjoint_splits(
             full_dataset, drug_a_col='source', drug_b_col='target', seed=SPLIT_SEED
         )
@@ -1653,9 +1683,30 @@ def main() -> None:
         }
         write_json(audit_dir / 'scaffold_split_audit.json', evaluation_protocol_summary)
     else:
-        splits = create_splits(
-            full_dataset, drug_a_col='source', drug_b_col='target', seed=SPLIT_SEED
-        )
+        if NEGATIVE_SAMPLING_PROTOCOL == 'split_aware_standard_v1':
+            splits, dataset_summary = create_split_aware_binary_splits(
+                positives,
+                known_reported_positive_pairs=all_clean_positives,
+                source_col='source',
+                target_col='target',
+                seed=SPLIT_SEED,
+                negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY,
+            )
+        else:
+            full_dataset = build_binary_pair_dataset(
+                positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SPLIT_SEED,
+                negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY
+            )
+            dataset_summary = {
+                'protocol': 'legacy_pre_split_v1',
+                'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
+                'sampled_unreported_negative_pairs': int((full_dataset['label'] == 0.0).sum()),
+                'total_pair_rows_before_split': int(len(full_dataset)),
+                'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
+            }
+            splits = create_splits(
+                full_dataset, drug_a_col='source', drug_b_col='target', seed=SPLIT_SEED
+            )
         train_split_key = 'transductive_train'
         validation_split_key = 'validation'
         posthoc_validation_split_key = 'posthoc_validation'
@@ -1674,6 +1725,7 @@ def main() -> None:
                 'separately; it requires a distinct training partition.'
             ),
         }
+    write_json(audit_dir / 'dataset_summary.json', dataset_summary)
     model_selection_validation, posthoc_validation, validation_role_partition = (
         partition_validation_for_model_selection(
             splits[validation_split_key],
@@ -1767,6 +1819,7 @@ def main() -> None:
                 'data_cap': DATA_CAP,
                 'split_seed': SPLIT_SEED,
                 'negative_sampling_strategy': NEGATIVE_SAMPLING_STRATEGY,
+                'negative_sampling_protocol': NEGATIVE_SAMPLING_PROTOCOL,
             },
             map_location=DEVICE,
         )

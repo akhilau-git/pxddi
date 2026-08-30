@@ -8,6 +8,7 @@ from src.data_prep.splits import (
     canonical_pair,
     deduplicate_unordered_pairs,
     build_binary_pair_dataset,
+    create_split_aware_binary_splits,
     create_splits,
     _split_dataframe
 )
@@ -137,3 +138,83 @@ def test_split_dataframe_safely_handles_empty_or_one_class():
     train, test = _split_dataframe(one_class_df, 'label', test_size=0.5, seed=42)
     assert len(train) == 1
     assert len(test) == 1
+
+
+def test_split_aware_negatives_are_disjoint_unreported_and_follow_cold_start_groups():
+    drugs = [f'Drug{index}' for index in range(30)]
+    generator = np.random.default_rng(7)
+    positive_rows = [
+        (drugs[first], drugs[second])
+        for first in range(len(drugs))
+        for second in range(first + 1, len(drugs))
+        if generator.random() < 0.25
+    ]
+    positives = pd.DataFrame(positive_rows, columns=['source', 'target'])
+    groups = splits_module._cold_start_groups(
+        positives, 'source', 'target', holdout_fraction=0.60, seed=42
+    )
+
+    split_frames, audit = create_split_aware_binary_splits(
+        positives,
+        known_reported_positive_pairs=positives,
+        source_col='source',
+        target_col='target',
+        holdout_fraction=0.60,
+        seed=42,
+        negative_sampling_strategy='uniform',
+    )
+
+    known_keys = {
+        canonical_pair(row.source, row.target) for row in positives.itertuples(index=False)
+    }
+    all_negative_keys = set()
+    for name, frame in split_frames.items():
+        positives_in_split = frame[frame['label'] == 1.0]
+        negatives_in_split = frame[frame['label'] == 0.0]
+        assert len(positives_in_split) == len(negatives_in_split)
+        negative_keys = {
+            canonical_pair(row.source, row.target)
+            for row in negatives_in_split.itertuples(index=False)
+        }
+        assert known_keys.isdisjoint(negative_keys)
+        assert all_negative_keys.isdisjoint(negative_keys)
+        all_negative_keys.update(negative_keys)
+        assert set(negatives_in_split['label_evidence']) == {
+            'unreported_twosides_split_aware_sampled'
+        }
+        if name == 's1_test':
+            assert all(
+                row.source in groups['s1_test'] and row.target in groups['s1_test']
+                for row in negatives_in_split.itertuples(index=False)
+            )
+        if name == 's2_test':
+            assert all(
+                (row.source in groups['s1_test']) != (row.target in groups['s1_test'])
+                and (row.source in groups['seen']) != (row.target in groups['seen'])
+                for row in negatives_in_split.itertuples(index=False)
+            )
+    assert audit['protocol'] == 'split_aware_unreported_sampling_v1'
+    assert audit['unique_sampled_negative_pairs'] == len(all_negative_keys)
+
+
+def test_split_aware_sampler_forbids_reported_pairs_omitted_by_a_data_cap():
+    positive_frame = pd.DataFrame({
+        'source': ['DrugA'], 'target': ['DrugB'], 'label': [1.0],
+    })
+    negatives, keys, summary = splits_module._sample_partition_negatives(
+        positive_frame,
+        candidate_drugs={'DrugA', 'DrugB', 'DrugC', 'DrugD'},
+        is_eligible_pair=lambda _first, _second: True,
+        forbidden_keys={canonical_pair('DrugA', 'DrugB'), canonical_pair('DrugC', 'DrugD')},
+        source_col='source',
+        target_col='target',
+        neg_ratio=4.0,
+        seed=42,
+        negative_sampling_strategy='uniform',
+        max_attempt_multiplier=100,
+    )
+
+    assert len(negatives) == 4
+    assert len(keys) == 4
+    assert summary['sampled_negatives'] == 4
+    assert canonical_pair('DrugC', 'DrugD') not in keys

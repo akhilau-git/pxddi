@@ -33,6 +33,16 @@ PRESET = os.environ.get('PXDDI_EXPERIMENT_PRESET', 'screening').strip().lower()
 EXPERIMENT_SPLIT_SEED = int(os.environ.get('PXDDI_EXPERIMENT_SPLIT_SEED', '42'))
 if EXPERIMENT_SPLIT_SEED <= 0:
     raise ValueError('PXDDI_EXPERIMENT_SPLIT_SEED must be a positive integer.')
+EXPERIMENT_NEGATIVE_SAMPLING_PROTOCOL = os.environ.get(
+    'PXDDI_EXPERIMENT_NEGATIVE_SAMPLING_PROTOCOL', 'split_aware_standard_v1'
+).strip().lower()
+if EXPERIMENT_NEGATIVE_SAMPLING_PROTOCOL not in {
+    'split_aware_standard_v1', 'legacy_pre_split_v1'
+}:
+    raise ValueError(
+        'PXDDI_EXPERIMENT_NEGATIVE_SAMPLING_PROTOCOL must be '
+        'split_aware_standard_v1 or legacy_pre_split_v1.'
+    )
 REFERENCE_EXPERIMENT = os.environ.get(
     'PXDDI_EXPERIMENT_REFERENCE', 'legacy_gat_multitask'
 ).strip()
@@ -379,6 +389,9 @@ def collect_metric_rows(experiment_name: str, seed: int, run_dir: Path) -> list[
             'twosides_input_sha256': input_hash,
             'split_manifest_signature': split_signature,
             'negative_label_meaning': manifest['configuration']['negative_label_meaning'],
+            'negative_sampling_protocol': manifest['configuration'].get(
+                'negative_sampling_protocol'
+            ),
             'model_architecture': manifest['configuration']['model_architecture'],
             'use_toxicity_pair_features': manifest['configuration']['use_toxicity_pair_features'],
             'toxicity_loss_weight': manifest['configuration']['toxicity_loss_weight'],
@@ -394,7 +407,7 @@ def validate_study_comparability(table: pd.DataFrame) -> None:
     """Refuse cross-model comparisons unless every model used the same split per seed."""
     required = {
         'experiment', 'seed', 'split', 'twosides_input_sha256',
-        'split_manifest_signature', 'negative_label_meaning',
+        'split_manifest_signature', 'negative_label_meaning', 'negative_sampling_protocol',
     }
     missing = required.difference(table.columns)
     if missing:
@@ -404,7 +417,8 @@ def validate_study_comparability(table: pd.DataFrame) -> None:
         raise ValueError('Experiment table contains duplicate experiment/seed/split rows.')
     for seed, seed_rows in table.groupby('seed'):
         for column in (
-            'twosides_input_sha256', 'split_manifest_signature', 'negative_label_meaning'
+            'twosides_input_sha256', 'split_manifest_signature', 'negative_label_meaning',
+            'negative_sampling_protocol',
         ):
             values = seed_rows[column].dropna().unique()
             if len(values) != 1:
@@ -529,6 +543,7 @@ def main() -> None:
         'experiments_base': str(experiments_base),
         'seeds': seeds,
         'fixed_split_seed': EXPERIMENT_SPLIT_SEED,
+        'negative_sampling_protocol': EXPERIMENT_NEGATIVE_SAMPLING_PROTOCOL,
         'epochs_per_run': epochs,
         'experiments': experiments,
         'reference_experiment': reference_experiment,
@@ -561,6 +576,7 @@ def main() -> None:
                 'PXDDI_CHECKPOINT_PATH': str(checkpoint_path),
                 'PXDDI_PUBLISH_LATEST_RESULTS': 'false',
                 'PXDDI_NEGATIVE_SAMPLING_STRATEGY': experiment.get('negative_sampling_strategy', 'degree_matched'),
+                'PXDDI_NEGATIVE_SAMPLING_PROTOCOL': EXPERIMENT_NEGATIVE_SAMPLING_PROTOCOL,
             })
             if experiment['runner'] == 'gnn':
                 environment.update({

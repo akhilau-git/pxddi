@@ -174,6 +174,21 @@ Calibration slope/intercept are explicitly labelled as **post-hoc diagnostic
 metrics**: they are calculated on the evaluation partition and are not used to
 re-fit or select the model. Do not describe them as clinical calibration.
 
+### Split-aware unreported-negative protocol
+
+The normal `split_aware_standard_v1` protocol chooses the seen, S1-dev, and
+S1-test drug identities from reported TWOSIDES pairs **before** sampling any
+zero-labelled pair. It then samples unreported pairs only within the correct
+Transductive, S1, or S2 identity partition. Every graph-compatible reported
+TWOSIDES pair is forbidden from the sampled-negative pool, including a pair
+omitted by a configured data cap. The exact group hashes, class counts,
+sampling attempts, label meaning, and protocol name are written to
+`audits/dataset_summary.json` for each run.
+
+This makes new normal runs comparable across the GNN and ECFP baseline. It
+does **not** make an unreported pair safe, and historical pre-split-sampling
+artifacts must not be compared or combined with these runs.
+
 For a chemical-framework holdout, run a separate candidate training job with
 `PXDDI_EVALUATION_PROTOCOL=scaffold_disjoint`. It creates Murcko
 scaffold-disjoint train/validation/test partitions, excludes pairs spanning two

@@ -32,7 +32,11 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(REPOSITORY_SRC) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_SRC))
 
-from data_prep.splits import build_binary_pair_dataset, create_splits
+from data_prep.splits import (
+    build_binary_pair_dataset,
+    create_split_aware_binary_splits,
+    create_splits,
+)
 from models.calibration import apply_calibrator, fit_platt_calibrator
 from training.train_full_pipeline_v2 import (
     _prepare_positive_edges,
@@ -66,12 +70,27 @@ def _non_negative_int_from_environment(name: str, default: int) -> int:
 
 
 SEED = _positive_int_from_environment('PXDDI_SEED', 42)
+MODEL_SEED = _positive_int_from_environment('PXDDI_MODEL_SEED', SEED)
+SPLIT_SEED = _positive_int_from_environment('PXDDI_SPLIT_SEED', SEED)
 DATA_CAP = _positive_int_from_environment('PXDDI_DATA_CAP', 200000)
 ECFP_RADIUS = _positive_int_from_environment('PXDDI_ECFP_RADIUS', 2)
 ECFP_NUM_BITS = _positive_int_from_environment('PXDDI_ECFP_NUM_BITS', 1024)
 ECFP_EPOCHS = _positive_int_from_environment('PXDDI_ECFP_EPOCHS', 30)
 ECFP_BATCH_SIZE = _positive_int_from_environment('PXDDI_ECFP_BATCH_SIZE', 1024)
 NEGATIVE_SAMPLING_STRATEGY = os.environ.get('PXDDI_NEGATIVE_SAMPLING_STRATEGY', 'uniform')
+NEGATIVE_SAMPLING_PROTOCOL = os.environ.get(
+    'PXDDI_NEGATIVE_SAMPLING_PROTOCOL', 'split_aware_standard_v1'
+).strip().lower()
+if NEGATIVE_SAMPLING_PROTOCOL not in {'split_aware_standard_v1', 'legacy_pre_split_v1'}:
+    raise ValueError(
+        'PXDDI_NEGATIVE_SAMPLING_PROTOCOL must be split_aware_standard_v1 or '
+        'legacy_pre_split_v1.'
+    )
+NEGATIVE_LABEL_MEANING = (
+    'unreported_twosides_split_aware_sampled'
+    if NEGATIVE_SAMPLING_PROTOCOL == 'split_aware_standard_v1'
+    else f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}'
+)
 MODEL_SELECTION_VALIDATION_FRACTION = float(
     os.environ.get('PXDDI_MODEL_SELECTION_VALIDATION_FRACTION', '0.5')
 )
@@ -287,7 +306,9 @@ def baseline_manifest() -> dict[str, Any]:
     return {
         'run_id': RUN_ID,
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
-        'random_seed': SEED,
+        'random_seed': MODEL_SEED,
+        'model_seed': MODEL_SEED,
+        'split_seed': SPLIT_SEED,
         'input_data_base': str(DRIVE_BASE),
         'results_base': str(RESULTS_BASE),
         'input_sha256': {
@@ -296,6 +317,8 @@ def baseline_manifest() -> dict[str, Any]:
         },
         'configuration': {
             'data_cap': DATA_CAP,
+            'model_seed': MODEL_SEED,
+            'split_seed': SPLIT_SEED,
             'model_architecture': 'ecfp_sgd_logistic_v1',
             'feature_schema': 'ecfp_morgan_sum_and_absolute_difference',
             'ecfp_radius': ECFP_RADIUS,
@@ -311,7 +334,8 @@ def baseline_manifest() -> dict[str, Any]:
             ),
             'use_toxicity_pair_features': False,
             'toxicity_loss_weight': 0.0,
-            'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
+            'negative_label_meaning': NEGATIVE_LABEL_MEANING,
+            'negative_sampling_protocol': NEGATIVE_SAMPLING_PROTOCOL,
             'model_role': 'non-deployment classical baseline',
         },
     }
@@ -329,23 +353,36 @@ def main() -> None:
 
     manifest = baseline_manifest()
     write_json(RUN_ARTIFACTS_DIR / 'run_manifest_initial.json', manifest)
-    positives, input_quality_summary = _prepare_positive_edges(audit_dir)
-    full_dataset = build_binary_pair_dataset(
-        positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SEED,
-        negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY
+    positives, input_quality_summary, all_clean_positives = _prepare_positive_edges(
+        audit_dir, sampling_seed=SPLIT_SEED, return_all_clean_positives=True
     )
-    dataset_summary = {
-        'effective_positive_pairs': (full_dataset['label'] == 1.0).sum(),
-        'sampled_unreported_negative_pairs': (full_dataset['label'] == 0.0).sum(),
-        'total_pair_rows_before_split': len(full_dataset),
-        'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
-    }
+    if NEGATIVE_SAMPLING_PROTOCOL == 'split_aware_standard_v1':
+        splits, dataset_summary = create_split_aware_binary_splits(
+            positives,
+            known_reported_positive_pairs=all_clean_positives,
+            source_col='source',
+            target_col='target',
+            seed=SPLIT_SEED,
+            negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY,
+        )
+    else:
+        full_dataset = build_binary_pair_dataset(
+            positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SPLIT_SEED,
+            negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY
+        )
+        dataset_summary = {
+            'protocol': 'legacy_pre_split_v1',
+            'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
+            'sampled_unreported_negative_pairs': int((full_dataset['label'] == 0.0).sum()),
+            'total_pair_rows_before_split': int(len(full_dataset)),
+            'negative_label_meaning': NEGATIVE_LABEL_MEANING,
+        }
+        splits = create_splits(full_dataset, drug_a_col='source', drug_b_col='target', seed=SPLIT_SEED)
     write_json(audit_dir / 'dataset_summary.json', dataset_summary)
-    splits = create_splits(full_dataset, drug_a_col='source', drug_b_col='target', seed=SEED)
     model_selection_validation, posthoc_validation, validation_role_partition = (
         partition_validation_for_model_selection(
             splits['validation'],
-            seed=SEED,
+            seed=SPLIT_SEED,
             selection_fraction=MODEL_SELECTION_VALIDATION_FRACTION,
         )
     )
@@ -358,7 +395,7 @@ def main() -> None:
     cache = MorganFingerprintCache()
     classifier = SGDClassifier(
         loss='log_loss', penalty='l2', alpha=1e-5, max_iter=1,
-        learning_rate='optimal', random_state=SEED, average=True,
+        learning_rate='optimal', random_state=MODEL_SEED, average=True,
     )
     history = {
         'epoch': [],
@@ -377,7 +414,7 @@ def main() -> None:
     stopped_early = False
 
     for epoch in range(1, ECFP_EPOCHS + 1):
-        order = np.random.default_rng(SEED + epoch).permutation(len(splits['transductive_train']))
+        order = np.random.default_rng(MODEL_SEED + epoch).permutation(len(splits['transductive_train']))
         first_batch = True
         for batch in iter_pair_batches(splits['transductive_train'], ECFP_BATCH_SIZE, order):
             features = pair_feature_matrix(batch, cache)
@@ -447,7 +484,7 @@ def main() -> None:
     validation_labels, validation_raw_predictions = collect_predictions(
         splits['posthoc_validation'], cache, best_coefficients, best_intercept
     )
-    posthoc_partition = partition_validation_for_posthoc(validation_labels, seed=SEED)
+    posthoc_partition = partition_validation_for_posthoc(validation_labels, seed=SPLIT_SEED)
     if not posthoc_partition['independent_roles']:
         raise ValueError(
             'The reserved baseline validation split has too few examples per class '

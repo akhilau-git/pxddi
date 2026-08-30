@@ -27,9 +27,12 @@ candidates must be retrained with the corrected current loss contract.
 
 ## Training data
 
-- TWOSIDES: 200,000 sampled rows in the current training configuration.
-- Negatives: randomly sampled unreported pairs. They mean "not reported," not
-  "confirmed safe."
+- TWOSIDES: up to 200,000 graph-compatible reported pairs in the current
+  training configuration. The supplied source currently contains fewer than
+  that cap after the input audit.
+- Negatives: `split_aware_standard_v1` samples unreported pairs only after
+  the Transductive/S1/S2 drug partitions are fixed, and forbids every known
+  reported TWOSIDES pair. They mean "not reported," not "confirmed safe."
 - FAERS toxicity signal: one quarter (2023Q4), based on severe-outcome report
   fractions and mapped through PubChem structures.
 - Toxicity bridge: 339 unique canonical structures. Source rows include 58

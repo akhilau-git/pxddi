@@ -78,6 +78,8 @@ def test_pretraining_exclusion_set_recreates_the_ddi_split(tmp_path):
     )
 
     assert summary['pretraining_leakage_policy'] == 'exclude_all_non_train_twosides_structures_v1'
+    assert summary['negative_sampling_protocol'] == 'split_aware_standard_v1'
+    assert summary['negative_sampling_audit_protocol'] == 'split_aware_unreported_sampling_v1'
     assert summary['split_rows']['transductive_train'] > 0
     assert summary['excluded_non_train_unique_structures'] == len(excluded)
     assert excluded
@@ -124,7 +126,10 @@ def test_checked_pretraining_checkpoint_initializes_encoder_only(tmp_path):
         },
         'pretraining_leakage_policy': 'exclude_all_non_train_twosides_structures_v1',
         'source_corpus': {'selected_unique_molecules': 2},
-        'pretraining_split_audit': {'split_seed': 42},
+        'pretraining_split_audit': {
+            'split_seed': 42,
+            'negative_sampling_protocol': 'split_aware_standard_v1',
+        },
     }, checkpoint)
     restored = EdgeAwareMolecularEncoder(RICH_NUM_ATOM_FEATURES, NUM_BOND_FEATURES, 8)
 
@@ -134,7 +139,10 @@ def test_checked_pretraining_checkpoint_initializes_encoder_only(tmp_path):
         expected_in_channels=RICH_NUM_ATOM_FEATURES,
         expected_edge_feature_dim=NUM_BOND_FEATURES,
         expected_hidden_channels=8,
-        expected_split_audit={'split_seed': 42},
+        expected_split_audit={
+            'split_seed': 42,
+            'negative_sampling_protocol': 'split_aware_standard_v1',
+        },
     )
 
     assert loaded['artifact_type'] == PRETRAINING_ARTIFACT_TYPE
@@ -180,7 +188,10 @@ def test_pretraining_checkpoint_rejects_a_different_ddi_split_contract(tmp_path)
             'hidden_channels': 8,
         },
         'pretraining_leakage_policy': 'exclude_all_non_train_twosides_structures_v1',
-        'pretraining_split_audit': {'split_seed': 42},
+        'pretraining_split_audit': {
+            'split_seed': 42,
+            'negative_sampling_protocol': 'split_aware_standard_v1',
+        },
     }, checkpoint)
     restored = EdgeAwareMolecularEncoder(RICH_NUM_ATOM_FEATURES, NUM_BOND_FEATURES, 8)
 
@@ -191,5 +202,8 @@ def test_pretraining_checkpoint_rejects_a_different_ddi_split_contract(tmp_path)
             expected_in_channels=RICH_NUM_ATOM_FEATURES,
             expected_edge_feature_dim=NUM_BOND_FEATURES,
             expected_hidden_channels=8,
-            expected_split_audit={'split_seed': 99},
+            expected_split_audit={
+                'split_seed': 99,
+                'negative_sampling_protocol': 'split_aware_standard_v1',
+            },
         )

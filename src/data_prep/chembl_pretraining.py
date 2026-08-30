@@ -20,7 +20,10 @@ from rdkit import Chem, rdBase
 
 from .chembl_pipeline import iter_chembl_chemreps, sha256_file
 from .prepare_twosides import graph_compatibility_reason
-from .splits import build_binary_pair_dataset, create_splits, deduplicate_unordered_pairs
+from .splits import (
+    create_split_aware_binary_splits,
+    deduplicate_unordered_pairs,
+)
 
 
 def canonicalize_smiles(value: object) -> str | None:
@@ -91,18 +94,22 @@ def build_pretraining_exclusion_set(
     sampled = clean_positives.sample(
         n=min(data_cap, len(clean_positives)), random_state=split_seed
     ).reset_index(drop=True)
-    full_dataset = build_binary_pair_dataset(
+    splits, negative_sampling_audit = create_split_aware_binary_splits(
         sampled,
+        known_reported_positive_pairs=clean_positives,
         source_col='source',
         target_col='target',
         neg_ratio=1.0,
         seed=split_seed,
         negative_sampling_strategy=negative_sampling_strategy,
     )
-    splits = create_splits(full_dataset, drug_a_col='source', drug_b_col='target', seed=split_seed)
-    excluded_frame = pd.concat(
-        [frame for name, frame in splits.items() if name != 'transductive_train'],
-        ignore_index=True,
+    non_train_frames = [
+        frame for name, frame in splits.items()
+        if name != 'transductive_train' and not frame.empty
+    ]
+    excluded_frame = (
+        pd.concat(non_train_frames, ignore_index=True)
+        if non_train_frames else pd.DataFrame(columns=['source', 'target'])
     )
     excluded_smiles = {
         canonical
@@ -116,6 +123,12 @@ def build_pretraining_exclusion_set(
         'split_seed': split_seed,
         'negative_sampling_strategy': negative_sampling_strategy,
         'pretraining_leakage_policy': 'exclude_all_non_train_twosides_structures_v1',
+        # This is the configuration name expected by the supervised training
+        # run.  Keep the sampler's implementation/audit identifier separate:
+        # it documents *how* the partitions were sampled without making an
+        # otherwise compatible encoder appear incompatible with fine-tuning.
+        'negative_sampling_protocol': 'split_aware_standard_v1',
+        'negative_sampling_audit_protocol': negative_sampling_audit['protocol'],
         'raw_unique_positive_pairs': int(len(positives)),
         'graph_compatible_positive_pairs': int(len(clean_positives)),
         'sampled_positive_pairs': int(len(sampled)),
