@@ -532,10 +532,13 @@ def main() -> None:
                 f'PXDDI_EXPERIMENT_REFERENCE={reference_experiment!r} is not selected. '
                 f'Selected experiments: {sorted(experiment_names)}.'
             )
-    study_id = datetime.now(timezone.utc).strftime('study_%Y%m%dT%H%M%SZ')
+    study_id = os.environ.get(
+        'PXDDI_STUDY_ID',
+        datetime.now(timezone.utc).strftime('study_%Y%m%dT%H%M%SZ'),
+    )
     experiments_base = resolve_experiments_base()
     study_dir = experiments_base / study_id
-    study_dir.mkdir(parents=True, exist_ok=False)
+    study_dir.mkdir(parents=True, exist_ok=True)
     write_json(study_dir / 'study_plan.json', {
         'study_id': study_id,
         'preset': PRESET,
