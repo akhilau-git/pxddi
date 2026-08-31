@@ -1,7 +1,0 @@
-raw_structure,occurrence_count,observed_as,audit_reason,recommended_action,curation_decision,authoritative_source,approved_parent_smiles,review_notes
-O.O.O.O.O.O.[Cl-].[Cl-].[Ca+2],202,source|target,counterion_or_inorganic_only_structure,exclude_until_authoritative_parent_drug_mapping_is_reviewed,pending_manual_review,,,
-[Cl-].[K+],495,source|target,counterion_or_inorganic_only_structure,exclude_until_authoritative_parent_drug_mapping_is_reviewed,pending_manual_review,,,
-[Ca+2],228,source|target,counterion_or_inorganic_only_structure,exclude_until_authoritative_parent_drug_mapping_is_reviewed,pending_manual_review,,,
-[Li+].[AlH4-],270,source|target,counterion_or_inorganic_only_structure,exclude_until_authoritative_parent_drug_mapping_is_reviewed,pending_manual_review,,,
-[O-2].[O-2].[O-2].[As+3].[As+3],87,source|target,counterion_or_inorganic_only_structure,exclude_until_authoritative_parent_drug_mapping_is_reviewed,pending_manual_review,,,
-[Na+].[Cl-],303,source|target,counterion_or_inorganic_only_structure,exclude_until_authoritative_parent_drug_mapping_is_reviewed,pending_manual_review,,,

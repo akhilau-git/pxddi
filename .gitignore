@@ -80,6 +80,12 @@ backend/checkpoints/*_run_*.pt
 backend/checkpoints/candidates/
 backend/latest_results/
 
+# Experiment run artifacts — large CSVs, figures, checkpoints — live in Drive only.
+backend/experiments/
+
+# Deliverable binaries (PowerPoint, etc.) — too large and binary for git.
+deliverables/
+
 # IDE / Editor
 .idea/
 .vscode/

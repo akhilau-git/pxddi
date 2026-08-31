@@ -1,6 +1,0 @@
-{
-  "effective_positive_pairs": 61898,
-  "negative_label_meaning": "unreported_twosides_sampled_degree_matched",
-  "sampled_unreported_negative_pairs": 61898,
-  "total_pair_rows_before_split": 123796
-}
