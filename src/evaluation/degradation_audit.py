@@ -47,15 +47,15 @@ def _bootstrap_auroc(
     scores: np.ndarray,
     n_bootstrap: int,
     rng: np.random.Generator,
-) -> dict[str, float | None]:
+) -> dict[str, float | str | int | None]:
     """Return mean AUROC and 95% CI via bootstrap resampling."""
     n = len(labels)
     if n == 0 or len(np.unique(labels)) < 2:
-        return {'mean': None, 'ci_lower': None, 'ci_upper': None, 'n_samples': int(n)}
+        return {'mean': None, 'ci_lower': None, 'ci_upper': None, 'n_samples': n}
     try:
         point_estimate = float(roc_auc_score(labels, scores))
     except Exception:
-        return {'mean': None, 'ci_lower': None, 'ci_upper': None, 'n_samples': int(n)}
+        return {'mean': None, 'ci_lower': None, 'ci_upper': None, 'n_samples': n}
 
     bootstrap_aurocs = []
     for _ in range(n_bootstrap):
@@ -74,7 +74,7 @@ def _bootstrap_auroc(
             'mean': point_estimate,
             'ci_lower': None,
             'ci_upper': None,
-            'n_samples': int(n),
+            'n_samples': n,
             'n_bootstrap_valid': len(bootstrap_aurocs),
         }
 
@@ -84,7 +84,7 @@ def _bootstrap_auroc(
         'ci_lower': float(np.percentile(arr, 2.5)),
         'ci_upper': float(np.percentile(arr, 97.5)),
         'ci_method': 'percentile_bootstrap_95',
-        'n_samples': int(n),
+        'n_samples': n,
         'n_bootstrap_valid': len(bootstrap_aurocs),
     }
 
@@ -94,7 +94,7 @@ def _bootstrap_brier(
     scores: np.ndarray,
     n_bootstrap: int,
     rng: np.random.Generator,
-) -> dict[str, float | None]:
+) -> dict[str, float | str | int | None]:
     """Return mean Brier score and 95% CI via bootstrap resampling."""
     n = len(labels)
     if n == 0:
@@ -113,7 +113,7 @@ def _bootstrap_brier(
         'ci_lower': float(np.percentile(arr, 2.5)),
         'ci_upper': float(np.percentile(arr, 97.5)),
         'ci_method': 'percentile_bootstrap_95',
-        'n_samples': int(n),
+        'n_samples': n,
     }
 
 
@@ -186,7 +186,7 @@ class DegradationAudit:
             'bin_edges': _BIN_EDGES,
             'bin_labels': _BIN_LABELS,
             'overall': {
-                'n_pairs': int(len(labels_arr)),
+                'n_pairs': len(labels_arr),
                 'auroc': overall_auroc,
                 'brier': overall_brier,
             },
