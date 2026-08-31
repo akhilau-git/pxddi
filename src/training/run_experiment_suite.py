@@ -603,8 +603,16 @@ def main() -> None:
             rows.extend(collect_metric_rows(experiment['name'], seed, run_dir))
 
     table = pd.DataFrame(rows)
-    validate_study_comparability(table)
+    # Only enforce cross-model comparability when more than one experiment is run.
+    # A single-model run is valid on its own; the check would reject it vacuously.
+    if len(set(table['experiment'])) > 1:
+        validate_study_comparability(table)
     table.to_csv(study_dir / 'experiment_results.csv', index=False)
+
+    # Always write per-model per-split statistics — even for a single-model run.
+    # Previously this produced {} when only one experiment was run because
+    # the groupby loop was correct but paired_comparison_summary raised before
+    # the JSON was flushed.  The fix is to write summary before comparisons.
     summary: dict[str, Any] = {}
     for experiment_name, experiment_table in table.groupby('experiment'):
         experiment_name_str = str(experiment_name)
@@ -616,11 +624,17 @@ def main() -> None:
                 for metric in METRIC_NAMES
             }
     write_json(study_dir / 'study_summary.json', summary)
-    write_json(
-        study_dir / 'paired_comparisons.json',
-        paired_comparison_summary(table, reference_experiment),
-    )
-    save_comparison_plot(table, study_dir / 'experiment_comparison')
+
+    # Paired comparisons require at least two experiments.
+    if len(set(table['experiment'])) > 1:
+        write_json(
+            study_dir / 'paired_comparisons.json',
+            paired_comparison_summary(table, reference_experiment),
+        )
+        save_comparison_plot(table, study_dir / 'experiment_comparison')
+    else:
+        # Single-experiment run: save a simple per-split bar chart.
+        save_comparison_plot(table, study_dir / 'experiment_comparison')
     print(f'Experiment study saved to: {study_dir}')
 
 
