@@ -70,7 +70,7 @@ class PairApplicabilityDomain:
 
     @staticmethod
     def _canonical(smiles: str) -> str:
-        mol = Chem.MolFromSmiles(str(smiles).strip())
+        mol = Chem.MolFromSmiles(smiles.strip())
         if mol is None:
             raise ValueError(f'Invalid SMILES for applicability domain: {smiles!r}')
         return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
