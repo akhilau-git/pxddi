@@ -101,6 +101,9 @@ from models.candidate_explainability import (
 )
 from models.applicability_domain import MorganApplicabilityDomain
 from models.encoder_pretraining import load_pretrained_edge_aware_encoder
+from evaluation.pair_applicability_domain import PairApplicabilityDomain
+from evaluation.degradation_audit import DegradationAudit
+from evaluation.reliability_diagram import plot_reliability_diagram
 from models.uncertainty import (
     conformal_prediction_sets,
     fit_split_conformal_binary,
@@ -2130,6 +2133,17 @@ def main() -> None:
             'raw_predictions': raw_predictions,
             'calibrated_predictions': calibrated_predictions,
             'threshold': frozen_threshold,
+            # SMILES stored for pair-level OOD audit
+            'source_smiles': [
+                metadata['source']
+                for metadata in cast(PxDDIDataset, loader.dataset).metadata
+            ],
+            'target_smiles': [
+                metadata['target']
+                for metadata in cast(PxDDIDataset, loader.dataset).metadata
+            ],
+            # Drug-level pair minimum Tanimoto from existing applicability domain
+            'pair_min_tanimoto': applicability_scores['pair_minimum_nearest_train_tanimoto'],
         }
         plot_evaluation(
             name,
@@ -2141,6 +2155,92 @@ def main() -> None:
         )
     plot_benchmark_comparison(results, figure_dir)
     plot_toxicity_bridge_coverage(toxicity_summary, figure_dir)
+
+    # =========================================================================
+    # Novelty audits — auto-generate all paper artifact figures and JSONs
+    # =========================================================================
+    novelty_audit_dir = RUN_ARTIFACTS_DIR / 'novelty_audits'
+    novelty_audit_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Pair-level applicability domain ──────────────────────────────────────
+    training_pairs_source = [
+        metadata['source']
+        for metadata in cast(PxDDIDataset, train_loader.dataset).metadata
+    ]
+    training_pairs_target = [
+        metadata['target']
+        for metadata in cast(PxDDIDataset, train_loader.dataset).metadata
+    ]
+    pair_ood = PairApplicabilityDomain(
+        minimum_similarity=APPLICABILITY_DOMAIN_MINIMUM_SIMILARITY
+    )
+    pair_ood_fit_summary = pair_ood.fit(training_pairs_source, training_pairs_target)
+    pair_ood_results: dict[str, Any] = {}
+    for split_name, split_data in evaluation_data.items():
+        try:
+            pair_scores = pair_ood.score_pairs(
+                split_data['source_smiles'], split_data['target_smiles']
+            )
+            pair_ood_summary = pair_ood.summarize(pair_scores)
+            pair_ood_results[split_name] = pair_ood_summary
+            write_json(
+                novelty_audit_dir / f'pair_ood_{split_name.lower().replace("-", "_")}.json',
+                pair_ood_summary,
+            )
+        except Exception as pair_ood_error:
+            pair_ood_results[split_name] = {'error': str(pair_ood_error)}
+    write_json(
+        novelty_audit_dir / 'pair_ood_fit_summary.json',
+        {**pair_ood_fit_summary, 'per_split': pair_ood_results},
+    )
+
+    # 2. Degradation audit with bootstrap confidence intervals ─────────────────
+    degradation = DegradationAudit(n_bootstrap=BOOTSTRAP_RESAMPLES, seed=SPLIT_SEED)
+    for split_name, split_data in evaluation_data.items():
+        try:
+            deg_result = degradation.run(
+                labels=split_data['labels'],
+                scores=split_data['calibrated_predictions'],
+                pair_min_tanimoto=split_data['pair_min_tanimoto'],
+                split_name=split_name,
+            )
+            DegradationAudit.save(
+                deg_result,
+                novelty_audit_dir
+                / f'degradation_{split_name.lower().replace("-", "_")}.json',
+            )
+        except Exception as deg_error:
+            write_json(
+                novelty_audit_dir
+                / f'degradation_{split_name.lower().replace("-", "_")}_error.json',
+                {'error': str(deg_error), 'split': split_name},
+            )
+
+    # 3. Reliability diagrams (calibration curves) per split ──────────────────
+    reliability_input = {
+        sn: {
+            'labels': sd['labels'].tolist()
+            if hasattr(sd['labels'], 'tolist') else list(sd['labels']),
+            'scores': sd['calibrated_predictions'].tolist()
+            if hasattr(sd['calibrated_predictions'], 'tolist')
+            else list(sd['calibrated_predictions']),
+        }
+        for sn, sd in evaluation_data.items()
+    }
+    try:
+        reliability_stats = plot_reliability_diagram(
+            split_results=reliability_input,
+            output_path=novelty_audit_dir / 'reliability_diagram',
+            n_bins=10,
+        )
+        write_json(novelty_audit_dir / 'reliability_stats.json', reliability_stats)
+    except Exception as rel_error:
+        write_json(
+            novelty_audit_dir / 'reliability_error.json',
+            {'error': str(rel_error)},
+        )
+    # =========================================================================
+
     write_json(RUN_ARTIFACTS_DIR / 'results_summary.json', results)
     explanation_summary = generate_candidate_explanation_artifact(
         model, evaluation_data, RUN_ARTIFACTS_DIR / 'explanations'
