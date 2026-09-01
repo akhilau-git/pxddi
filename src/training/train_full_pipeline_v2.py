@@ -261,7 +261,9 @@ DEFAULT_CHECKPOINT_PATH = (
     RESULTS_BASE / 'checkpoints' / 'pxddi_model.pt'
     if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_LEGACY
     else RESULTS_BASE / 'checkpoints' / 'candidates' / (
-        'pxddi_motif_edge_aware_candidate.pt'
+        'pxddi_graph_fp_fusion_candidate.pt'
+        if USE_FINGERPRINT_FEATURES
+        else 'pxddi_motif_edge_aware_candidate.pt'
         if USE_MOTIF_FEATURES
         else 'pxddi_cross_attention_edge_aware_candidate.pt'
         if USE_CROSS_DRUG_ATTENTION
