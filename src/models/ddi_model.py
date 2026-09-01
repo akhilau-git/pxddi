@@ -117,12 +117,16 @@ class PxDDIModel(nn.Module):
 
         self.toxicity_head = ToxicityHead(hidden_channels)
         self.patient_encoder = PatientContextEncoder(n_comorbidities, hidden_channels)
+        self.uses_multiplicative_fusion = (
+            architecture_version != MODEL_ARCHITECTURE_LEGACY
+        )
+        pair_feature_multiplier = 3 if self.uses_multiplicative_fusion else 2
         pair_embedding_channels = hidden_channels + (
             motif_hidden_channels if self.motif_encoder is not None else 0
         ) + (hidden_channels if self.cross_drug_attention is not None else 0) + (
             128 if self.fp_encoder is not None else 0
         )
-        risk_input_channels = pair_embedding_channels * 2 + (
+        risk_input_channels = pair_embedding_channels * pair_feature_multiplier + (
             2 if use_toxicity_pair_features else 0
         )
         self.risk_classifier = nn.Sequential(
@@ -174,8 +178,8 @@ class PxDDIModel(nn.Module):
         if self.fp_encoder is not None:
             if not hasattr(drug_a, 'fingerprint_features') or not hasattr(drug_b, 'fingerprint_features'):
                 raise ValueError('The fusion candidate requires fingerprint_features on both drug graphs.')
-            fp_a = self.fp_encoder(drug_a.fingerprint_features.float())
-            fp_b = self.fp_encoder(drug_b.fingerprint_features.float())
+            fp_a = self.fp_encoder(drug_a.fingerprint_features.float().view(-1, 1024))
+            fp_b = self.fp_encoder(drug_b.fingerprint_features.float().view(-1, 1024))
             ea_for_risk = torch.cat((ea_for_risk, fp_a), dim=1)
             eb_for_risk = torch.cat((eb_for_risk, fp_b), dim=1)
 
@@ -185,7 +189,11 @@ class PxDDIModel(nn.Module):
 
         emb_sum = ea_for_risk + eb_for_risk
         emb_diff = torch.abs(ea_for_risk - eb_for_risk)
-        features = [emb_sum, emb_diff]
+        if self.uses_multiplicative_fusion:
+            emb_prod = ea_for_risk * eb_for_risk
+            features = [emb_sum, emb_diff, emb_prod]
+        else:
+            features = [emb_sum, emb_diff]
         if self.use_toxicity_pair_features:
             features.extend([
                 (toxicity_a_probability + toxicity_b_probability).unsqueeze(-1),
