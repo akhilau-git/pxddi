@@ -147,12 +147,11 @@ EXPERIMENTS = (
         'toxicity_loss_weight': 0.3,
     },
     {
-        'name': 'graph_fp_fusion_chembl_pretrained_multitask',
+        'name': 'auditddi_memory_fusion_multitask',
         'runner': 'gnn',
-        'architecture': 'graph_fp_fusion_v1',
+        'architecture': 'auditddi_memory_fusion_v1',
         'use_toxicity_pair_features': True,
         'toxicity_loss_weight': 0.3,
-        'requires_chembl_pretrained_encoder': True,
     },
 )
 

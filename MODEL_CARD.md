@@ -1,10 +1,10 @@
-# PxDDI Model Card
+# AuditDDI Model Card
 
 ## Intended use
 
-PxDDI is a research prototype for structure-based DDI prediction. It is not
-validated for clinical decision-making, prescribing, diagnosis, triage, or
-patient-specific treatment recommendations.
+AuditDDI is an auditable research framework for structure-based cold-start DDI
+prediction. It is not validated for clinical decision-making, prescribing,
+diagnosis, triage, or patient-specific treatment recommendations.
 
 ## Committed reference artifact
 

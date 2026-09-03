@@ -11,6 +11,7 @@ MODEL_ARCHITECTURE_EDGE_AWARE = 'edge_aware_gat_v2'
 MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE = 'motif_edge_aware_gat_v1'
 MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE = 'cross_attention_edge_aware_gat_v1'
 MODEL_ARCHITECTURE_GRAPH_FP_FUSION = 'graph_fp_fusion_v1'
+MODEL_ARCHITECTURE_AUDITDDI_MEMORY = 'auditddi_memory_fusion_v1'
 
 
 def architecture_uses_edge_features(architecture_version: str) -> bool:
@@ -20,6 +21,7 @@ def architecture_uses_edge_features(architecture_version: str) -> bool:
         MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
         MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
         MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
+        MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
     }
 
 
@@ -35,7 +37,10 @@ def architecture_requires_cross_drug_attention(architecture_version: str) -> boo
 
 def architecture_requires_fingerprint_features(architecture_version: str) -> bool:
     """Return whether a checkpoint needs molecular ECFP fingerprints."""
-    return architecture_version == MODEL_ARCHITECTURE_GRAPH_FP_FUSION
+    return architecture_version in {
+        MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
+        MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
+    }
 
 
 def model_from_checkpoint(checkpoint):
@@ -65,6 +70,7 @@ class PxDDIModel(nn.Module):
         use_toxicity_pair_features=True,
         motif_feature_dim=None,
         motif_hidden_channels=None,
+        use_neighbor_memory=False,
     ):
         super().__init__()
         self.use_chemberta = use_chemberta
@@ -126,12 +132,17 @@ class PxDDIModel(nn.Module):
         ) + (hidden_channels if self.cross_drug_attention is not None else 0) + (
             128 if self.fp_encoder is not None else 0
         )
+        self.use_neighbor_memory = (
+            use_neighbor_memory or architecture_version == MODEL_ARCHITECTURE_AUDITDDI_MEMORY
+        )
         risk_input_channels = pair_embedding_channels * pair_feature_multiplier + (
             2 if use_toxicity_pair_features else 0
+        ) + (
+            3 if self.use_neighbor_memory else 0
         )
         self.risk_classifier = nn.Sequential(
             nn.Linear(risk_input_channels, 64), nn.ReLU(), nn.Dropout(0.4), nn.Linear(64,1))
-    def forward(self, drug_a, drug_b, patient=None):
+    def forward(self, drug_a, drug_b, patient=None, memory_features=None):
         if self.use_chemberta:
             device = next(self.parameters()).device
             ea = self.encoder(drug_a.smiles, device)
@@ -199,6 +210,12 @@ class PxDDIModel(nn.Module):
                 (toxicity_a_probability + toxicity_b_probability).unsqueeze(-1),
                 torch.abs(toxicity_a_probability - toxicity_b_probability).unsqueeze(-1),
             ])
+        if self.use_neighbor_memory:
+            if memory_features is None:
+                memory_features = torch.zeros(
+                    (ea.size(0), 3), device=ea.device, dtype=ea.dtype
+                )
+            features.append(memory_features)
         combined = torch.cat(features, dim=1)
         
         return (
@@ -229,3 +246,6 @@ class PxDDIModel(nn.Module):
         return self.cross_drug_attention.attention_maps(
             node_embeddings_a, drug_a.batch, node_embeddings_b, drug_b.batch
         )
+
+
+AuditDDIModel = PxDDIModel

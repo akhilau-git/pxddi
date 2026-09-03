@@ -85,8 +85,11 @@ from models.ddi_model import (
     MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
     MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
     MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
+    MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
     PxDDIModel,
+    AuditDDIModel,
 )
+from models.neighbor_memory import AuditableNeighborMemory
 from models.calibration import (
     apply_calibrator,
     expected_calibration_error,
@@ -216,6 +219,7 @@ if MODEL_ARCHITECTURE not in {
     MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
     MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
     MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
+    MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
 }:
     raise ValueError(f'Unsupported PXDDI_MODEL_ARCHITECTURE: {MODEL_ARCHITECTURE}.')
 USES_EDGE_FEATURES = MODEL_ARCHITECTURE in {
@@ -223,9 +227,14 @@ USES_EDGE_FEATURES = MODEL_ARCHITECTURE in {
     MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
     MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
     MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
+    MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
 }
 USE_MOTIF_FEATURES = MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE
-USE_FINGERPRINT_FEATURES = MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_GRAPH_FP_FUSION
+USE_FINGERPRINT_FEATURES = MODEL_ARCHITECTURE in {
+    MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
+    MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
+}
+USE_NEIGHBOR_MEMORY = MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_AUDITDDI_MEMORY
 USE_CROSS_DRUG_ATTENTION = (
     MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE
 )
@@ -258,10 +267,12 @@ TWOSIDES_EDGES = DRIVE_BASE / 'twosides' / 'drug_drug_edges.csv'
 TOXICITY_BRIDGE = DRIVE_BASE / 'checkpoints' / 'toxicity_smiles_bridge.csv'
 RESULTS_BASE = resolve_results_base()
 DEFAULT_CHECKPOINT_PATH = (
-    RESULTS_BASE / 'checkpoints' / 'pxddi_model.pt'
+    RESULTS_BASE / 'checkpoints' / 'auditddi_model.pt'
     if MODEL_ARCHITECTURE == MODEL_ARCHITECTURE_LEGACY
     else RESULTS_BASE / 'checkpoints' / 'candidates' / (
-        'pxddi_graph_fp_fusion_candidate.pt'
+        'auditddi_memory_fusion_candidate.pt'
+        if USE_NEIGHBOR_MEMORY
+        else 'pxddi_graph_fp_fusion_candidate.pt'
         if USE_FINGERPRINT_FEATURES
         else 'pxddi_motif_edge_aware_candidate.pt'
         if USE_MOTIF_FEATURES
@@ -789,11 +800,13 @@ class PxDDIDataset(Dataset):
         target_col: str = 'target',
         label_col: str = 'label',
         graph_cache: GraphCache | None = None,
+        neighbor_memory: AuditableNeighborMemory | None = None,
     ) -> None:
         super().__init__()
         self.records = []
         self.metadata: list[dict[str, Any]] = []
         self.skipped_count = 0
+        self.neighbor_memory = neighbor_memory
         self.graph_cache = graph_cache or GraphCache(
             FEATURE_SCHEMA,
             include_motif_features=USE_MOTIF_FEATURES,
@@ -814,17 +827,26 @@ class PxDDIDataset(Dataset):
             toxicity_b = toxicity_lookup.get(c_tgt) if c_tgt is not None else None
             toxicity_a_known = float(toxicity_a is not None)
             toxicity_b_known = float(toxicity_b is not None)
-            self.records.append(
-                (
-                    graph_a,
-                    graph_b,
-                    0.0 if toxicity_a is None else toxicity_a,
-                    0.0 if toxicity_b is None else toxicity_b,
-                    toxicity_a_known,
-                    toxicity_b_known,
-                    label,
-                )
-            )
+
+            record_items = [
+                graph_a,
+                graph_b,
+                0.0 if toxicity_a is None else toxicity_a,
+                0.0 if toxicity_b is None else toxicity_b,
+                toxicity_a_known,
+                toxicity_b_known,
+                label,
+            ]
+            if neighbor_memory is not None:
+                mem_scores = neighbor_memory.score_pair_memory(source, target)
+                mem_feature = np.array([
+                    mem_scores['neighbor_density'],
+                    mem_scores['max_support'],
+                    mem_scores['structural_confidence'],
+                ], dtype=np.float32)
+                record_items.append(mem_feature)
+
+            self.records.append(tuple(record_items))
             self.metadata.append(
                 {
                     'source': source,
@@ -850,6 +872,18 @@ def collate_fn(batch):
     toxicity_a_known = torch.tensor([item[4] for item in batch], dtype=torch.float)
     toxicity_b_known = torch.tensor([item[5] for item in batch], dtype=torch.float)
     labels = torch.tensor([item[6] for item in batch], dtype=torch.float)
+    if len(batch[0]) > 7:
+        mem_features = torch.tensor(np.array([item[7] for item in batch]), dtype=torch.float)
+        return (
+            Batch.from_data_list(graph_a),
+            Batch.from_data_list(graph_b),
+            toxicity_a,
+            toxicity_b,
+            toxicity_a_known,
+            toxicity_b_known,
+            labels,
+            mem_features,
+        )
     return (
         Batch.from_data_list(graph_a),
         Batch.from_data_list(graph_b),
@@ -868,8 +902,14 @@ def build_loader(
     shuffle: bool = True,
     graph_cache: GraphCache | None = None,
     generator_seed: int = MODEL_SEED,
+    neighbor_memory: AuditableNeighborMemory | None = None,
 ) -> DataLoader:
-    dataset = PxDDIDataset(dataframe, toxicity_lookup, graph_cache=graph_cache)
+    dataset = PxDDIDataset(
+        dataframe,
+        toxicity_lookup,
+        graph_cache=graph_cache,
+        neighbor_memory=neighbor_memory,
+    )
     generator = torch.Generator()
     generator.manual_seed(generator_seed)
     return DataLoader(
@@ -911,7 +951,13 @@ def train_one_epoch(model, loader, optimizer, scaler) -> float:
         raise ValueError('Training loader is empty after SMILES validation.')
     model.train()
     total_loss = 0.0
-    for graph_a, graph_b, toxicity_a, toxicity_b, toxicity_a_known, toxicity_b_known, labels in loader:
+    for batch_items in loader:
+        if len(batch_items) > 7:
+            graph_a, graph_b, toxicity_a, toxicity_b, toxicity_a_known, toxicity_b_known, labels, mem_feat = batch_items
+            mem_feat = mem_feat.to(DEVICE)
+        else:
+            graph_a, graph_b, toxicity_a, toxicity_b, toxicity_a_known, toxicity_b_known, labels = batch_items
+            mem_feat = None
         graph_a, graph_b = graph_a.to(DEVICE), graph_b.to(DEVICE)
         toxicity_a = toxicity_a.to(DEVICE)
         toxicity_b = toxicity_b.to(DEVICE)
@@ -921,7 +967,7 @@ def train_one_epoch(model, loader, optimizer, scaler) -> float:
         optimizer.zero_grad()
         if scaler is not None:
             with torch.amp.autocast('cuda'):
-                risk, prediction_a, prediction_b = model(graph_a, graph_b)
+                risk, prediction_a, prediction_b = model(graph_a, graph_b, memory_features=mem_feat)
                 loss = multi_task_loss(
                     risk, prediction_a, prediction_b, labels,
                     toxicity_a, toxicity_b, toxicity_a_known, toxicity_b_known,
@@ -930,7 +976,7 @@ def train_one_epoch(model, loader, optimizer, scaler) -> float:
             scaler.step(optimizer)
             scaler.update()
         else:
-            risk, prediction_a, prediction_b = model(graph_a, graph_b)
+            risk, prediction_a, prediction_b = model(graph_a, graph_b, memory_features=mem_feat)
             loss = multi_task_loss(
                 risk, prediction_a, prediction_b, labels,
                 toxicity_a, toxicity_b, toxicity_a_known, toxicity_b_known,
@@ -945,9 +991,15 @@ def collect_predictions(model, loader) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
     predictions, labels = [], []
     with torch.no_grad():
-        for graph_a, graph_b, _, _, _, _, batch_labels in loader:
+        for batch_items in loader:
+            if len(batch_items) > 7:
+                graph_a, graph_b, _, _, _, _, batch_labels, mem_feat = batch_items
+                mem_feat = mem_feat.to(DEVICE)
+            else:
+                graph_a, graph_b, _, _, _, _, batch_labels = batch_items
+                mem_feat = None
             graph_a, graph_b = graph_a.to(DEVICE), graph_b.to(DEVICE)
-            risk, _, _ = model(graph_a, graph_b)
+            risk, _, _ = model(graph_a, graph_b, memory_features=mem_feat)
             predictions.extend(torch.sigmoid(risk).cpu().numpy())
             labels.extend(batch_labels.numpy())
     return np.asarray(labels, dtype=int), np.asarray(predictions, dtype=float)
@@ -1749,21 +1801,47 @@ def main() -> None:
         include_motif_features=USE_MOTIF_FEATURES,
         include_fingerprint_features=USE_FINGERPRINT_FEATURES,
     )
+    neighbor_memory = None
+    if USE_NEIGHBOR_MEMORY:
+        train_df = splits[train_split_key]
+        neighbor_memory = AuditableNeighborMemory(k_neighbors=5)
+        sources = train_df['source'].tolist()
+        targets = train_df['target'].tolist()
+        labels = train_df['label'].tolist()
+        mem_fit_info = neighbor_memory.fit(sources, targets, labels)
+        print(
+            'AuditDDI: Fitted AuditableNeighborMemory on '
+            f"{mem_fit_info['unique_training_drugs']} unique training drugs."
+        )
+
     train_loader = build_loader(
-        splits[train_split_key], toxicity_lookup, shuffle=True, graph_cache=graph_cache
+        splits[train_split_key],
+        toxicity_lookup,
+        shuffle=True,
+        graph_cache=graph_cache,
+        neighbor_memory=neighbor_memory,
     )
     validation_loader = build_loader(
-        splits[validation_split_key], toxicity_lookup, shuffle=False, graph_cache=graph_cache
+        splits[validation_split_key],
+        toxicity_lookup,
+        shuffle=False,
+        graph_cache=graph_cache,
+        neighbor_memory=neighbor_memory,
     )
     posthoc_validation_loader = build_loader(
         splits[posthoc_validation_split_key],
         toxicity_lookup,
         shuffle=False,
         graph_cache=graph_cache,
+        neighbor_memory=neighbor_memory,
     )
     test_loaders = {
         name: build_loader(
-            splits[split_key], toxicity_lookup, shuffle=False, graph_cache=graph_cache
+            splits[split_key],
+            toxicity_lookup,
+            shuffle=False,
+            graph_cache=graph_cache,
+            neighbor_memory=neighbor_memory,
         )
         for name, split_key in test_split_keys.items()
     }
@@ -1794,11 +1872,10 @@ def main() -> None:
     ])
     if len(posthoc_validation_labels) == 0 or len(np.unique(posthoc_validation_labels)) < 2:
         raise ValueError(
-            'Reserved post-hoc validation is unusable after SMILES validation; '
-            'adjust the data split.'
+            'Posthoc validation is unusable after SMILES validation; adjust the data split.'
         )
 
-    model = PxDDIModel(
+    model = AuditDDIModel(
         in_channels=INPUT_FEATURE_DIM,
         hidden_channels=HIDDEN_CHANNELS,
         use_chemberta=USE_CHEMBERTA,
@@ -1810,6 +1887,7 @@ def main() -> None:
         use_toxicity_pair_features=USE_TOXICITY_PAIR_FEATURES,
         motif_feature_dim=MOTIF_FEATURE_DIM if USE_MOTIF_FEATURES else None,
         motif_hidden_channels=MOTIF_HIDDEN_CHANNELS if USE_MOTIF_FEATURES else None,
+        use_neighbor_memory=USE_NEIGHBOR_MEMORY,
     ).to(DEVICE)
     pretraining_initialization: dict[str, Any] | None = None
     if PRETRAINED_ENCODER_PATH is not None:

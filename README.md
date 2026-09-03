@@ -1,12 +1,12 @@
-# PxDDI: Research Drug-Drug Interaction Prototype
+# AuditDDI: An Auditable Graph-Fingerprint Framework for Cold-Start Drug-Drug Interaction Prediction
 
-PxDDI is a research prototype for structure-based drug-drug interaction (DDI)
-prediction. It combines a symmetric molecular graph model with a toxicity head
-and a patient-context architecture. It is **not for clinical use**.
-
-Patient context is intentionally disabled at inference: the repository does
-not contain linked patient, drug-pair, and outcome data needed to train that
-module safely.
+AuditDDI is an auditable, structure-based deep learning framework for drug-drug interaction (DDI)
+prediction specifically engineered for cold-start generalization (novel, unseen drugs).
+It unifies:
+1. Dual-stream molecular representation: Edge-aware GATv2 encoding 2D chemical topology fused with 1024-bit Morgan fingerprints.
+2. Auditable Neighbor Interaction Memory (RAG-DDI): Retrieves nearest structural analogs from training memory to anchor inductive S1/S2 predictions with transparent, verifiable evidence.
+3. Rigorous cold-start auditing: 4-category pair applicability domain, Tanimoto degradation curves with bootstrap 95% CIs, and calibrated conformal prediction sets.
+It is a research framework and **not for unverified clinical use**.
 
 ## Committed reference GNN artifact
 
