@@ -103,6 +103,7 @@ from models.candidate_explainability import (
     select_representative_indices,
 )
 from models.applicability_domain import MorganApplicabilityDomain
+from models.encoder import EdgeAwareMolecularEncoder
 from models.encoder_pretraining import load_pretrained_edge_aware_encoder
 from evaluation.pair_applicability_domain import PairApplicabilityDomain
 from evaluation.degradation_audit import DegradationAudit
@@ -1706,8 +1707,11 @@ def main() -> None:
     write_json(RUN_ARTIFACTS_DIR / 'run_manifest_initial.json', manifest)
 
     toxicity_lookup, toxicity_summary = load_toxicity_lookup(audit_dir)
-    positives, input_quality_summary, all_clean_positives = _prepare_positive_edges(
-        audit_dir, sampling_seed=SPLIT_SEED, return_all_clean_positives=True
+    positives, input_quality_summary, all_clean_positives = cast(
+        tuple[pd.DataFrame, dict[str, Any], pd.DataFrame],
+        _prepare_positive_edges(
+            audit_dir, sampling_seed=SPLIT_SEED, return_all_clean_positives=True
+        ),
     )
     if EVALUATION_PROTOCOL == 'scaffold_disjoint':
         if NEGATIVE_SAMPLING_PROTOCOL != 'legacy_pre_split_v1':
@@ -1722,9 +1726,9 @@ def main() -> None:
         )
         dataset_summary = {
             'protocol': 'legacy_pre_split_v1_scaffold_only',
-            'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
-            'sampled_unreported_negative_pairs': int((full_dataset['label'] == 0.0).sum()),
-            'total_pair_rows_before_split': int(len(full_dataset)),
+            'effective_positive_pairs': (full_dataset['label'] == 1.0).sum(),
+            'sampled_unreported_negative_pairs': (full_dataset['label'] == 0.0).sum(),
+            'total_pair_rows_before_split': len(full_dataset),
             'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
         }
         splits, scaffold_audit = create_scaffold_disjoint_splits(
@@ -1756,9 +1760,9 @@ def main() -> None:
             )
             dataset_summary = {
                 'protocol': 'legacy_pre_split_v1',
-                'effective_positive_pairs': int((full_dataset['label'] == 1.0).sum()),
-                'sampled_unreported_negative_pairs': int((full_dataset['label'] == 0.0).sum()),
-                'total_pair_rows_before_split': int(len(full_dataset)),
+                'effective_positive_pairs': (full_dataset['label'] == 1.0).sum(),
+                'sampled_unreported_negative_pairs': (full_dataset['label'] == 0.0).sum(),
+                'total_pair_rows_before_split': len(full_dataset),
                 'negative_label_meaning': f'unreported_twosides_sampled_{NEGATIVE_SAMPLING_STRATEGY}',
             }
             splits = create_splits(
@@ -1892,7 +1896,7 @@ def main() -> None:
     pretraining_initialization: dict[str, Any] | None = None
     if PRETRAINED_ENCODER_PATH is not None:
         pretraining_initialization = load_pretrained_edge_aware_encoder(
-            model.encoder,
+            cast(EdgeAwareMolecularEncoder, model.encoder),
             PRETRAINED_ENCODER_PATH,
             expected_in_channels=INPUT_FEATURE_DIM,
             expected_edge_feature_dim=NUM_BOND_FEATURES,
