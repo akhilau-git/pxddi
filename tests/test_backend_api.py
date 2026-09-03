@@ -407,3 +407,38 @@ def test_backend_builds_motif_features_for_a_motif_candidate(monkeypatch):
     assert graph_a.motif_features.shape == (1, MOTIF_FEATURE_DIM)
     assert graph_b.motif_features.shape == (1, MOTIF_FEATURE_DIM)
     assert risk.shape == (1,)
+
+
+def test_backend_predict_with_auditable_memory(monkeypatch):
+    from src.models.neighbor_memory import AuditableNeighborMemory
+    from src.models.ddi_model import AuditDDIModel
+
+    train_a = [ASPIRIN]
+    train_b = [ACETAMINOPHEN]
+    labels = [1.0]
+    mem = AuditableNeighborMemory(k_neighbors=1)
+    mem.fit(train_a, train_b, labels)
+
+    candidate = AuditDDIModel(
+        in_channels=RICH_NUM_ATOM_FEATURES,
+        hidden_channels=8,
+        architecture_version='auditddi_memory_fusion_v1',
+        edge_feature_dim=NUM_BOND_FEATURES,
+        use_neighbor_memory=True,
+    ).eval()
+
+    monkeypatch.setattr(main, 'model', candidate)
+    monkeypatch.setattr(main, 'NEIGHBOR_MEMORY', mem)
+    monkeypatch.setattr(main, 'MODEL_FEATURE_SCHEMA', FEATURE_SCHEMA_RICH)
+    monkeypatch.setattr(main, 'MODEL_REQUIRES_FP_FEATURES', True)
+
+    response = CLIENT.post(
+        '/predict',
+        json={'smiles_a': ASPIRIN, 'smiles_b': ACETAMINOPHEN},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert 'auditable_evidence' in payload
+    assert payload['auditable_evidence']['status'] == 'available'
+    assert 'neighbor_interaction_density' in payload['auditable_evidence']
+    assert len(payload['auditable_evidence']['audit_trail']) > 0

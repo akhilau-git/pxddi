@@ -34,10 +34,14 @@ from models.ddi_model import (
     MODEL_ARCHITECTURE_EDGE_AWARE,
     MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
     MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
+    MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
+    MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
     architecture_uses_edge_features,
     architecture_requires_motif_features,
+    architecture_requires_fingerprint_features,
     model_from_checkpoint,
 )
+from models.neighbor_memory import AuditableNeighborMemory
 from models.calibration import apply_calibrator
 from models.applicability_domain import APPLICABILITY_DOMAIN_METHOD
 from models.uncertainty import conformal_prediction_sets
@@ -356,6 +360,30 @@ MODEL_FEATURE_SCHEMA = checkpoint_feature_schema(checkpoint)
 MODEL_REQUIRES_MOTIF_FEATURES = architecture_requires_motif_features(
     checkpoint.get('architecture_version', 'legacy_gat_v1')
 )
+MODEL_REQUIRES_FP_FEATURES = architecture_requires_fingerprint_features(
+    checkpoint.get('architecture_version', 'legacy_gat_v1')
+)
+
+NEIGHBOR_MEMORY = None
+if checkpoint.get('use_neighbor_memory') and checkpoint.get('neighbor_memory_state'):
+    try:
+        NEIGHBOR_MEMORY = AuditableNeighborMemory.from_state(checkpoint['neighbor_memory_state'])
+        LOGGER.info('AuditableNeighborMemory successfully restored into API.')
+    except Exception as exc:
+        LOGGER.warning('Could not restore AuditableNeighborMemory: %s', exc)
+
+
+def compute_ecfp_tensor(smiles: str, radius: int = 2, n_bits: int = 1024) -> torch.Tensor:
+    """Compute normalized 1024-bit Morgan fingerprint tensor for candidate models."""
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return torch.zeros((1, n_bits), dtype=torch.float)
+    gen = rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=n_bits)
+    fp = gen.GetFingerprint(mol)
+    import numpy as np
+    arr = np.zeros((n_bits,), dtype=np.float32)
+    DataStructs.ConvertToNumpyArray(fp, arr)
+    return torch.from_numpy(arr).unsqueeze(0)
 
 DECISION_THRESHOLD = float(checkpoint.get('threshold', 0.5))
 CALIBRATION = checkpoint.get('calibration')
@@ -603,6 +631,10 @@ def build_drug_batches(req: DDIRequest):
                 detail=f'{name} has {bond_count} bonds; the limit is {MAX_MOLECULE_BONDS}.',
             )
 
+    if MODEL_REQUIRES_FP_FEATURES:
+        graph_a.fingerprint_features = compute_ecfp_tensor(req.smiles_a)
+        graph_b.fingerprint_features = compute_ecfp_tensor(req.smiles_b)
+
     return Batch.from_data_list([graph_a]), Batch.from_data_list([graph_b])
 
 
@@ -782,8 +814,35 @@ def predict_ddi(req: DDIRequest):
             'conditioning module is not trained on linked patient-outcome data.'
         )
 
+        memory_features = None
+        auditable_evidence = None
+        if NEIGHBOR_MEMORY is not None:
+            mem_res = NEIGHBOR_MEMORY.score_pair_memory(req.smiles_a, req.smiles_b)
+            memory_features = torch.tensor([[
+                mem_res['neighbor_density'],
+                mem_res['max_support'],
+                mem_res['structural_confidence'],
+            ]], dtype=torch.float)
+            auditable_evidence = {
+                'status': 'available',
+                'method': 'tanimoto_knn_training_memory_v1',
+                'neighbor_interaction_density': round(float(mem_res['neighbor_density']), 4),
+                'max_supported_interaction': round(float(mem_res['max_support']), 4),
+                'structural_confidence': round(float(mem_res['structural_confidence']), 4),
+                'audit_trail': mem_res['audit_trail'],
+            }
+        else:
+            auditable_evidence = {
+                'status': 'not_available',
+                'method': None,
+                'note': 'This checkpoint does not carry an active training neighbor memory.',
+            }
+
         with torch.inference_mode():
-            risk, tox_a, tox_b = model(batch_a, batch_b, patient=None)
+            if getattr(model, 'use_neighbor_memory', False):
+                risk, tox_a, tox_b = model(batch_a, batch_b, patient=None, memory_features=memory_features)
+            else:
+                risk, tox_a, tox_b = model(batch_a, batch_b, patient=None)
 
         raw_risk_score = float(torch.sigmoid(risk))
         risk_score = float(apply_calibrator([raw_risk_score], CALIBRATION)[0])
@@ -806,6 +865,7 @@ def predict_ddi(req: DDIRequest):
             'score_calibration': calibration_response,
             'prediction_uncertainty': uncertainty,
             'structural_applicability_domain': structural_domain,
+            'auditable_evidence': auditable_evidence,
             'interaction_predicted': risk_score >= DECISION_THRESHOLD,
             'decision_threshold_used': DECISION_THRESHOLD,
             'patient_context_applied': False,
