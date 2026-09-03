@@ -840,11 +840,11 @@ class PxDDIDataset(Dataset):
             ]
             if neighbor_memory is not None:
                 mem_scores = neighbor_memory.score_pair_memory(source, target)
-                mem_feature = np.array([
+                mem_feature = torch.tensor([
                     mem_scores['neighbor_density'],
                     mem_scores['max_support'],
                     mem_scores['structural_confidence'],
-                ], dtype=np.float32)
+                ], dtype=torch.float32)
                 record_items.append(mem_feature)
 
             self.records.append(tuple(record_items))
@@ -1030,8 +1030,11 @@ def measure_inference_efficiency(model, loader) -> dict[str, Any]:
     start = time.perf_counter()
     model.eval()
     with torch.inference_mode():
-        for graph_a, graph_b, *_ in loader:
-            model(graph_a.to(DEVICE), graph_b.to(DEVICE))
+        for batch_items in loader:
+            graph_a = batch_items[0].to(DEVICE)
+            graph_b = batch_items[1].to(DEVICE)
+            mem_feat = batch_items[7].to(DEVICE) if len(batch_items) > 7 else None
+            model(graph_a, graph_b, memory_features=mem_feat)
             batch_count += 1
     if DEVICE.type == 'cuda':
         torch.cuda.synchronize(DEVICE)

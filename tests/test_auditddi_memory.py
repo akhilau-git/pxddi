@@ -125,3 +125,29 @@ def test_auditddi_backward_pass():
     # Verify gradients flowed into risk classifier and GNN encoder
     assert model.risk_classifier[0].weight.grad is not None
     assert any(p.grad is not None for p in model.encoder.parameters())
+
+
+def test_pxddi_dataset_dataloader_with_neighbor_memory():
+    from src.training.train_full_pipeline_v2 import PxDDIDataset
+    from torch_geometric.loader import DataLoader
+    import pandas as pd
+
+    df = pd.DataFrame({
+        'source': ['CC(=O)OC1=CC=CC=C1C(=O)O', 'CC(C)CC1=CC=C(C=C1)C(C)C(=O)O'],
+        'target': ['CC(=O)NC1=CC=C(C=C1)O', 'CC(=O)OC1=CC=CC=C1C(=O)O'],
+        'label': [1.0, 0.0],
+    })
+    mem = AuditableNeighborMemory(k_neighbors=1)
+    mem.fit(list(df['source']), list(df['target']), list(df['label']))
+
+    dataset = PxDDIDataset(
+        dataframe=df,
+        toxicity_lookup={},
+        neighbor_memory=mem,
+    )
+    loader = DataLoader(dataset, batch_size=2, shuffle=False)
+    batch = next(iter(loader))
+    assert len(batch) == 8
+    mem_tensor = batch[7]
+    assert isinstance(mem_tensor, torch.Tensor)
+    assert mem_tensor.shape == (2, 3)
