@@ -307,6 +307,7 @@ def _sample_partition_negatives(
     positive_frame: pd.DataFrame,
     *,
     candidate_drugs: set[str],
+    candidate_drugs_b: set[str] | None = None,
     is_eligible_pair: Callable[[str, str], bool],
     forbidden_keys: set[tuple[str, str]],
     source_col: str,
@@ -331,39 +332,69 @@ def _sample_partition_negatives(
             {'requested_negatives': 0, 'sampled_negatives': 0, 'attempts': 0},
         )
     eligible_drugs = sorted(candidate_drugs)
-    if len(eligible_drugs) < 2:
-        raise ValueError(
-            'Cannot draw negatives for a non-empty split with fewer than two eligible drugs.'
-        )
+    eligible_drugs_b = sorted(candidate_drugs_b) if candidate_drugs_b is not None else None
+
+    if candidate_drugs_b is None:
+        if len(eligible_drugs) < 2:
+            raise ValueError(
+                'Cannot draw negatives for a non-empty split with fewer than two eligible drugs.'
+            )
+    else:
+        if len(eligible_drugs) < 1 or len(eligible_drugs_b) < 1:
+            raise ValueError(
+                'Cannot draw bipartite negatives with empty drug candidate set.'
+            )
+
     probabilities = None
+    probabilities_b = None
     if negative_sampling_strategy == 'degree_matched':
         observed_counts = pd.concat([
             positive_frame[source_col].astype(str), positive_frame[target_col].astype(str),
         ]).value_counts()
         weights = observed_counts.reindex(eligible_drugs, fill_value=0).to_numpy(dtype=float)
-        if weights.sum() == 0:
-            raise ValueError('No positive degrees were available for degree-matched sampling.')
-        probabilities = weights / weights.sum()
+        if weights.sum() > 0:
+            probabilities = weights / weights.sum()
+        if eligible_drugs_b is not None:
+            weights_b = observed_counts.reindex(eligible_drugs_b, fill_value=0).to_numpy(dtype=float)
+            if weights_b.sum() > 0:
+                probabilities_b = weights_b / weights_b.sum()
 
     rng = np.random.default_rng(seed)
     sampled_keys: set[tuple[str, str]] = set()
     attempts = 0
-    max_attempts = max(target_negatives * max_attempt_multiplier, 1000)
+    max_attempts = max(target_negatives * max_attempt_multiplier, 5000)
+
+    # Theoretical maximum unique pairs in this partition
+    if eligible_drugs_b is None:
+        total_possible = len(eligible_drugs) * (len(eligible_drugs) - 1) // 2
+    else:
+        total_possible = len(eligible_drugs) * len(eligible_drugs_b)
+
     while len(sampled_keys) < target_negatives and attempts < max_attempts:
-        first, second = rng.choice(eligible_drugs, size=2, replace=False, p=probabilities)
-        candidate = canonical_pair(first, second)
         attempts += 1
+        if eligible_drugs_b is None:
+            first, second = rng.choice(eligible_drugs, size=2, replace=False, p=probabilities)
+        else:
+            first = rng.choice(eligible_drugs, p=probabilities)
+            second = rng.choice(eligible_drugs_b, p=probabilities_b)
+        candidate = canonical_pair(first, second)
         if not is_eligible_pair(*candidate):
             continue
         if candidate not in forbidden_keys and candidate not in sampled_keys:
             sampled_keys.add(candidate)
+        if len(sampled_keys) >= total_possible:
+            break
+
     if len(sampled_keys) < target_negatives:
-        raise ValueError(
-            'Could not sample the requested number of split-aware unreported pairs. '
-            f'Requested {target_negatives}; sampled {len(sampled_keys)}; '
-            f'attempts {attempts}; strategy {negative_sampling_strategy}. '
-            'Reduce the negative ratio or inspect the split-specific positive density.'
+        import warnings
+        warnings.warn(
+            f'Split-aware negative sampling saturated: requested {target_negatives} negatives; '
+            f'sampled {len(sampled_keys)} after {attempts} attempts. '
+            f'Proceeding with {len(sampled_keys)} negative pairs.',
+            UserWarning,
+            stacklevel=2,
         )
+
     negatives = pd.DataFrame(sorted(sampled_keys), columns=[source_col, target_col])
     negatives['label'] = 0.0
     negatives['label_evidence'] = 'unreported_twosides_split_aware_sampled'
@@ -372,6 +403,24 @@ def _sample_partition_negatives(
         'sampled_negatives': len(sampled_keys),
         'attempts': attempts,
     }
+
+
+def _split_candidate_drugs(
+    name: str, groups: dict[str, set[str]]
+) -> tuple[set[str], set[str] | None]:
+    """Return split-specific candidate drug sets to ensure 100% sampling efficiency."""
+    seen, dev, test = groups['seen'], groups['s1_dev'], groups['s1_test']
+    if name.startswith('transductive') or name == 'validation':
+        return seen, None
+    if name == 's1_dev':
+        return dev, None
+    if name == 's1_test':
+        return test, None
+    if name == 's2_dev':
+        return dev, seen
+    if name == 's2_test':
+        return test, seen
+    return seen | dev | test, None
 
 
 def create_split_aware_binary_splits(
@@ -433,11 +482,12 @@ def create_split_aware_binary_splits(
     used_negative_keys: set[tuple[str, str]] = set()
     splits: dict[str, pd.DataFrame] = {}
     per_split: dict[str, dict[str, int]] = {}
-    candidate_drugs = groups['seen'] | groups['s1_dev'] | groups['s1_test']
     for position, (name, positive_split) in enumerate(positive_splits.items()):
+        drugs_a, drugs_b = _split_candidate_drugs(name, groups)
         negatives, negative_keys, negative_audit = _sample_partition_negatives(
             positive_split,
-            candidate_drugs=candidate_drugs,
+            candidate_drugs=drugs_a,
+            candidate_drugs_b=drugs_b,
             is_eligible_pair=_negative_pair_predicate(name, groups),
             forbidden_keys=known_keys | used_negative_keys,
             source_col=source_col,

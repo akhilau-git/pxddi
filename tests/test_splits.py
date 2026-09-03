@@ -218,3 +218,30 @@ def test_split_aware_sampler_forbids_reported_pairs_omitted_by_a_data_cap():
     assert len(keys) == 4
     assert summary['sampled_negatives'] == 4
     assert canonical_pair('DrugC', 'DrugD') not in keys
+
+
+def test_split_aware_sampler_handles_saturated_partition():
+    # Only 3 drugs: DrugA, DrugB, DrugC -> Total possible pairs is 3: (A,B), (A,C), (B,C)
+    # Positive pairs: (A,B) and (A,C)
+    # Only 1 unreported pair exists: (B,C)
+    # If neg_ratio requests 2 negatives, it should sample 1 without crashing
+    positive_frame = pd.DataFrame({
+        'source': ['DrugA', 'DrugA'],
+        'target': ['DrugB', 'DrugC'],
+        'label': [1.0, 1.0],
+    })
+    with pytest.warns(UserWarning, match='Split-aware negative sampling saturated'):
+        negatives, keys, summary = splits_module._sample_partition_negatives(
+            positive_frame,
+            candidate_drugs={'DrugA', 'DrugB', 'DrugC'},
+            is_eligible_pair=lambda _first, _second: True,
+            forbidden_keys={canonical_pair('DrugA', 'DrugB'), canonical_pair('DrugA', 'DrugC')},
+            source_col='source',
+            target_col='target',
+            neg_ratio=1.0,
+            seed=42,
+            negative_sampling_strategy='uniform',
+            max_attempt_multiplier=10,
+        )
+    assert len(negatives) == 1
+    assert canonical_pair('DrugB', 'DrugC') in keys
