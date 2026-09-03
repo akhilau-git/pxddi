@@ -1956,8 +1956,32 @@ def main() -> None:
         torch.cuda.reset_peak_memory_stats(DEVICE)
         torch.cuda.synchronize(DEVICE)
     EVALUATE_ONLY = _boolean_from_environment('PXDDI_EVALUATE_ONLY', False)
-    if EVALUATE_ONLY and CHECKPOINT_PATH.exists():
-        print(f'PXDDI_EVALUATE_ONLY active: Skipping training epochs and evaluating saved checkpoint: {CHECKPOINT_PATH}')
+    if EVALUATE_ONLY:
+        candidate_search_paths = [
+            CHECKPOINT_PATH,
+            Path('/content/drive/MyDrive/pxddi-results/checkpoints/candidates/auditddi_memory_fusion_candidate.pt'),
+            Path('/content/drive/MyDrive/pxddi-data/pxddi/checkpoints/candidates/auditddi_memory_fusion_candidate.pt'),
+            Path('/content/drive/MyDrive/pxddi-data/pxddi/backend/checkpoints/candidates/auditddi_memory_fusion_candidate.pt'),
+            DRIVE_BASE / 'checkpoints' / 'candidates' / 'auditddi_memory_fusion_candidate.pt',
+            DRIVE_BASE / 'backend' / 'checkpoints' / 'candidates' / 'auditddi_memory_fusion_candidate.pt',
+            RESULTS_BASE / 'checkpoints' / 'candidates' / 'auditddi_memory_fusion_candidate.pt',
+        ]
+        found_checkpoint = None
+        for path in candidate_search_paths:
+            if path is not None and path.exists():
+                found_checkpoint = path
+                break
+        if found_checkpoint is None:
+            raise FileNotFoundError(
+                "PXDDI_EVALUATE_ONLY is active, but no saved checkpoint was found. "
+                f"Checked locations:\n" + "\n".join(f" - {p}" for p in candidate_search_paths if p is not None)
+            )
+        CHECKPOINT_PATH = found_checkpoint
+        print("=" * 72)
+        print("  AuditDDI Evaluation Mode: ZERO TRAINING EPOCHS")
+        print(f"  Loaded saved checkpoint: {CHECKPOINT_PATH}")
+        print("  Evaluating test splits (Transductive, S1 novel, S2 novel)...")
+        print("=" * 72)
         stopped_early = True
         history = {
             'epoch': [1],
