@@ -56,6 +56,7 @@ def model_from_checkpoint(checkpoint):
         use_toxicity_pair_features=checkpoint.get('use_toxicity_pair_features', True),
         motif_feature_dim=checkpoint.get('motif_feature_dim'),
         motif_hidden_channels=checkpoint.get('motif_hidden_channels'),
+        use_neighbor_memory=checkpoint.get('use_neighbor_memory', False),
     )
 
 class PxDDIModel(nn.Module):

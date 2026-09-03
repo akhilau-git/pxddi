@@ -1988,6 +1988,11 @@ def main() -> None:
                         'pair_isolated_atom_attention_v1'
                         if USE_CROSS_DRUG_ATTENTION else None
                     ),
+                    'use_fingerprint_features': USE_FINGERPRINT_FEATURES,
+                    'use_neighbor_memory': USE_NEIGHBOR_MEMORY,
+                    'neighbor_memory_state': (
+                        neighbor_memory.export_state() if neighbor_memory is not None else None
+                    ),
                     'use_toxicity_pair_features': USE_TOXICITY_PAIR_FEATURES,
                     'toxicity_loss_weight': TOXICITY_LOSS_WEIGHT,
                     'toxicity_head_output': 'logits_v1',
@@ -2094,6 +2099,10 @@ def main() -> None:
     checkpoint['calibration'] = calibration
     checkpoint['toxicity_head_output'] = 'logits_v1'
     checkpoint['conformal'] = conformal
+    checkpoint['use_neighbor_memory'] = USE_NEIGHBOR_MEMORY
+    checkpoint['neighbor_memory_state'] = (
+        neighbor_memory.export_state() if neighbor_memory is not None else None
+    )
     checkpoint['applicability_domain'] = applicability_domain.export_checkpoint_state()
     checkpoint['posthoc_validation_partition'] = {
         key: value for key, value in posthoc_partition_artifact.items()

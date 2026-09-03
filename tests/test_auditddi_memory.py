@@ -53,6 +53,16 @@ def test_auditable_neighbor_memory_retrieval():
     batch_features = mem.score_batch([naproxen], [acetaminophen])
     assert batch_features.shape == (1, 3)
 
+    # State serialization and restoration
+    exported = mem.export_state()
+    assert 'training_smiles' in exported
+    assert 'interaction_matrix' in exported
+    restored = AuditableNeighborMemory.from_state(exported)
+    restored_scores = restored.score_pair_memory(naproxen, acetaminophen)
+    assert np.isclose(scores['neighbor_density'], restored_scores['neighbor_density'])
+    assert np.isclose(scores['max_support'], restored_scores['max_support'])
+    assert np.isclose(scores['structural_confidence'], restored_scores['structural_confidence'])
+
 
 def test_auditddi_model_forward_and_symmetry():
     smiles_a = 'CC(=O)OC1=CC=CC=C1C(=O)O'  # Aspirin

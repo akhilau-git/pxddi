@@ -184,3 +184,42 @@ class AuditableNeighborMemory:
                 features[i, 1] = 0.0
                 features[i, 2] = 0.0
         return features
+
+    def export_state(self) -> dict[str, Any]:
+        """Export state bundle for reproducible checkpoint serialization."""
+        if not self._fitted or self._interaction_matrix is None:
+            raise RuntimeError('AuditableNeighborMemory must be fitted before exporting state.')
+        return {
+            'method': AUDITABLE_MEMORY_METHOD,
+            'k_neighbors': self.k_neighbors,
+            'radius': self.radius,
+            'num_bits': self.num_bits,
+            'training_smiles': self.training_smiles,
+            'interaction_matrix': self._interaction_matrix,
+        }
+
+    def load_state(self, state: dict[str, Any]) -> None:
+        """Restore memory from an exported state bundle."""
+        self.k_neighbors = int(state.get('k_neighbors', 5))
+        self.radius = int(state.get('radius', 2))
+        self.num_bits = int(state.get('num_bits', 1024))
+        self._generator = rdFingerprintGenerator.GetMorganGenerator(
+            radius=self.radius, fpSize=self.num_bits, includeChirality=True
+        )
+        self.training_smiles = list(state['training_smiles'])
+        self._smiles_to_idx = {s: i for i, s in enumerate(self.training_smiles)}
+        self.training_fps = [self._fingerprint(s) for s in self.training_smiles]
+        self._interaction_matrix = np.asarray(state['interaction_matrix'], dtype=np.float32)
+        self._top_k_cache = {}
+        self._fitted = True
+
+    @classmethod
+    def from_state(cls, state: dict[str, Any]) -> AuditableNeighborMemory:
+        """Factory constructor restoring memory directly from state dictionary."""
+        instance = cls(
+            k_neighbors=int(state.get('k_neighbors', 5)),
+            radius=int(state.get('radius', 2)),
+            num_bits=int(state.get('num_bits', 1024)),
+        )
+        instance.load_state(state)
+        return instance
