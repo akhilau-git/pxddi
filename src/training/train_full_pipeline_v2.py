@@ -2042,7 +2042,7 @@ def main() -> None:
         ),
     }
 
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=True)
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     validation_true, validation_raw_predictions = collect_predictions(
         model, posthoc_validation_loader

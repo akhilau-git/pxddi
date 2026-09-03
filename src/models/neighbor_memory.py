@@ -189,13 +189,14 @@ class AuditableNeighborMemory:
         """Export state bundle for reproducible checkpoint serialization."""
         if not self._fitted or self._interaction_matrix is None:
             raise RuntimeError('AuditableNeighborMemory must be fitted before exporting state.')
+        import torch
         return {
             'method': AUDITABLE_MEMORY_METHOD,
             'k_neighbors': self.k_neighbors,
             'radius': self.radius,
             'num_bits': self.num_bits,
             'training_smiles': self.training_smiles,
-            'interaction_matrix': self._interaction_matrix,
+            'interaction_matrix': torch.from_numpy(self._interaction_matrix),
         }
 
     def load_state(self, state: dict[str, Any]) -> None:
@@ -209,7 +210,12 @@ class AuditableNeighborMemory:
         self.training_smiles = list(state['training_smiles'])
         self._smiles_to_idx = {s: i for i, s in enumerate(self.training_smiles)}
         self.training_fps = [self._fingerprint(s) for s in self.training_smiles]
-        self._interaction_matrix = np.asarray(state['interaction_matrix'], dtype=np.float32)
+        mat = state['interaction_matrix']
+        import torch
+        if isinstance(mat, torch.Tensor):
+            self._interaction_matrix = mat.cpu().numpy()
+        else:
+            self._interaction_matrix = np.asarray(mat, dtype=np.float32)
         self._top_k_cache = {}
         self._fitted = True
 

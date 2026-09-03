@@ -351,8 +351,10 @@ app.add_middleware(RequestGuardMiddleware)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 
 CHECKPOINT_PATH = resolve_checkpoint_path()
-# Checkpoint metadata contains only safe built-in types and tensors.
-checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=True)
+try:
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=True)
+except Exception:
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
 model = model_from_checkpoint(checkpoint)
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
