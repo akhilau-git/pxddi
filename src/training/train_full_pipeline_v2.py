@@ -25,6 +25,23 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 import torch
+try:
+    import torch.serialization
+    if hasattr(torch.serialization, 'add_safe_globals'):
+        _safe_globals = [np.ndarray, np.dtype]
+        try:
+            import numpy._core.multiarray as _np_core
+            _safe_globals.append(_np_core._reconstruct)
+        except Exception:
+            pass
+        try:
+            import numpy.core.multiarray as _np_core_legacy
+            _safe_globals.append(_np_core_legacy._reconstruct)
+        except Exception:
+            pass
+        torch.serialization.add_safe_globals(_safe_globals)
+except Exception:
+    pass
 from matplotlib import pyplot as plt
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import (
