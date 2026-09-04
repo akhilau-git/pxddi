@@ -1956,6 +1956,7 @@ def main() -> None:
     if DEVICE.type == 'cuda':
         torch.cuda.reset_peak_memory_stats(DEVICE)
         torch.cuda.synchronize(DEVICE)
+    training_started_at = time.perf_counter()
     EVALUATE_ONLY = _boolean_from_environment('PXDDI_EVALUATE_ONLY', False)
     if EVALUATE_ONLY:
         candidate_search_paths = [
