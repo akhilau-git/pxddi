@@ -11,6 +11,13 @@ import os
 import sys
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+REPOSITORY_SRC = PROJECT_ROOT / "src"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+if str(REPOSITORY_SRC) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_SRC))
+
 # Ensure PXDDI_EVALUATE_ONLY is active before importing the training pipeline
 os.environ["PXDDI_EVALUATE_ONLY"] = "1"
 
