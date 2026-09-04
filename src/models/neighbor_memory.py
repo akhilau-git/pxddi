@@ -122,8 +122,17 @@ class AuditableNeighborMemory:
         self,
         smiles_a: str,
         smiles_b: str,
+        *,
+        exclude_query_pair: bool = False,
     ) -> dict[str, Any]:
-        """Retrieve nearest analogs and compute auditable interaction evidence."""
+        """Retrieve nearest analogs and compute auditable interaction evidence.
+
+        ``exclude_query_pair`` is required when deriving features for a row
+        that was used to fit this memory.  Without it, a training pair can
+        retrieve its own interaction-matrix entry through exact structural
+        matches and thereby expose its label to the model.  Evaluation queries
+        are not in the fitted matrix, so they retain the normal retrieval path.
+        """
         if not self._fitted or self._interaction_matrix is None:
             raise RuntimeError('AuditableNeighborMemory must be fitted before scoring.')
 
@@ -134,6 +143,19 @@ class AuditableNeighborMemory:
         top_k_b, weights_b = self._get_drug_neighbors(cb)
 
         sub_matrix = self._interaction_matrix[np.ix_(top_k_a, top_k_b)]
+        query_pair_excluded = False
+        if exclude_query_pair:
+            source_index = self._smiles_to_idx.get(ca)
+            target_index = self._smiles_to_idx.get(cb)
+            if source_index is not None and target_index is not None:
+                source_positions = np.flatnonzero(top_k_a == source_index)
+                target_positions = np.flatnonzero(top_k_b == target_index)
+                if len(source_positions) and len(target_positions):
+                    # Copy before zeroing so feature generation never mutates
+                    # the fitted evidence matrix shared by later rows.
+                    sub_matrix = sub_matrix.copy()
+                    sub_matrix[np.ix_(source_positions, target_positions)] = 0.0
+                    query_pair_excluded = True
         outer_weights = np.outer(weights_a, weights_b)
         sum_weights = float(np.sum(outer_weights))
 
@@ -162,6 +184,7 @@ class AuditableNeighborMemory:
             'neighbor_density': weighted_density,
             'max_support': max_support,
             'structural_confidence': confidence,
+            'query_pair_excluded': query_pair_excluded,
             'audit_trail': audit_trail,
         }
 
@@ -169,13 +192,19 @@ class AuditableNeighborMemory:
         self,
         smiles_list_a: list[str],
         smiles_list_b: list[str],
+        *,
+        exclude_query_pairs: bool = False,
     ) -> np.ndarray:
         """Vectorized extraction of memory features [density, max_support, confidence]."""
         n = len(smiles_list_a)
         features = np.zeros((n, 3), dtype=np.float32)
         for i in range(n):
             try:
-                res = self.score_pair_memory(smiles_list_a[i], smiles_list_b[i])
+                res = self.score_pair_memory(
+                    smiles_list_a[i],
+                    smiles_list_b[i],
+                    exclude_query_pair=exclude_query_pairs,
+                )
                 features[i, 0] = res['neighbor_density']
                 features[i, 1] = res['max_support']
                 features[i, 2] = res['structural_confidence']

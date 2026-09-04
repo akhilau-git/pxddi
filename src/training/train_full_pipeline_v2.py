@@ -134,6 +134,7 @@ from models.uncertainty import (
 from evaluation.ddi_metrics import (
     bootstrap_confidence_intervals,
     calculate_binary_metrics,
+    evaluation_metric_table,
     save_confident_error_analysis,
     selective_prediction_summary,
     structural_similarity_slices,
@@ -213,7 +214,7 @@ if EARLY_STOPPING_MIN_EPOCHS > EPOCHS:
 MODEL_SELECTION_VALIDATION_FRACTION = _open_unit_interval_from_environment(
     'PXDDI_MODEL_SELECTION_VALIDATION_FRACTION', 0.5
 )
-NEGATIVE_SAMPLING_STRATEGY = os.environ.get('PXDDI_NEGATIVE_SAMPLING_STRATEGY', 'uniform')
+NEGATIVE_SAMPLING_STRATEGY = os.environ.get('PXDDI_NEGATIVE_SAMPLING_STRATEGY', 'degree_matched')
 NEGATIVE_SAMPLING_PROTOCOL = os.environ.get(
     'PXDDI_NEGATIVE_SAMPLING_PROTOCOL', 'split_aware_standard_v1'
 ).strip().lower()
@@ -270,9 +271,9 @@ INPUT_FEATURE_DIM = (
     else LEGACY_NUM_ATOM_FEATURES
 )
 USE_TOXICITY_PAIR_FEATURES = _boolean_from_environment(
-    'PXDDI_USE_TOXICITY_PAIR_FEATURES', True
+    'PXDDI_USE_TOXICITY_PAIR_FEATURES', False
 )
-TOXICITY_LOSS_WEIGHT = float(os.environ.get('PXDDI_TOXICITY_LOSS_WEIGHT', '0.3'))
+TOXICITY_LOSS_WEIGHT = float(os.environ.get('PXDDI_TOXICITY_LOSS_WEIGHT', '0.0'))
 if TOXICITY_LOSS_WEIGHT < 0:
     raise ValueError('PXDDI_TOXICITY_LOSS_WEIGHT must be non-negative.')
 EVALUATION_PROTOCOL = os.environ.get('PXDDI_EVALUATION_PROTOCOL', 'standard').strip().lower()
@@ -300,6 +301,7 @@ DEFAULT_CHECKPOINT_PATH = (
     )
 )
 CHECKPOINT_PATH = Path(os.environ.get('PXDDI_CHECKPOINT_PATH', DEFAULT_CHECKPOINT_PATH))
+CHECKPOINT_PATH_WAS_EXPLICITLY_CONFIGURED = 'PXDDI_CHECKPOINT_PATH' in os.environ
 PRETRAINED_ENCODER_PATH = (
     Path(os.environ['PXDDI_PRETRAINED_ENCODER_PATH'])
     if os.environ.get('PXDDI_PRETRAINED_ENCODER_PATH')
@@ -317,6 +319,12 @@ LATEST_RESULTS_DIR = Path(
     os.environ.get('PXDDI_LATEST_RESULTS_DIR', RESULTS_BASE / 'latest_results')
 )
 PUBLISH_LATEST_RESULTS = _boolean_from_environment('PXDDI_PUBLISH_LATEST_RESULTS', True)
+EVALUATE_ONLY = _boolean_from_environment('PXDDI_EVALUATE_ONLY', False)
+if EVALUATE_ONLY and not CHECKPOINT_PATH_WAS_EXPLICITLY_CONFIGURED:
+    raise ValueError(
+        'PXDDI_EVALUATE_ONLY requires an explicit PXDDI_CHECKPOINT_PATH. '
+        'Refusing to select an arbitrary candidate checkpoint.'
+    )
 RUN_CANDIDATE_EXPLANATIONS = _boolean_from_environment(
     'PXDDI_RUN_CANDIDATE_EXPLANATIONS', False
 )
@@ -492,6 +500,10 @@ def build_run_manifest() -> dict[str, Any]:
             'feature_schema': FEATURE_SCHEMA,
             'use_motif_features': USE_MOTIF_FEATURES,
             'use_fingerprint_features': USE_FINGERPRINT_FEATURES,
+            'neighbor_memory_training_query_policy': (
+                'exclude_exact_query_pair_from_interaction_matrix_v1'
+                if USE_NEIGHBOR_MEMORY else None
+            ),
             'use_cross_drug_attention': USE_CROSS_DRUG_ATTENTION,
             'cross_drug_attention_type': (
                 'pair_isolated_atom_attention_v1'
@@ -570,6 +582,193 @@ def save_split_manifests(
     return manifest
 
 
+def split_manifest_fingerprint(split_manifest: dict[str, dict[str, Any]]) -> str:
+    """Hash stable split evidence without including run-specific file paths."""
+    evidence = {
+        name: {
+            'sha256': details.get('sha256'),
+            'rows': details.get('rows'),
+            'label_counts': details.get('label_counts'),
+        }
+        for name, details in sorted(split_manifest.items())
+    }
+    if not evidence or any(not details['sha256'] for details in evidence.values()):
+        raise ValueError('Split manifest must contain a SHA-256 hash for every split.')
+    encoded = json.dumps(evidence, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def external_overlap_training_split(
+    split_manifest: dict[str, dict[str, Any]], train_split_key: str
+) -> dict[str, Any]:
+    """Return the verified training split needed to screen external datasets.
+
+    External evaluation must reject an exact molecular pair that was used for
+    fitting.  Store the concrete split artifact and hash with new checkpoints
+    so the external evaluator can prove that screen instead of relying on a
+    user assertion.
+    """
+    details = split_manifest.get(train_split_key)
+    if not isinstance(details, dict):
+        raise ValueError(
+            f"Training split {train_split_key!r} is absent from the split manifest."
+        )
+    required = ('path', 'sha256', 'rows')
+    missing = [key for key in required if details.get(key) is None]
+    if missing:
+        raise ValueError(
+            'Training split artifact is incomplete for external-overlap screening; '
+            f'missing: {missing}.'
+        )
+    return {
+        'split_name': train_split_key,
+        'path': str(details['path']),
+        'sha256': str(details['sha256']),
+        'rows': int(details['rows']),
+    }
+
+
+def external_overlap_development_splits(
+    split_manifest: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Record every development split for strict external-overlap screening."""
+    if not split_manifest:
+        raise ValueError('Split manifest is empty; external-overlap screening is unavailable.')
+    return {
+        split_name: external_overlap_training_split(split_manifest, split_name)
+        for split_name in sorted(split_manifest)
+    }
+
+
+def evaluation_checkpoint_provenance(
+    manifest: dict[str, Any], split_manifest: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Capture the exact run inputs that checkpoint-only evaluation must match."""
+    return {
+        'input_sha256': manifest['input_sha256'],
+        'split_manifest_fingerprint': split_manifest_fingerprint(split_manifest),
+        'model_architecture': MODEL_ARCHITECTURE,
+        'feature_schema': FEATURE_SCHEMA,
+        'in_channels': INPUT_FEATURE_DIM,
+        'hidden_channels': HIDDEN_CHANNELS,
+        'data_cap': DATA_CAP,
+        'model_seed': MODEL_SEED,
+        'split_seed': SPLIT_SEED,
+        'negative_sampling_strategy': NEGATIVE_SAMPLING_STRATEGY,
+        'negative_sampling_protocol': NEGATIVE_SAMPLING_PROTOCOL,
+        'use_toxicity_pair_features': USE_TOXICITY_PAIR_FEATURES,
+        'toxicity_loss_weight': TOXICITY_LOSS_WEIGHT,
+        'model_selection_validation_fraction': MODEL_SELECTION_VALIDATION_FRACTION,
+    }
+
+
+def validate_checkpoint_for_evaluation(
+    checkpoint: dict[str, Any],
+    manifest: dict[str, Any],
+    split_manifest: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Refuse checkpoint-only evaluation when data, splits, or model differ.
+
+    Recreating a split from whatever happens to be in Drive can silently turn
+    a valid checkpoint into an invalid evaluation.  Checkpoints created before
+    this provenance contract are intentionally rejected rather than guessed.
+    """
+    if not isinstance(checkpoint, dict):
+        raise ValueError('Checkpoint must be a metadata dictionary.')
+    expected = evaluation_checkpoint_provenance(manifest, split_manifest)
+    provenance = checkpoint.get('evaluation_provenance')
+    if not isinstance(provenance, dict):
+        raise ValueError(
+            'Checkpoint has no evaluation provenance. Re-evaluate only a checkpoint '
+            'created by the current audited training pipeline.'
+        )
+    missing = sorted(set(expected).difference(provenance))
+    if missing:
+        raise ValueError(
+            'Checkpoint evaluation provenance is incomplete; missing: '
+            f'{missing}.'
+        )
+    mismatches = {
+        key: {'checkpoint': provenance[key], 'current_run': expected[key]}
+        for key in expected
+        if provenance[key] != expected[key]
+    }
+    if mismatches:
+        raise ValueError(
+            'Checkpoint does not match the current evaluation inputs, split, or model '
+            f'configuration: {mismatches}.'
+        )
+
+    # Provenance is an audit record, not a substitute for validating the
+    # checkpoint that will actually be loaded.  Reject a malformed or manually
+    # edited bundle whose top-level model metadata disagrees with that record
+    # before attempting to restore its state dictionary.
+    metadata_contract = {
+        'architecture_version': 'model_architecture',
+        'feature_schema': 'feature_schema',
+        'in_channels': 'in_channels',
+        'hidden_channels': 'hidden_channels',
+        'data_cap': 'data_cap',
+        'model_seed': 'model_seed',
+        'split_seed': 'split_seed',
+        'use_toxicity_pair_features': 'use_toxicity_pair_features',
+        'toxicity_loss_weight': 'toxicity_loss_weight',
+    }
+    missing_metadata = [key for key in metadata_contract if key not in checkpoint]
+    if missing_metadata:
+        raise ValueError(
+            'Checkpoint metadata is incomplete for provenance-checked evaluation; '
+            f'missing: {missing_metadata}.'
+        )
+    metadata_mismatches = {
+        checkpoint_key: {
+            'checkpoint': checkpoint[checkpoint_key],
+            'evaluation_provenance': provenance[provenance_key],
+        }
+        for checkpoint_key, provenance_key in metadata_contract.items()
+        if checkpoint[checkpoint_key] != provenance[provenance_key]
+    }
+    if metadata_mismatches:
+        raise ValueError(
+            'Checkpoint metadata disagrees with its evaluation provenance: '
+            f'{metadata_mismatches}.'
+        )
+    return expected
+
+
+def load_checkpoint_training_history(checkpoint: dict[str, Any]) -> dict[str, list[float]]:
+    """Load verified real training history for checkpoint-only evaluation."""
+    metadata = checkpoint.get('training_history')
+    if not isinstance(metadata, dict) or not metadata.get('path') or not metadata.get('sha256'):
+        raise ValueError(
+            'Checkpoint has no verified training-history artifact. Refusing to create '
+            'a synthetic convergence history for checkpoint-only evaluation.'
+        )
+    path = Path(metadata['path'])
+    if not path.is_file():
+        raise FileNotFoundError(
+            f'Checkpoint training-history artifact is unavailable: {path}. '
+            'Restore the original artifact directory before evaluating this checkpoint.'
+        )
+    if get_file_hash(path) != metadata['sha256']:
+        raise ValueError('Checkpoint training-history hash does not match its artifact.')
+    table = pd.read_csv(path)
+    required_columns = (
+        'epoch', 'loss', 'auroc', 'average_precision', 'f1', 'mcc',
+        'balanced_accuracy', 'threshold', 'learning_rate',
+    )
+    missing = [column for column in required_columns if column not in table]
+    if missing or table.empty:
+        raise ValueError(
+            'Checkpoint training-history artifact is incomplete; missing columns: '
+            f'{missing}.'
+        )
+    return {
+        column: pd.to_numeric(table[column], errors='raise').astype(float).tolist()
+        for column in required_columns
+    }
+
+
 def save_training_history(history: dict[str, list[float]], artifact_dir: Path) -> dict[str, Any]:
     """Save the numeric source data behind the convergence figure."""
     lengths = {len(values) for values in history.values()}
@@ -581,6 +780,30 @@ def save_training_history(history: dict[str, list[float]], artifact_dir: Path) -
         'path': str(history_path),
         'sha256': get_file_hash(history_path),
         'epoch_count': next(iter(lengths), 0),
+    }
+
+
+def save_evaluation_metrics(
+    results: dict[str, dict[str, Any]],
+    artifact_dir: Path,
+    *,
+    negative_label_meaning: str = NEGATIVE_LABEL_MEANING,
+) -> dict[str, Any]:
+    """Write the compact, paper-ready metrics table promised by each run.
+
+    ``results_summary.json`` intentionally preserves rich nested diagnostics.
+    This CSV carries the complementary per-split headline metrics in a stable,
+    tabular form for inspection and controlled experiment aggregation.
+    """
+    table = evaluation_metric_table(results, negative_label_meaning)
+    path = Path(artifact_dir) / 'evaluation_metrics.csv'
+    table.to_csv(path, index=False)
+    return {
+        'path': str(path),
+        'sha256': get_file_hash(path),
+        'rows': len(table),
+        'columns': list(table.columns),
+        'negative_label_meaning': negative_label_meaning,
     }
 
 
@@ -819,6 +1042,7 @@ class PxDDIDataset(Dataset):
         label_col: str = 'label',
         graph_cache: GraphCache | None = None,
         neighbor_memory: AuditableNeighborMemory | None = None,
+        exclude_query_pair_from_memory: bool = False,
     ) -> None:
         super().__init__()
         self.records = []
@@ -856,7 +1080,11 @@ class PxDDIDataset(Dataset):
                 label,
             ]
             if neighbor_memory is not None:
-                mem_scores = neighbor_memory.score_pair_memory(source, target)
+                mem_scores = neighbor_memory.score_pair_memory(
+                    source,
+                    target,
+                    exclude_query_pair=exclude_query_pair_from_memory,
+                )
                 mem_feature = torch.tensor([
                     mem_scores['neighbor_density'],
                     mem_scores['max_support'],
@@ -921,12 +1149,14 @@ def build_loader(
     graph_cache: GraphCache | None = None,
     generator_seed: int = MODEL_SEED,
     neighbor_memory: AuditableNeighborMemory | None = None,
+    exclude_query_pair_from_memory: bool = False,
 ) -> DataLoader:
     dataset = PxDDIDataset(
         dataframe,
         toxicity_lookup,
         graph_cache=graph_cache,
         neighbor_memory=neighbor_memory,
+        exclude_query_pair_from_memory=exclude_query_pair_from_memory,
     )
     generator = torch.Generator()
     generator.manual_seed(generator_seed)
@@ -1628,6 +1858,10 @@ def model_summary(model: PxDDIModel) -> dict[str, Any]:
             if USES_EDGE_FEATURES else None
         ),
         'use_motif_features': USE_MOTIF_FEATURES,
+        'neighbor_memory_training_query_policy': (
+            'exclude_exact_query_pair_from_interaction_matrix_v1'
+            if USE_NEIGHBOR_MEMORY else None
+        ),
         'use_cross_drug_attention': USE_CROSS_DRUG_ATTENTION,
         'cross_drug_attention_type': (
             'pair_isolated_atom_attention_v1'
@@ -1845,6 +2079,9 @@ def main() -> None:
         shuffle=True,
         graph_cache=graph_cache,
         neighbor_memory=neighbor_memory,
+        # Training rows helped construct the memory. Excluding their exact
+        # pair entry prevents the memory from encoding their own label.
+        exclude_query_pair_from_memory=USE_NEIGHBOR_MEMORY,
     )
     validation_loader = build_loader(
         splits[validation_split_key],
@@ -1957,45 +2194,25 @@ def main() -> None:
         torch.cuda.reset_peak_memory_stats(DEVICE)
         torch.cuda.synchronize(DEVICE)
     training_started_at = time.perf_counter()
-    EVALUATE_ONLY = _boolean_from_environment('PXDDI_EVALUATE_ONLY', False)
     if EVALUATE_ONLY:
-        candidate_search_paths = [
-            CHECKPOINT_PATH,
-            Path('/content/drive/MyDrive/pxddi-results/checkpoints/candidates/auditddi_memory_fusion_candidate.pt'),
-            Path('/content/drive/MyDrive/pxddi-data/pxddi/checkpoints/candidates/auditddi_memory_fusion_candidate.pt'),
-            Path('/content/drive/MyDrive/pxddi-data/pxddi/backend/checkpoints/candidates/auditddi_memory_fusion_candidate.pt'),
-            DRIVE_BASE / 'checkpoints' / 'candidates' / 'auditddi_memory_fusion_candidate.pt',
-            DRIVE_BASE / 'backend' / 'checkpoints' / 'candidates' / 'auditddi_memory_fusion_candidate.pt',
-            RESULTS_BASE / 'checkpoints' / 'candidates' / 'auditddi_memory_fusion_candidate.pt',
-        ]
-        found_checkpoint = None
-        for path in candidate_search_paths:
-            if path is not None and path.exists():
-                found_checkpoint = path
-                break
-        if found_checkpoint is None:
+        if not CHECKPOINT_PATH.is_file():
             raise FileNotFoundError(
-                "PXDDI_EVALUATE_ONLY is active, but no saved checkpoint was found. "
-                f"Checked locations:\n" + "\n".join(f" - {p}" for p in candidate_search_paths if p is not None)
+                'PXDDI_EVALUATE_ONLY checkpoint does not exist: '
+                f'{CHECKPOINT_PATH}.'
             )
-        CHECKPOINT_PATH = found_checkpoint
+        evaluation_checkpoint = torch.load(
+            CHECKPOINT_PATH, map_location='cpu', weights_only=False
+        )
+        validate_checkpoint_for_evaluation(
+            evaluation_checkpoint, manifest, split_manifest
+        )
         print("=" * 72)
         print("  AuditDDI Evaluation Mode: ZERO TRAINING EPOCHS")
         print(f"  Loaded saved checkpoint: {CHECKPOINT_PATH}")
         print("  Evaluating test splits (Transductive, S1 novel, S2 novel)...")
         print("=" * 72)
         stopped_early = True
-        history = {
-            'epoch': [1],
-            'loss': [0.7665],
-            'auroc': [0.9369],
-            'average_precision': [0.9404],
-            'f1': [0.8619],
-            'mcc': [0.7289],
-            'balanced_accuracy': [0.8642],
-            'threshold': [0.5],
-            'learning_rate': [0.001],
-        }
+        history = load_checkpoint_training_history(evaluation_checkpoint)
     else:
         for epoch in range(1, EPOCHS + 1):
             loss = train_one_epoch(model, train_loader, optimizer, scaler)
@@ -2070,6 +2287,15 @@ def main() -> None:
                         'split_seed': SPLIT_SEED,
                         'threshold': threshold,
                         'pretraining_initialization': pretraining_initialization,
+                        'evaluation_provenance': evaluation_checkpoint_provenance(
+                            manifest, split_manifest
+                        ),
+                        'external_overlap_training_split': external_overlap_training_split(
+                            split_manifest, train_split_key
+                        ),
+                        'external_overlap_development_splits': (
+                            external_overlap_development_splits(split_manifest)
+                        ),
                     },
                     CHECKPOINT_PATH,
                 )
@@ -2087,7 +2313,10 @@ def main() -> None:
     if DEVICE.type == 'cuda':
         torch.cuda.synchronize(DEVICE)
     training_efficiency = {
-        'measurement_scope': 'optimization_and_per_epoch_validation',
+        'measurement_scope': (
+            'checkpoint_evaluation_only' if EVALUATE_ONLY
+            else 'optimization_and_per_epoch_validation'
+        ),
         'wall_clock_seconds': time.perf_counter() - training_started_at,
         'peak_cuda_memory_bytes': torch.cuda.max_memory_allocated(DEVICE)
         if DEVICE.type == 'cuda' else None,
@@ -2099,6 +2328,10 @@ def main() -> None:
         ),
     }
 
+    # Preserve the real convergence record before updating the reviewed
+    # checkpoint. Checkpoint-only evaluation must never fabricate this data.
+    plot_training_curves(history, figure_dir)
+    history_summary = save_training_history(history, RUN_ARTIFACTS_DIR)
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     validation_true, validation_raw_predictions = collect_predictions(
@@ -2170,6 +2403,16 @@ def main() -> None:
     }
     checkpoint['validation_role_partition'] = validation_role_partition
     checkpoint['pretraining_initialization'] = pretraining_initialization
+    checkpoint['evaluation_provenance'] = evaluation_checkpoint_provenance(
+        manifest, split_manifest
+    )
+    checkpoint['external_overlap_training_split'] = external_overlap_training_split(
+        split_manifest, train_split_key
+    )
+    checkpoint['external_overlap_development_splits'] = external_overlap_development_splits(
+        split_manifest
+    )
+    checkpoint['training_history'] = history_summary
     checkpoint_hash = safe_checkpoint_save(checkpoint, CHECKPOINT_PATH)
     validation_prediction_path = save_prediction_artifact(
         'Validation',
@@ -2193,8 +2436,6 @@ def main() -> None:
         'split_role': 'posthoc_validation_reserved_before_training',
     }
 
-    plot_training_curves(history, figure_dir)
-    history_summary = save_training_history(history, RUN_ARTIFACTS_DIR)
     results: dict[str, dict[str, Any]] = {}
     evaluation_data: dict[str, dict[str, Any]] = {}
     for name, loader in test_loaders.items():
@@ -2306,6 +2547,7 @@ def main() -> None:
             figure_dir,
             raw_predictions=raw_predictions,
         )
+    evaluation_metrics_summary = save_evaluation_metrics(results, RUN_ARTIFACTS_DIR)
     plot_benchmark_comparison(results, figure_dir)
     plot_toxicity_bridge_coverage(toxicity_summary, figure_dir)
 
@@ -2430,6 +2672,7 @@ def main() -> None:
             },
         },
         'training_history': history_summary,
+        'evaluation_metrics': evaluation_metrics_summary,
         'early_stopping': {
             'enabled': EARLY_STOPPING_PATIENCE > 0,
             'patience': EARLY_STOPPING_PATIENCE,

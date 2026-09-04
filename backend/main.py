@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import List, Optional
+import hmac
 import hashlib
 import logging
 import os
@@ -83,6 +84,17 @@ def positive_integer_from_environment(name: str, default: int) -> int:
     return value
 
 
+def non_negative_integer_from_environment(name: str, default: int) -> int:
+    """Read an optional non-negative integer deployment setting."""
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f'{name} must be a non-negative integer') from error
+    if value < 0:
+        raise RuntimeError(f'{name} must be a non-negative integer')
+    return value
+
+
 def boolean_from_environment(name: str, default: bool) -> bool:
     """Read an explicit boolean deployment setting without silent coercion."""
     raw_value = os.environ.get(name)
@@ -139,6 +151,51 @@ def configured_trusted_hosts() -> list[str]:
             'PXDDI_TRUSTED_HOSTS must contain explicit bare host names, not URLs, paths, or *.'
         )
     return hosts
+
+
+def configured_deployment_mode() -> str:
+    """Return the explicitly constrained API operating mode."""
+    mode = os.environ.get('PXDDI_DEPLOYMENT_MODE', 'development').strip().lower()
+    if mode not in {'development', 'production'}:
+        raise RuntimeError('PXDDI_DEPLOYMENT_MODE must be development or production.')
+    return mode
+
+
+def configured_api_key(deployment_mode: str) -> str | None:
+    """Read an optional local API key, mandatory in production mode."""
+    value = os.environ.get('PXDDI_API_KEY')
+    if value is not None:
+        value = value.strip()
+    if deployment_mode == 'production' and not value:
+        raise RuntimeError('PXDDI_API_KEY must be set in production mode.')
+    if value and len(value) < 32:
+        raise RuntimeError('PXDDI_API_KEY must contain at least 32 characters.')
+    return value or None
+
+
+def validate_production_configuration(
+    deployment_mode: str,
+    api_key: str | None,
+    allowed_origins: list[str],
+    trusted_hosts: list[str],
+    enable_docs: bool,
+    rate_limit_per_minute: int,
+) -> None:
+    """Fail closed when someone tries to expose the local service publicly."""
+    if deployment_mode != 'production':
+        return
+    if not api_key:
+        raise RuntimeError('PXDDI_API_KEY must be set in production mode.')
+    if enable_docs:
+        raise RuntimeError('PXDDI_ENABLE_DOCS must be false in production mode.')
+    if any(urlparse(origin).scheme != 'https' for origin in allowed_origins):
+        raise RuntimeError('PXDDI_ALLOWED_ORIGINS must use HTTPS in production mode.')
+    if any(host in {'localhost', '127.0.0.1', 'testserver'} for host in trusted_hosts):
+        raise RuntimeError('PXDDI_TRUSTED_HOSTS must contain public API hosts in production mode.')
+    if rate_limit_per_minute <= 0:
+        raise RuntimeError(
+            'PXDDI_RATE_LIMIT_PER_MINUTE must be positive in production mode.'
+        )
 
 
 def file_sha256(path: Path) -> str:
@@ -206,6 +263,19 @@ MAX_CONCURRENT_EXPLANATIONS = positive_integer_from_environment(
 ENABLE_API_DOCUMENTATION = boolean_from_environment('PXDDI_ENABLE_DOCS', True)
 ALLOWED_ORIGINS = configured_origins()
 TRUSTED_HOSTS = configured_trusted_hosts()
+DEPLOYMENT_MODE = configured_deployment_mode()
+API_KEY = configured_api_key(DEPLOYMENT_MODE)
+RATE_LIMIT_PER_MINUTE = non_negative_integer_from_environment(
+    'PXDDI_RATE_LIMIT_PER_MINUTE', 60 if DEPLOYMENT_MODE == 'production' else 0
+)
+validate_production_configuration(
+    DEPLOYMENT_MODE,
+    API_KEY,
+    ALLOWED_ORIGINS,
+    TRUSTED_HOSTS,
+    ENABLE_API_DOCUMENTATION,
+    RATE_LIMIT_PER_MINUTE,
+)
 
 app = FastAPI(
     title='PxDDI API',
@@ -220,7 +290,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_methods=['GET', 'POST'],
-    allow_headers=['Content-Type', 'X-Request-ID'],
+    allow_headers=['Content-Type', 'X-Request-ID', 'X-API-Key'],
     expose_headers=['X-Request-ID'],
 )
 
@@ -291,12 +361,52 @@ class MaxRequestBodyMiddleware:
         await self.app(scope, replay_body, send)
 
 
+class PerClientFixedWindowRateLimiter:
+    """Small in-process rate limiter for the protected inference endpoints.
+
+    This limits an accidentally exposed single worker. A production gateway
+    must still enforce a shared, durable rate limit across all workers and
+    instances; this class intentionally makes no global-distribution claim.
+    """
+
+    def __init__(self, requests_per_minute: int) -> None:
+        self.requests_per_minute = requests_per_minute
+        self._lock = threading.Lock()
+        self._windows: dict[str, tuple[int, int]] = {}
+
+    def retry_after_seconds(self, client_key: str) -> int | None:
+        if self.requests_per_minute <= 0:
+            return None
+        now = time.monotonic()
+        current_window = int(now // 60)
+        with self._lock:
+            # Bound the local bookkeeping even if an attacker rotates source
+            # addresses. This is not a replacement for gateway protection.
+            self._windows = {
+                key: value
+                for key, value in self._windows.items()
+                if value[0] == current_window
+            }
+            window, count = self._windows.get(client_key, (current_window, 0))
+            if window != current_window:
+                count = 0
+            if count >= self.requests_per_minute:
+                return max(1, int(60 - (now % 60)))
+            self._windows[client_key] = (current_window, count + 1)
+        return None
+
+
+PER_CLIENT_RATE_LIMITER = PerClientFixedWindowRateLimiter(RATE_LIMIT_PER_MINUTE)
+PROTECTED_API_PATHS = frozenset({'/predict', '/explain'})
+
+
 class RequestGuardMiddleware(BaseHTTPMiddleware):
     """Guard request availability and log non-sensitive request metadata.
 
-    This deliberately never logs a request body or SMILES string. It is a
-    per-process availability guard and correlation aid, not a substitute for a
-    gateway rate limit, durable audit log, or clinical audit trail.
+    This deliberately never logs a request body, SMILES string, or secret. It
+    applies optional local API-key authentication and a per-process rate limit
+    to inference routes, but is not a substitute for a gateway rate limit,
+    durable audit log, TLS termination, or clinical audit trail.
     """
 
     @staticmethod
@@ -328,6 +438,24 @@ class RequestGuardMiddleware(BaseHTTPMiddleware):
             else uuid.uuid4().hex
         )
         started_at = time.perf_counter()
+        if request.method == 'POST' and request.url.path in PROTECTED_API_PATHS:
+            if API_KEY is not None:
+                supplied_key = request.headers.get('x-api-key', '')
+                if not hmac.compare_digest(supplied_key, API_KEY):
+                    response = JSONResponse(
+                        status_code=401,
+                        content={'detail': 'Valid API credentials are required.'},
+                    )
+                    return self._finalize_response(request, response, request_id, started_at)
+            client_key = request.client.host if request.client else 'unknown_client'
+            retry_after_seconds = PER_CLIENT_RATE_LIMITER.retry_after_seconds(client_key)
+            if retry_after_seconds is not None:
+                response = JSONResponse(
+                    status_code=429,
+                    content={'detail': 'Rate limit exceeded. Please retry later.'},
+                    headers={'Retry-After': str(retry_after_seconds)},
+                )
+                return self._finalize_response(request, response, request_id, started_at)
         try:
             response = await call_next(request)
         except Exception:
@@ -564,24 +692,22 @@ class DDIRequest(BaseModel):
     @field_validator('age_band')
     @classmethod
     def validate_age_band(cls, value):
-        if value is not None and not (0 <= value <= 9):
-            raise ValueError('age_band must be between 0 and 9')
+        if value is not None:
+            raise ValueError('Patient context is not supported by this model.')
         return value
 
     @field_validator('sex')
     @classmethod
     def validate_sex(cls, value):
-        if value is not None and value not in (0, 1):
-            raise ValueError('sex must be 0 or 1')
+        if value is not None:
+            raise ValueError('Patient context is not supported by this model.')
         return value
 
     @field_validator('comorbidities')
     @classmethod
     def validate_comorbidities(cls, value):
-        if value is not None and len(value) != 10:
-            raise ValueError('comorbidities must be a list of exactly 10 values')
-        if value is not None and any(item not in (0, 1) for item in value):
-            raise ValueError('comorbidities must contain only 0 or 1 values')
+        if value is not None:
+            raise ValueError('Patient context is not supported by this model.')
         return value
 
 
@@ -809,11 +935,11 @@ def predict_ddi(req: DDIRequest):
     try:
         batch_a, batch_b = build_drug_batches(req)
 
-        # The patient encoder remains disabled: it has not been trained with linked
-        # patient, exposure, and outcome data, so applying it would add random bias.
+        # Patient context is rejected at request validation because this model
+        # has not been trained with linked patient, exposure, and outcome data.
         patient_context_note = (
-            'Patient context fields were accepted but NOT applied. The patient '
-            'conditioning module is not trained on linked patient-outcome data.'
+            'Patient-specific fields are not accepted. The patient-conditioning '
+            'module is not trained on linked patient-outcome data.'
         )
 
         memory_features = None
@@ -854,6 +980,8 @@ def predict_ddi(req: DDIRequest):
         structural_domain = structural_domain_response(req.smiles_a, req.smiles_b)
         return {
             'disclaimer': 'Research prototype output. Not clinical advice. Not FDA/regulatory reviewed.',
+            'model_architecture': checkpoint.get('architecture_version', 'legacy_gat_v1'),
+            'stored_validation_evidence': stored_validation_evidence(checkpoint),
             'interaction_risk_estimate': risk_score,
             'interaction_risk_score_raw': raw_risk_score,
             'interaction_risk_note': (
@@ -972,6 +1100,9 @@ def health():
         'max_concurrent_predictions': MAX_CONCURRENT_PREDICTIONS,
         'max_concurrent_explanations': MAX_CONCURRENT_EXPLANATIONS,
         'api_documentation_enabled': ENABLE_API_DOCUMENTATION,
+        'deployment_mode': DEPLOYMENT_MODE,
+        'api_key_protection_enabled': API_KEY is not None,
+        'per_client_rate_limit_per_minute': RATE_LIMIT_PER_MINUTE,
     }
 
 

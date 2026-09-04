@@ -51,7 +51,7 @@ Use CPython 3.10.11. Install development dependencies and run tests:
 
 ```powershell
 C:\Python310\python.exe -m pip install -r requirements-dev.txt
-C:\Python310\python.exe -m pytest -q
+C:\Python310\python.exe -m pytest -q  # `pytest -q` works as well
 ```
 
 The development test client uses the official `httpx` package. Do not install
@@ -85,13 +85,29 @@ a trusted development environment. `X-Request-ID` is accepted and returned so
 the frontend can correlate a request with the backend's non-sensitive runtime
 log entry.
 
-The API rejects unknown request fields and type coercion (for example, sending
-`"3"` instead of integer `3` for `age_band`). It accepts at most 16 KiB of
-request body by default, returns a non-sensitive validation response,
-adds `X-Request-ID` to responses, and prevents browsers or intermediaries from
-caching prediction output. Set `PXDDI_MAX_REQUEST_BYTES` or
-`PXDDI_MAX_CONCURRENT_PREDICTIONS` only after measuring the intended runtime;
-these local per-process guards do not replace gateway limits.
+The API rejects unknown request fields, type coercion, and all patient-context
+fields: it has no patient-linked training data and must not silently ignore
+such inputs. It accepts at most 16 KiB of request body by default, returns a
+non-sensitive validation response, adds `X-Request-ID` to responses, and
+prevents browsers or intermediaries from caching prediction output. Set
+`PXDDI_MAX_REQUEST_BYTES` or `PXDDI_MAX_CONCURRENT_PREDICTIONS` only after
+measuring the intended runtime; these local per-process guards do not replace
+gateway limits.
+
+For a non-local deployment, set `PXDDI_DEPLOYMENT_MODE=production`. Startup
+then requires HTTPS origins, public trusted hosts, disabled API documentation,
+a 32+-character `PXDDI_API_KEY`, and a positive
+`PXDDI_RATE_LIMIT_PER_MINUTE`. `POST /predict` and `POST /explain` require the
+key in `X-API-Key`; keep it in a trusted gateway or service, never browser
+JavaScript. The built-in limit is per process only. TLS termination,
+centralized authentication, shared rate limiting, durable audit logs, and
+monitoring still require deployment infrastructure.
+
+Use `.env.production.example` only as a checklist with
+`docker compose --env-file .env.production up`; keep the actual API key in a
+secret manager or protected deployment environment. TLS certificates and the
+HTTPS reverse proxy/API gateway remain hosting-specific and are deliberately
+not created by the repository.
 
 For local Docker Compose use, the backend is deliberately bound to
 `127.0.0.1:8000`, runs non-root with a read-only filesystem, and mounts
@@ -100,6 +116,13 @@ TLS reverse proxy or API gateway in front of it, set concrete CORS/host
 allowlists, and provide central rate limiting, audit logs, monitoring, and
 deployment-specific resource limits. These controls cannot be safely claimed
 from the repository alone.
+
+Docker Compose serves the frontend at `http://localhost:3000` and proxies its
+same-origin `/api/*` requests to the private backend service. The browser does
+not need direct access to port 8000. For a different deployment proxy, change
+the `data-api-base-url` value on the frontend `<body>` to that proxy's API
+prefix or full HTTPS API origin; do not hard-code a workstation hostname in
+browser code.
 
 Generated Colab outputs under `backend/plots/`, `backend/pxddi-results/`, and
 `backend/latest_results/` are excluded from the Docker build context. They are
@@ -143,6 +166,34 @@ Only the reserved partition is later split into calibration, decision-threshold,
 and conformal roles. This prevents those post-hoc choices from reusing rows
 that selected the model. It also means older runs cannot be mixed into a new
 ensemble or used as directly comparable evidence.
+
+### Recommended final candidate configuration
+
+For the next single candidate run, use the default `edge_aware_gat_v2` model
+with split-aware, degree-matched unreported negatives and the auxiliary
+toxicity task disabled. The toxicity bridge has only 281 clean labelled
+structures, so it should be evaluated separately as an explicit multi-task
+ablation rather than folded into the decisive DDI candidate. These are now the
+pipeline defaults; setting them explicitly in Colab makes the run log easier
+to review:
+
+```bash
+export PXDDI_MODEL_ARCHITECTURE=edge_aware_gat_v2
+export PXDDI_NEGATIVE_SAMPLING_PROTOCOL=split_aware_standard_v1
+export PXDDI_NEGATIVE_SAMPLING_STRATEGY=degree_matched
+export PXDDI_USE_TOXICITY_PAIR_FEATURES=false
+export PXDDI_TOXICITY_LOSS_WEIGHT=0.0
+python src/training/train_full_pipeline_v2.py
+```
+
+`auditddi_memory_fusion_v1` remains available only for a separately labelled
+comparison. Its training-row memory features now exclude the queried pair's
+own interaction-matrix entry, preventing the previously observed label leak.
+Every completed run writes `evaluation_metrics.csv` before its latest-results
+mirror is published. To re-evaluate a checkpoint, set one explicit
+`PXDDI_CHECKPOINT_PATH` and use `src/training/evaluate_saved_checkpoint.py`;
+it rejects checkpoints whose architecture, input hash, split evidence, or
+real training-history artifact cannot be verified.
 
 ### Phase 7 evaluation protocol
 
@@ -362,7 +413,23 @@ paths automatically.
 
 External validation is supported by `src/training/evaluate_external_dataset.py`
 only after you supply an independently sourced, documented dataset and its
-provenance metadata. The repository does not download or fabricate such data.
+provenance metadata. It requires one explicit current-pipeline checkpoint and
+its original hashed development-split artifacts, then refuses an external
+dataset that contains any exact canonical pair used anywhere in internal
+development. It supports the
+edge-aware, motif, fingerprint, and neighbor-memory candidate inputs. The
+repository does not download, fabricate, or certify an external dataset; its
+source, labels, temporal independence, and remaining development-set overlap
+still require human scientific review.
+
+When an independent dataset is ready, its CSV must contain `source`, `target`,
+and binary `label` columns and its metadata must complete
+`examples/external_evaluation_metadata.example.json`. Set
+`PXDDI_EXTERNAL_EDGES`, `PXDDI_EXTERNAL_METADATA`,
+`PXDDI_EXTERNAL_CHECKPOINT_PATH`, and (optionally)
+`PXDDI_EXTERNAL_ARTIFACTS_DIR`, then run
+`python src/training/evaluate_external_dataset.py`. A pre-current-pipeline
+checkpoint or a missing original artifact directory is intentionally rejected.
 
 `notebooks/pxddi_training_run.ipynb` is intentionally empty in this local
 repository because the live work is done in Colab. After the next audited run,
@@ -379,7 +446,9 @@ data/split manifests, logs, metrics, plots, and checkpoint hash.
 - The deployed legacy checkpoint is uncalibrated. Candidate checkpoints may
   include validation-fitted calibration, but that is not evidence of calibrated
   cold-start, external, or clinical performance.
-- Patient context, external validation, clinical rules, and production
-  authentication are not implemented.
+- Patient-specific prediction and clinical rules are not implemented. No
+  independently sourced external dataset has yet been supplied and reviewed.
+  Production mode has local key/rate-limit gates, but a real gateway, TLS,
+  durable audit logging, and monitoring remain hosting responsibilities.
 
 See `MODEL_CARD.md` for full limitations and the current research scope.

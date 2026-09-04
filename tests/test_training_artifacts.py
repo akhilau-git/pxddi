@@ -18,8 +18,12 @@ from unittest.mock import MagicMock, patch
 with patch('torch.cuda.is_available', return_value=True):
     from src.training.train_full_pipeline_v2 import (
         calculate_metrics,
+        evaluation_checkpoint_provenance,
+        external_overlap_development_splits,
+        external_overlap_training_split,
         filter_graph_compatible_pairs,
         get_file_hash,
+        load_checkpoint_training_history,
         multi_task_loss,
         partition_validation_for_model_selection,
         publish_latest_results,
@@ -29,8 +33,11 @@ with patch('torch.cuda.is_available', return_value=True):
         runtime_environment,
         save_counterion_curation_candidates,
         safe_checkpoint_save,
+        save_evaluation_metrics,
         select_validation_threshold,
+        split_manifest_fingerprint,
         should_stop_early,
+        validate_checkpoint_for_evaluation,
     )
 def test_get_file_hash():
     """Verify SHA-256 hash calculation."""
@@ -230,7 +237,6 @@ def test_publish_latest_results_overwrites_the_easy_to_find_result_copy(tmp_path
         'run_manifest_initial.json',
         'run_manifest.json',
         'results_summary.json',
-        'evaluation_metrics.csv',
         'training_history.csv',
         'audits/toxicity_bridge_conflicts.csv',
         'audits/toxicity_bridge_summary.json',
@@ -242,20 +248,157 @@ def test_publish_latest_results_overwrites_the_easy_to_find_result_copy(tmp_path
         path = run_dir / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f'first:{relative}', encoding='utf-8')
+    save_evaluation_metrics(
+        {'Transductive': {'status': 'evaluated', 'sample_count': 4, 'auroc': 0.75}},
+        run_dir,
+    )
     (figure_dir / 'training_curves.png').write_bytes(b'first figure')
 
     latest_dir = tmp_path / 'latest_results'
     publish_latest_results(run_dir, latest_dir)
 
     assert (latest_dir / 'figures/training_curves.png').read_bytes() == b'first figure'
-    assert (latest_dir / 'evaluation_metrics.csv').read_text(encoding='utf-8') == (
-        'first:evaluation_metrics.csv'
-    )
+    latest_metrics = pd.read_csv(latest_dir / 'evaluation_metrics.csv')
+    assert latest_metrics.loc[0, 'split'] == 'Transductive'
+    assert latest_metrics.loc[0, 'auroc'] == pytest.approx(0.75)
     (figure_dir / 'training_curves.png').write_bytes(b'new figure')
     publish_latest_results(run_dir, latest_dir)
 
     assert (latest_dir / 'figures/training_curves.png').read_bytes() == b'new figure'
     assert (latest_dir / 'latest_run.json').is_file()
+
+
+def test_evaluation_metrics_csv_is_written_with_the_documented_columns(tmp_path):
+    summary = save_evaluation_metrics(
+        {
+            'Transductive': {
+                'status': 'evaluated',
+                'sample_count': 4,
+                'positive_count': 2,
+                'negative_count': 2,
+                'positive_prevalence': 0.5,
+                'threshold': 0.5,
+                'auroc': 0.75,
+                'average_precision': 0.8,
+                'mcc': 0.5,
+                'balanced_accuracy': 0.75,
+                'f1': 0.75,
+                'precision': 0.75,
+                'recall': 0.75,
+                'specificity': 0.75,
+                'negative_predictive_value': 0.75,
+                'accuracy': 0.75,
+                'brier_score_calibrated': 0.2,
+                'ece_calibrated': 0.1,
+                'calibration_slope_diagnostic': 1.0,
+                'calibration_intercept_diagnostic': 0.0,
+            }
+        },
+        tmp_path,
+    )
+
+    saved = pd.read_csv(tmp_path / 'evaluation_metrics.csv')
+    assert summary['rows'] == 1
+    assert summary['sha256'] == get_file_hash(tmp_path / 'evaluation_metrics.csv')
+    assert saved.loc[0, 'split'] == 'Transductive'
+    assert saved.loc[0, 'accuracy_secondary_only'] == pytest.approx(0.75)
+    assert saved.loc[0, 'negative_label_meaning'] == (
+        'unreported_twosides_split_aware_sampled'
+    )
+
+
+def test_checkpoint_only_evaluation_requires_matching_audited_provenance(tmp_path):
+    split_manifest = {
+        'transductive_train': {
+            'sha256': 'a' * 64, 'rows': 8, 'label_counts': {'0.0': 4, '1.0': 4},
+        },
+        'validation': {
+            'sha256': 'b' * 64, 'rows': 4, 'label_counts': {'0.0': 2, '1.0': 2},
+        },
+    }
+    manifest = {'input_sha256': {'twosides_edges': 'c' * 64}}
+    provenance = evaluation_checkpoint_provenance(manifest, split_manifest)
+    checkpoint_metadata = {
+        'architecture_version': provenance['model_architecture'],
+        'feature_schema': provenance['feature_schema'],
+        'in_channels': provenance['in_channels'],
+        'hidden_channels': provenance['hidden_channels'],
+        'data_cap': provenance['data_cap'],
+        'model_seed': provenance['model_seed'],
+        'split_seed': provenance['split_seed'],
+        'use_toxicity_pair_features': provenance['use_toxicity_pair_features'],
+        'toxicity_loss_weight': provenance['toxicity_loss_weight'],
+    }
+
+    assert len(split_manifest_fingerprint(split_manifest)) == 64
+    assert validate_checkpoint_for_evaluation(
+        {'evaluation_provenance': provenance, **checkpoint_metadata},
+        manifest,
+        split_manifest,
+    ) == provenance
+
+    mismatched = {**provenance, 'split_seed': provenance['split_seed'] + 1}
+    with pytest.raises(ValueError, match='does not match'):
+        validate_checkpoint_for_evaluation(
+            {'evaluation_provenance': mismatched, **checkpoint_metadata},
+            manifest,
+            split_manifest,
+        )
+
+    malformed_checkpoint = {
+        'evaluation_provenance': provenance,
+        **checkpoint_metadata,
+        'architecture_version': 'legacy_gat_v1',
+    }
+    with pytest.raises(ValueError, match='disagrees with its evaluation provenance'):
+        validate_checkpoint_for_evaluation(
+            malformed_checkpoint,
+            manifest,
+            split_manifest,
+        )
+
+
+def test_external_overlap_screen_records_the_verified_training_split():
+    split_manifest = {
+        'transductive_train': {
+            'path': 'C:/artifacts/transductive_train.csv',
+            'sha256': 'a' * 64,
+            'rows': 8,
+        }
+    }
+
+    assert external_overlap_training_split(
+        split_manifest, 'transductive_train'
+    ) == {
+        'split_name': 'transductive_train',
+        'path': 'C:/artifacts/transductive_train.csv',
+        'sha256': 'a' * 64,
+        'rows': 8,
+    }
+    assert external_overlap_development_splits(split_manifest) == {
+        'transductive_train': {
+            'split_name': 'transductive_train',
+            'path': 'C:/artifacts/transductive_train.csv',
+            'sha256': 'a' * 64,
+            'rows': 8,
+        }
+    }
+
+
+def test_checkpoint_only_evaluation_reads_real_hashed_training_history(tmp_path):
+    history = pd.DataFrame({
+        'epoch': [1.0], 'loss': [0.7], 'auroc': [0.8],
+        'average_precision': [0.8], 'f1': [0.7], 'mcc': [0.4],
+        'balanced_accuracy': [0.7], 'threshold': [0.5], 'learning_rate': [0.001],
+    })
+    path = tmp_path / 'training_history.csv'
+    history.to_csv(path, index=False)
+    loaded = load_checkpoint_training_history({
+        'training_history': {'path': str(path), 'sha256': get_file_hash(path)}
+    })
+
+    assert loaded['epoch'] == [1.0]
+    assert loaded['auroc'] == [0.8]
 
 
 def test_counterion_curation_queue_requires_manual_review(tmp_path):

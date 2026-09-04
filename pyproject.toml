@@ -1,2 +1,7 @@
 [tool.pyright]
 extraPaths = ["src", "backend"]
+
+[tool.pytest.ini_options]
+# Keep `pytest` and `python -m pytest` equivalent when run from the project
+# root.  The application imports `src` and `backend` as root-level packages.
+pythonpath = ["."]

@@ -11,7 +11,7 @@
     <!-- Link to our new premium stylesheet -->
     <link rel="stylesheet" href="index.css">
 </head>
-<body>
+<body data-api-base-url="/api">
     <div class="background-blobs">
         <div class="blob blob-1"></div>
         <div class="blob blob-2"></div>
@@ -75,7 +75,7 @@
                 <h2>Analysis Complete</h2>
                 
                 <div class="metric-card risk-card" id="risk-card">
-                    <h3 class="metric-label">Interaction Probability</h3>
+                    <h3 class="metric-label">Model Interaction Score</h3>
                     <div class="metric-value" id="risk-value">--%</div>
                     <div class="risk-bar-container">
                         <div class="risk-bar" id="risk-bar"></div>
@@ -85,18 +85,18 @@
 
                 <div class="toxicity-grid">
                     <div class="metric-card tox-card">
-                        <h3 class="metric-label">Drug A Baseline Toxicity</h3>
+                        <h3 class="metric-label">Drug A Auxiliary Toxicity Score</h3>
                         <div class="metric-value small" id="toxA-value">--%</div>
                     </div>
                     <div class="metric-card tox-card">
-                        <h3 class="metric-label">Drug B Baseline Toxicity</h3>
+                        <h3 class="metric-label">Drug B Auxiliary Toxicity Score</h3>
                         <div class="metric-value small" id="toxB-value">--%</div>
                     </div>
                 </div>
 
                 <div class="meta-info">
                     <p><strong>Architecture:</strong> <span id="meta-arch">--</span></p>
-                    <p><strong>Model AUROC:</strong> <span id="meta-auroc">--</span></p>
+                    <p><strong>Stored internal validation AUROC:</strong> <span id="meta-auroc">--</span></p>
                     <p><strong>Request ID:</strong> <span id="meta-reqid" class="code-font">--</span></p>
                 </div>
             </div>

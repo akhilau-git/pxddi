@@ -1,0 +1,7 @@
+{
+  "dataset_name": "Replace with the independent dataset name",
+  "source_url_or_doi": "Replace with a stable source URL or DOI",
+  "data_version_or_date": "Replace with the source release version or date",
+  "label_definition": "Describe exactly what binary label 0 and label 1 mean",
+  "split_definition": "Describe why this dataset is independent of model development"
+}

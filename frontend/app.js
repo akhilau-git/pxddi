@@ -19,11 +19,16 @@ const toxBValue = document.getElementById('toxB-value');
 const metaArch = document.getElementById('meta-arch');
 const metaAuroc = document.getElementById('meta-auroc');
 const metaReqid = document.getElementById('meta-reqid');
+const apiBaseUrl = new URL(
+    document.body.dataset.apiBaseUrl || '/api',
+    window.location.origin,
+).toString().replace(/\/$/, '');
 
 function resetForm() {
     errorState.classList.add('hidden');
     resultsContent.classList.add('hidden');
     emptyState.classList.remove('hidden');
+    riskBar.style.width = '0%';
     form.reset();
 }
 
@@ -55,6 +60,26 @@ function getBgColor(percentage) {
     return 'var(--success)';
 }
 
+function percentageFromScore(score, label) {
+    if (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 1) {
+        throw new Error(`The backend returned an invalid ${label}.`);
+    }
+    return score * 100;
+}
+
+async function responseErrorMessage(response) {
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+        try {
+            const payload = await response.json();
+            if (typeof payload.detail === 'string') return payload.detail;
+        } catch (_) {
+            // Fall through to a stable, non-technical message.
+        }
+    }
+    return `The request could not be completed (HTTP ${response.status}).`;
+}
+
 async function checkRisk() {
     const smilesA = document.getElementById('smilesA').value.trim();
     const smilesB = document.getElementById('smilesB').value.trim();
@@ -64,22 +89,21 @@ async function checkRisk() {
     setLoading(true);
 
     try {
-        const res = await fetch('http://localhost:8000/predict', {
+        const res = await fetch(`${apiBaseUrl}/predict`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({smiles_a: smilesA, smiles_b: smilesB})
         });
 
         if (!res.ok) {
-            const err = await res.json();
-            throw new Error(err.detail || 'Invalid chemical structure or backend error.');
+            throw new Error(await responseErrorMessage(res));
         }
 
         const data = await res.json();
         
         // Populate Data
-        const riskPct = (data.interaction_risk_estimate * 100).toFixed(1);
-        riskValue.innerText = `${riskPct}%`;
+        const riskPct = percentageFromScore(data.interaction_risk_estimate, 'interaction score');
+        riskValue.innerText = `${riskPct.toFixed(1)}%`;
         riskValue.className = `metric-value ${getColorClass(riskPct)}`;
         
         // Animate the bar
@@ -89,29 +113,34 @@ async function checkRisk() {
         }, 100);
 
         if (riskPct > 75) {
-            riskDesc.innerHTML = `<span style="color: var(--danger)">High Interaction Risk</span>. Do not co-prescribe.`;
+            riskDesc.innerHTML = `<span style="color: var(--danger)">Higher model score</span>. Research-only output; it cannot guide prescribing.`;
         } else if (riskPct > 40) {
-            riskDesc.innerHTML = `<span style="color: var(--warning)">Moderate Interaction Risk</span>. Monitor closely.`;
+            riskDesc.innerHTML = `<span style="color: var(--warning)">Intermediate model score</span>. Research-only output; it cannot guide prescribing.`;
         } else {
-            riskDesc.innerHTML = `<span style="color: var(--success)">Low Interaction Risk</span> based on model baseline.`;
+            riskDesc.innerHTML = `<span style="color: var(--success)">Lower model score</span>. It does not establish that a pair is safe.`;
         }
 
         // Toxicity
-        const toxAPct = (data.drug_a_toxicity.score * 100).toFixed(1);
-        toxAValue.innerText = `${toxAPct}%`;
+        const toxAPct = percentageFromScore(data.drug_a_toxicity.score, 'Drug A toxicity score');
+        toxAValue.innerText = `${toxAPct.toFixed(1)}%`;
         toxAValue.className = `metric-value small ${getColorClass(toxAPct)}`;
 
-        const toxBPct = (data.drug_b_toxicity.score * 100).toFixed(1);
-        toxBValue.innerText = `${toxBPct}%`;
+        const toxBPct = percentageFromScore(data.drug_b_toxicity.score, 'Drug B toxicity score');
+        toxBValue.innerText = `${toxBPct.toFixed(1)}%`;
         toxBValue.className = `metric-value small ${getColorClass(toxBPct)}`;
 
-        // Meta Data (if returned by the backend)
-        metaArch.innerText = data.architecture_version || "graph_fp_fusion_v1";
-        metaAuroc.innerText = data.stored_auroc ? data.stored_auroc.toFixed(4) : "0.9231 (Transductive)";
+        // Show only metadata returned by the API. Never fill these fields with
+        // invented architecture or performance values.
+        metaArch.innerText = data.model_architecture || 'Unavailable';
+        const evidence = data.stored_validation_evidence;
+        metaAuroc.innerText = (
+            evidence?.status === 'available' && typeof evidence.auroc === 'number'
+                ? `${evidence.auroc.toFixed(4)} (internal validation only)`
+                : 'Unavailable'
+        );
         
-        // Grab the request ID from the response header if present
-        const reqId = res.headers.get('x-request-id') || Math.random().toString(36).substring(2, 10);
-        metaReqid.innerText = reqId;
+        // A missing header is reported honestly rather than generating a fake ID.
+        metaReqid.innerText = res.headers.get('x-request-id') || 'Unavailable';
 
         // Show Results
         setLoading(false);

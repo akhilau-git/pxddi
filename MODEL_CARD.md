@@ -57,6 +57,14 @@ metric table, and hardware-specific efficiency records. These are
 research measurements on reported-versus-unreported labels, not clinical
 performance measures.
 
+`evaluate_external_dataset.py` now requires a single explicit checkpoint and
+the hash-verified development-split artifacts stored by the current pipeline.
+It rejects any supplied external row that exactly matches a canonical molecular
+pair used anywhere in internal development. This prevents direct development
+set leakage, but does not
+itself establish that a supplied dataset is temporally independent, clinically
+representative, or free from broader source-data overlap.
+
 Before training, the normal validation split is stratified into a
 model-selection subset for early stopping and a disjoint post-hoc subset. The
 post-hoc subset is then divided again for calibration, decision threshold, and
@@ -71,7 +79,8 @@ historical only and must not be used for a fair new ensemble or comparison.
   Regression tests check the shipped GNN checkpoint on multiple pairs.
 - **Input validation:** invalid, single-atom, oversized, and over-complex
   inputs are rejected by the API.
-- **Patient context:** accepted fields are explicitly not applied.
+- **Patient context:** patient-specific fields are rejected. The model has no
+  patient-linked training data and must not silently ignore such input.
 - **Toxicity coverage:** API checks canonical SMILES rather than raw input.
 
 ## Current limitations
@@ -84,7 +93,8 @@ historical only and must not be used for a fair new ensemble or comparison.
    excluded conservatively, but still require scientific audit before broader
    claims are made.
 4. **Patient context:** no linked patient-exposure-outcome training data is in
-   this project; the module must remain disabled.
+   this project; patient-specific prediction is unavailable and the API rejects
+   patient fields rather than silently ignoring them.
 5. **Molecular representation:** the deployed legacy checkpoint still omits
    bond order, stereochemistry, chirality, and other chemical detail. The
    separate edge-aware candidate adds these atom and bond features, but has not
@@ -117,12 +127,16 @@ historical only and must not be used for a fair new ensemble or comparison.
    or clinically validated explanations. Candidate models remain unavailable
    through `/explain` unless a separately reviewed API-compatible method is
    implemented and evaluated.
-9. **Security:** local CORS is restricted and explanation concurrency is
-   bounded, but authentication, global rate limiting, audit logging, TLS,
-   monitoring, and public-deployment controls are absent.
-10. **Deployment:** the API has readiness checks and a non-root container, but
-    actual Docker image execution, resource limits, pinned dependencies, and
-    operational monitoring remain pending.
+9. **Security:** development CORS is restricted and inference concurrency is
+   bounded. Production mode requires an API key, HTTPS origins, public trusted
+   hosts, disabled documentation, and a per-process rate limit. Centralized
+   authentication, shared rate limiting, durable audit logging, TLS,
+   monitoring, and public-deployment controls still require deployment
+   infrastructure.
+10. **Deployment:** the API has readiness checks, a non-root read-only
+    container, resource limits, and pinned runtime dependencies. TLS,
+    certificate management, gateway controls, and operational monitoring are
+    intentionally external deployment responsibilities.
 
 ## Candidate model and evaluation workflow
 

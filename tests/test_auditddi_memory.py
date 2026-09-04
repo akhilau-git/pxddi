@@ -64,6 +64,29 @@ def test_auditable_neighbor_memory_retrieval():
     assert np.isclose(scores['structural_confidence'], restored_scores['structural_confidence'])
 
 
+def test_training_memory_features_exclude_the_query_pair_label():
+    """A fitted pair must not retrieve its own label during model fitting."""
+    positive_a, positive_b = 'CCO', 'CCN'
+    negative_a, negative_b = 'CCC', 'CCCl'
+    memory = AuditableNeighborMemory(k_neighbors=1)
+    memory.fit(
+        [positive_a, negative_a],
+        [positive_b, negative_b],
+        [1.0, 0.0],
+    )
+
+    leaky = memory.score_pair_memory(positive_a, positive_b)
+    protected = memory.score_pair_memory(
+        positive_a, positive_b, exclude_query_pair=True
+    )
+
+    assert leaky['neighbor_density'] == pytest.approx(1.0)
+    assert leaky['max_support'] == pytest.approx(1.0)
+    assert protected['query_pair_excluded'] is True
+    assert protected['neighbor_density'] == pytest.approx(0.0)
+    assert protected['max_support'] == pytest.approx(0.0)
+
+
 def test_auditddi_model_forward_and_symmetry():
     smiles_a = 'CC(=O)OC1=CC=CC=C1C(=O)O'  # Aspirin
     smiles_b = 'CC(C)CC1=CC=C(C=C1)C(C)C(=O)O'  # Ibuprofen
@@ -144,6 +167,7 @@ def test_pxddi_dataset_dataloader_with_neighbor_memory():
         dataframe=df,
         toxicity_lookup={},
         neighbor_memory=mem,
+        exclude_query_pair_from_memory=True,
     )
     loader = DataLoader(dataset, batch_size=2, shuffle=False)
     batch = next(iter(loader))
@@ -151,3 +175,4 @@ def test_pxddi_dataset_dataloader_with_neighbor_memory():
     mem_tensor = batch[7]
     assert isinstance(mem_tensor, torch.Tensor)
     assert mem_tensor.shape == (2, 3)
+    assert mem_tensor[0, 0].item() == pytest.approx(0.0)

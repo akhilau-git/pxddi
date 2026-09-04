@@ -6,8 +6,8 @@ from pydantic import ValidationError
 from backend.main import DDIRequest
 
 
-def test_comorbidities_must_be_binary():
-    with pytest.raises(ValidationError, match='only 0 or 1'):
+def test_patient_context_fields_are_rejected_until_supported_by_training_data():
+    with pytest.raises(ValidationError, match='not supported'):
         DDIRequest(
             smiles_a='CCO',
             smiles_b='CCN',

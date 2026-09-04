@@ -124,6 +124,35 @@ def test_boolean_environment_setting_is_explicit(monkeypatch):
         main.boolean_from_environment('PXDDI_ENABLE_DOCS', True)
 
 
+def test_production_mode_requires_https_authentication_and_rate_limiting():
+    with pytest.raises(RuntimeError, match='PXDDI_API_KEY'):
+        main.validate_production_configuration(
+            'production',
+            None,
+            ['https://app.example.org'],
+            ['api.example.org'],
+            False,
+            60,
+        )
+    with pytest.raises(RuntimeError, match='HTTPS'):
+        main.validate_production_configuration(
+            'production',
+            'a' * 32,
+            ['http://app.example.org'],
+            ['api.example.org'],
+            False,
+            60,
+        )
+    main.validate_production_configuration(
+        'production',
+        'a' * 32,
+        ['https://app.example.org'],
+        ['api.example.org'],
+        False,
+        60,
+    )
+
+
 def test_origin_configuration_rejects_wildcards_and_paths(monkeypatch):
     monkeypatch.setenv('PXDDI_ALLOWED_ORIGINS', 'https://example.org/app')
 
@@ -147,6 +176,12 @@ def test_prediction_reports_label_coverage_and_disabled_patient_context():
     assert response.status_code == 200
     payload = response.json()
     assert payload['patient_context_applied'] is False
+    assert payload['model_architecture'] == main.checkpoint.get(
+        'architecture_version', 'legacy_gat_v1'
+    )
+    assert payload['stored_validation_evidence'] == main.stored_validation_evidence(
+        main.checkpoint
+    )
     assert 'uncalibrated' in payload['interaction_risk_note']
     assert 'not evidence that the pair is safe' in payload['interaction_label_note']
     assert payload['score_calibration']['status'] == 'uncalibrated'
@@ -162,6 +197,39 @@ def test_prediction_reports_label_coverage_and_disabled_patient_context():
     assert 'not a clinical toxicity probability' in payload['drug_a_toxicity']['model_score_note']
     assert 'FAERS-derived' in payload['drug_a_toxicity']['coverage_note']
     assert payload['explanation_available_at'] == '/explain (separate, slower endpoint)'
+
+
+def test_patient_context_is_rejected_instead_of_silently_ignored():
+    response = CLIENT.post(
+        '/predict',
+        json={'smiles_a': ASPIRIN, 'smiles_b': ACETAMINOPHEN, 'age_band': 3},
+    )
+
+    assert response.status_code == 422
+    assert 'not supported' in response.json()['detail'][0]['msg']
+
+
+def test_api_key_and_per_client_rate_limit_protect_inference_routes(monkeypatch):
+    monkeypatch.setattr(main, 'API_KEY', 'a' * 32)
+    monkeypatch.setattr(
+        main, 'PER_CLIENT_RATE_LIMITER', main.PerClientFixedWindowRateLimiter(1)
+    )
+    no_key = CLIENT.post('/predict', json={'smiles_a': ASPIRIN, 'smiles_b': ACETAMINOPHEN})
+    permitted = CLIENT.post(
+        '/predict',
+        json={'smiles_a': ASPIRIN, 'smiles_b': ACETAMINOPHEN},
+        headers={'X-API-Key': 'a' * 32},
+    )
+    limited = CLIENT.post(
+        '/predict',
+        json={'smiles_a': ASPIRIN, 'smiles_b': ACETAMINOPHEN},
+        headers={'X-API-Key': 'a' * 32},
+    )
+
+    assert no_key.status_code == 401
+    assert permitted.status_code == 200
+    assert limited.status_code == 429
+    assert int(limited.headers['retry-after']) >= 1
 
 
 def test_prediction_rejects_unknown_or_coerced_request_fields_without_echoing_input():
