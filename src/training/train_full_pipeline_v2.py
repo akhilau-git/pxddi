@@ -1711,6 +1711,7 @@ def _prepare_positive_edges(
 
 
 def main() -> None:
+    global CHECKPOINT_PATH
     set_reproducibility(MODEL_SEED)
     print(f'Training on: {DEVICE}')
     if DEVICE.type != 'cuda':
