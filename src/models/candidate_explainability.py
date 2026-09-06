@@ -535,10 +535,10 @@ def select_representative_indices(
 
 def explain_multimodal_pair(
     model: Any,
-    graph_a: Data,
-    graph_b: Data,
-    smiles_a: str,
-    smiles_b: str,
+    graph_a: Data | None = None,
+    graph_b: Data | None = None,
+    smiles_a: str | None = None,
+    smiles_b: str | None = None,
     fp_a: torch.Tensor | None = None,
     fp_b: torch.Tensor | None = None,
     gene_a: torch.Tensor | None = None,
@@ -549,6 +549,11 @@ def explain_multimodal_pair(
     tox_b: torch.Tensor | None = None,
     gene_vocabulary: list[str] | None = None,
     calibrator: dict[str, Any] | None = None,
+    cache: Any = None,
+    drug_a_smiles: str | None = None,
+    drug_b_smiles: str | None = None,
+    gene_names: list[str] | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Provide structured clinical and chemical attribution for a multimodal pair.
 
@@ -558,6 +563,33 @@ def explain_multimodal_pair(
     3. Active metabolizing enzymes (CYP450 / Transporters) present on each drug.
     """
     from src.models.calibration import apply_calibrator
+
+    # Support cache-based drug loading
+    if cache is not None:
+        if drug_a_smiles is not None:
+            smiles_a = drug_a_smiles
+        if drug_b_smiles is not None:
+            smiles_b = drug_b_smiles
+        if smiles_a is None or smiles_b is None:
+            raise ValueError('smiles_a and smiles_b (or drug_a_smiles, drug_b_smiles) must be provided when using cache.')
+        cache.register_drug(smiles_a)
+        cache.register_drug(smiles_b)
+        graph_a = cache.graphs[smiles_a]
+        graph_b = cache.graphs[smiles_b]
+        fp_a = cache.fingerprints.get(smiles_a)
+        fp_b = cache.fingerprints.get(smiles_b)
+        gene_a = cache.gene_vectors.get(smiles_a)
+        gene_b = cache.gene_vectors.get(smiles_b)
+        gene_mask_a = cache.gene_masks.get(smiles_a)
+        gene_mask_b = cache.gene_masks.get(smiles_b)
+        tox_a = cache.toxicity_scalars.get(smiles_a)
+        tox_b = cache.toxicity_scalars.get(smiles_b)
+
+    if gene_names is not None and gene_vocabulary is None:
+        gene_vocabulary = gene_names
+
+    if graph_a is None or graph_b is None or smiles_a is None or smiles_b is None:
+        raise ValueError('graph_a, graph_b, smiles_a, and smiles_b are required.')
 
     device = _model_device(model)
     was_training = model.training
@@ -623,11 +655,25 @@ def explain_multimodal_pair(
     # 4. Calibration
     calibrated_prob = float(apply_calibrator(np.array([p_full]), calibrator)[0]) if calibrator else p_full
 
+    shared_gene_hotspots = []
+    if gene_vocabulary is not None and gene_a is not None and gene_b is not None:
+        vocab_map = {g: idx for idx, g in enumerate(gene_vocabulary)}
+        for enzyme in shared_enzymes:
+            idx = vocab_map.get(enzyme)
+            if idx is not None and idx < gene_a.numel() and idx < gene_b.numel():
+                sig = float((gene_a[idx].item() + gene_b[idx].item()) / 2.0)
+            else:
+                sig = 1.0
+            shared_gene_hotspots.append({'gene': enzyme, 'combined_signal': sig})
+    else:
+        shared_gene_hotspots = [{'gene': enzyme, 'combined_signal': 1.0} for enzyme in shared_enzymes]
+
     return {
         'smiles_a': smiles_a,
         'smiles_b': smiles_b,
         'predicted_raw_probability': p_full,
         'predicted_calibrated_probability': calibrated_prob,
+        'overall_risk_score': calibrated_prob,
         'risk_level': 'High Risk' if calibrated_prob >= 0.65 else ('Moderate Risk' if calibrated_prob >= 0.35 else 'Low Risk'),
         'modality_marginal_contributions': {
             'molecular_graph_baseline': p_graph_only,
@@ -635,12 +681,19 @@ def explain_multimodal_pair(
             'delta_pharmgkb_pharmacogenomics': p_full - p_no_gene,
             'delta_combined_external_knowledge': p_full - p_graph_only,
         },
+        'modality_contributions': {
+            'molecular_graph_baseline': p_graph_only,
+            'faers_clinical_toxicity': p_full - p_no_tox,
+            'pharmgkb_pharmacogenomics': p_full - p_no_gene,
+            'combined_external_signal': p_full - p_graph_only,
+        },
         'pharmacogenomic_context': {
             'drug_a_enzymes': active_genes_a,
             'drug_b_enzymes': active_genes_b,
             'shared_cyp_competition': shared_enzymes,
             'potential_metabolic_bottleneck': len(shared_enzymes) > 0,
         },
+        'shared_pharmacogenomic_genes': shared_gene_hotspots,
         'clinical_toxicity_context': {
             'drug_a_faers_score': float(tox_a.item()) if tox_a is not None else None,
             'drug_b_faers_score': float(tox_b.item()) if tox_b is not None else None,

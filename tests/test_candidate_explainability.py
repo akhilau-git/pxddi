@@ -173,6 +173,48 @@ def test_explain_multimodal_pair():
 
     assert 'predicted_raw_probability' in exp
     assert 'modality_marginal_contributions' in exp
+    assert 'overall_risk_score' in exp
+    assert 'modality_contributions' in exp
+    assert 'shared_pharmacogenomic_genes' in exp
     assert 'GENE_2' in exp['pharmacogenomic_context']['shared_cyp_competition']
     assert exp['pharmacogenomic_context']['potential_metabolic_bottleneck'] is True
+
+
+def test_explain_multimodal_pair_with_cache():
+    from src.data_prep.cached_graph_loader import MolecularCache
+    from src.models.candidate_explainability import explain_multimodal_pair
+    from src.models.ddi_model import MODEL_ARCHITECTURE_MULTIMODAL
+
+    cache = MolecularCache(gene_dim=10)
+    drug_a = 'CCO'
+    drug_b = 'CCN'
+    cache.register_drug(drug_a, gene_vector=[1.0 if i in {0, 2} else 0.0 for i in range(10)], toxicity_score=0.35)
+    cache.register_drug(drug_b, gene_vector=[1.0 if i in {2, 4} else 0.0 for i in range(10)], toxicity_score=0.20)
+
+    model = PxDDIModel(
+        in_channels=cache.graphs[drug_a].x.size(1),
+        hidden_channels=16,
+        architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+        edge_feature_dim=cache.graphs[drug_a].edge_attr.size(1),
+        gene_feature_dim=10,
+        gene_hidden_channels=16,
+        use_clinical_toxicity=True,
+        use_cross_modal_attention=True,
+    ).eval()
+
+    vocab = [f"GENE_{i}" for i in range(10)]
+
+    exp = explain_multimodal_pair(
+        model=model,
+        cache=cache,
+        drug_a_smiles=drug_a,
+        drug_b_smiles=drug_b,
+        gene_names=vocab,
+    )
+
+    assert 'overall_risk_score' in exp
+    assert 'modality_contributions' in exp
+    assert len(exp['shared_pharmacogenomic_genes']) == 1
+    assert exp['shared_pharmacogenomic_genes'][0]['gene'] == 'GENE_2'
+
 
