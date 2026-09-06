@@ -327,13 +327,13 @@ def analyze_cold_start_coverage_errors(
     out_p.mkdir(parents=True, exist_ok=True)
 
     if s1_test_df.empty:
-        empty_annotated = pd.DataFrame(columns=[
+        empty_annotated = pd.DataFrame(columns=pd.Index([
             'drug_a', 'drug_b', 'true_label', 'pred_prob', 'binary_pred',
             'is_correct', 'error_type', 'coverage_tier', 'gene_a', 'gene_b', 'faers_a', 'faers_b'
-        ])
-        empty_summary = pd.DataFrame(columns=[
+        ]))
+        empty_summary = pd.DataFrame(columns=pd.Index([
             'coverage_tier', 'pair_count', 'accuracy', 'auroc', 'fpr', 'fnr', 'false_positives', 'false_negatives'
-        ])
+        ]))
         empty_annotated.to_csv(out_p / 'cold_start_error_analysis.csv', index=False)
         empty_summary.to_csv(out_p / 'cold_start_coverage_summary.csv', index=False)
         return empty_annotated, empty_summary
@@ -513,6 +513,15 @@ def run_full_multimodal_study(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Execute complete extended training, ablation study, error analysis, and calibration."""
+    # Support flexible parameter aliases
+    if 'epochs' in kwargs:
+        extended_epochs = int(kwargs.pop('epochs'))
+    if 'lr' in kwargs:
+        learning_rate = float(kwargs.pop('lr'))
+    run_ablation: bool = kwargs.pop('run_ablation', True)
+    run_error_analysis: bool = kwargs.pop('run_error_analysis', True)
+    calibrate: bool = kwargs.pop('calibrate', True)
+
     if output_dir is None:
         out_p = Path(master_nodes_path).resolve().parent.parent / 'multimodal_study_results'
     else:
@@ -560,35 +569,43 @@ def run_full_multimodal_study(
     )
 
     # 4. Modality Ablation Study
-    ablation_df = run_modality_ablation_study(
-        cache=cache,
-        train_df=train_df,
-        val_df=val_df,
-        test_splits=test_splits,
-        output_dir=out_p / 'ablation',
-        epochs=ablation_epochs,
-        batch_size=batch_size,
-        device=device,
-    )
+    ablation_dict: list[dict[str, Any]] = []
+    if run_ablation:
+        ablation_df = run_modality_ablation_study(
+            cache=cache,
+            train_df=train_df,
+            val_df=val_df,
+            test_splits=test_splits,
+            output_dir=out_p / 'ablation',
+            epochs=ablation_epochs,
+            batch_size=batch_size,
+            device=device,
+        )
+        ablation_dict = ablation_df.to_dict(orient='records')
 
     # 5. Cold-Start Error Analysis Stratified by External Coverage
-    err_df, tier_summary_df = analyze_cold_start_coverage_errors(
-        model=best_model,
-        cache=cache,
-        s1_test_df=test_splits['s1_cold'],
-        output_dir=out_p / 'error_analysis',
-        device=device,
-    )
+    tier_dict: list[dict[str, Any]] = []
+    if run_error_analysis:
+        err_df, tier_summary_df = analyze_cold_start_coverage_errors(
+            model=best_model,
+            cache=cache,
+            s1_test_df=test_splits['s1_cold'],
+            output_dir=out_p / 'error_analysis',
+            device=device,
+        )
+        tier_dict = tier_summary_df.to_dict(orient='records')
 
     # 6. Model Calibration (ECE & Reliability)
-    calibration_report = evaluate_multimodal_calibration(
-        model=best_model,
-        cache=cache,
-        val_df=val_df,
-        test_splits=test_splits,
-        output_dir=out_p / 'calibration',
-        device=device,
-    )
+    calibration_report: dict[str, Any] = {}
+    if calibrate:
+        calibration_report = evaluate_multimodal_calibration(
+            model=best_model,
+            cache=cache,
+            val_df=val_df,
+            test_splits=test_splits,
+            output_dir=out_p / 'calibration',
+            device=device,
+        )
 
     print("\n" + "=" * 80)
     print("COMPREHENSIVE MULTIMODAL STUDY COMPLETE!")
@@ -597,7 +614,13 @@ def run_full_multimodal_study(
 
     return {
         'extended_metrics': extended_metrics,
-        'ablation_results': ablation_df.to_dict(orient='records'),
-        'tier_summary': tier_summary_df.to_dict(orient='records'),
+        'ablation': ablation_dict,
+        'ablation_results': ablation_dict,
+        'tier_summary': tier_dict,
         'calibration_report': calibration_report,
     }
+
+
+# Convenience alias matching external call conventions
+run_full_study = run_full_multimodal_study
+

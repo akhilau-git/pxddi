@@ -77,6 +77,7 @@ def test_multimodal_study_smoke():
         )
 
         assert "extended_metrics" in res
+        assert "ablation" in res
         assert "ablation_results" in res
         assert "tier_summary" in res
         assert "calibration_report" in res
@@ -87,3 +88,10 @@ def test_multimodal_study_smoke():
         assert (out_study / "ablation" / "ablation_study_results.csv").is_file()
         assert (out_study / "error_analysis" / "cold_start_error_analysis.csv").is_file()
         assert (out_study / "calibration" / "calibration_metrics.json").is_file()
+
+
+def test_run_full_study_alias_import():
+    """Verify run_full_study alias is importable and identical."""
+    from src.training.train_multimodal_study import run_full_study, run_full_multimodal_study
+    assert run_full_study is run_full_multimodal_study
+
