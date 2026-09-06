@@ -185,11 +185,11 @@ def audit_toxicity_bridge(bridge: pd.DataFrame) -> tuple[dict[str, int], pd.Data
         (grouped['source_rows'] > 1) & (grouped['unique_scores'] > 1)
     ].copy()
     summary = {
-        'source_rows': int(len(validated)),
-        'rows_with_canonical_smiles': int(len(matched)),
-        'unique_canonical_structures': int(len(grouped)),
-        'duplicate_canonical_structures': int(len(duplicates)),
-        'conflicting_canonical_structures': int(len(conflicts)),
+        'source_rows': len(validated),
+        'rows_with_canonical_smiles': len(matched),
+        'unique_canonical_structures': len(grouped),
+        'duplicate_canonical_structures': len(duplicates),
+        'conflicting_canonical_structures': len(conflicts),
     }
     return summary, conflicts
 
@@ -214,8 +214,8 @@ def resolve_toxicity_bridge(bridge: pd.DataFrame) -> tuple[pd.DataFrame, dict[st
         ['canonical_smiles', 'n_reports', 'drugname'],
         ascending=[True, False, True],
     ).drop_duplicates(subset='canonical_smiles', keep='first')
-    summary['resolved_unique_canonical_structures'] = int(len(resolved))
-    summary['excluded_conflicting_structures'] = int(len(conflicts))
+    summary['resolved_unique_canonical_structures'] = len(resolved)
+    summary['excluded_conflicting_structures'] = len(conflicts)
     return resolved.reset_index(drop=True), summary, conflicts
 
 
@@ -311,8 +311,8 @@ def build_name_to_smiles_bridge(
             'drugname': raw_name,
             'raw_smiles': lookup.smiles,
             'canonical_smiles': canonical,
-            'toxicity_score': float(row.toxicity_score),
-            'n_reports': int(row.n_reports),
+            'toxicity_score': float(str(row.toxicity_score)),
+            'n_reports': int(float(str(row.n_reports))),
             'query_name': raw_name,
             'pubchem_query_url': lookup.query_url,
             'pubchem_lookup_status': lookup.status,
