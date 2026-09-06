@@ -60,6 +60,7 @@ def ensure_benchmark_splits(
     master_edges_path: str | Path | None = None,
     seed: int = 42,
     holdout_fraction: float = 0.15,
+    **kwargs: Any,
 ) -> Path:
     """Ensure benchmark splits exist; generate them automatically if missing.
 
@@ -68,6 +69,8 @@ def ensure_benchmark_splits(
     from master_edges_path (or inferred paths) and generates leakage-safe
     transductive, S1, and S2 splits.
     """
+    if master_edges_path is None:
+        master_edges_path = kwargs.get('edges_path') or kwargs.get('master_edges')
     splits_path: Path | None = None
     if splits_dir is not None and str(splits_dir).strip().lower() not in ('none', ''):
         splits_path = Path(splits_dir)
@@ -351,8 +354,11 @@ def run_benchmark(
     batch_size: int = 64,
     learning_rate: float = 5e-4,
     device: torch.device | None = None,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """Execute complete cold-start benchmark comparing baseline vs multimodal GNN."""
+    if master_edges_path is None:
+        master_edges_path = kwargs.get('edges_path') or kwargs.get('master_edges')
     if output_dir is None:
         out_dir = Path(master_nodes_path).resolve().parent.parent / 'benchmark_results'
     else:
@@ -363,6 +369,7 @@ def run_benchmark(
         splits_dir=splits_dir,
         master_nodes_path=master_nodes_path,
         master_edges_path=master_edges_path,
+        **kwargs,
     )
 
     print("=" * 80)
