@@ -328,7 +328,7 @@ def update_master_nodes_with_bindingdb(
     output_path: str | Path | None = None,
     top_k_targets: int = DEFAULT_TOP_TARGETS,
     impute_by_tanimoto: bool = True,
-    tanimoto_threshold: float = 0.35,
+    tanimoto_threshold: float = 0.15,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Update master_drug_nodes.csv with BindingDB target vectors with multi-tier matching and structural imputation.
 

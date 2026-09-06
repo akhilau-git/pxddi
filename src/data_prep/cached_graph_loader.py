@@ -149,6 +149,7 @@ class CachedDDIPairDataset(Dataset):
         source_col: str = 'drug_a_id',
         target_col: str = 'drug_b_id',
         label_col: str = 'label',
+        neighbor_memory: Any = None,
     ) -> None:
         super().__init__()
         self.cache = molecular_cache
@@ -176,12 +177,22 @@ class CachedDDIPairDataset(Dataset):
                 lbl = 1.0 if (raw_label is True or raw_label == 1.0 or str(raw_label).lower() in {'1', 'true'}) else 0.0
                 self.samples.append((sa, sb, lbl))
 
+        self.memory_features: list[torch.Tensor] = []
+        if neighbor_memory is not None and hasattr(neighbor_memory, 'score_batch') and self.samples:
+            try:
+                da_list = [s[0] for s in self.samples]
+                db_list = [s[1] for s in self.samples]
+                m_arr = neighbor_memory.score_batch(da_list, db_list)
+                self.memory_features = [torch.from_numpy(v).float() for v in m_arr]
+            except Exception:
+                self.memory_features = []
+
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         sa, sb, lbl = self.samples[index]
-        return {
+        res = {
             'graph_a': self.cache.graphs[sa],
             'graph_b': self.cache.graphs[sb],
             'fp_a': self.cache.fingerprints[sa],
@@ -200,6 +211,11 @@ class CachedDDIPairDataset(Dataset):
             'target_mask_b': self.cache.target_masks.get(sb, torch.tensor(0.0, dtype=torch.float32)),
             'label': torch.tensor(lbl, dtype=torch.float32),
         }
+        if self.memory_features and index < len(self.memory_features):
+            res['memory_features'] = self.memory_features[index]
+        else:
+            res['memory_features'] = torch.zeros(3, dtype=torch.float32)
+        return res
 
 
 def multimodal_collate_fn(batch_items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -207,7 +223,7 @@ def multimodal_collate_fn(batch_items: list[dict[str, Any]]) -> dict[str, Any]:
     graph_a_list = [item['graph_a'] for item in batch_items]
     graph_b_list = [item['graph_b'] for item in batch_items]
 
-    return {
+    batch = {
         'drug_a': Batch.from_data_list(graph_a_list),
         'drug_b': Batch.from_data_list(graph_b_list),
         'fp_a': torch.stack([item['fp_a'] for item in batch_items]),
@@ -226,6 +242,9 @@ def multimodal_collate_fn(batch_items: list[dict[str, Any]]) -> dict[str, Any]:
         'target_mask_b': torch.stack([item['target_mask_b'] for item in batch_items]),
         'labels': torch.stack([item['label'] for item in batch_items]),
     }
+    if 'memory_features' in batch_items[0]:
+        batch['memory_features'] = torch.stack([item['memory_features'] for item in batch_items])
+    return batch
 
 
 def build_cached_multimodal_dataloader(
@@ -237,6 +256,7 @@ def build_cached_multimodal_dataloader(
     source_col: str = 'drug_a_id',
     target_col: str = 'drug_b_id',
     label_col: str = 'label',
+    neighbor_memory: Any = None,
 ) -> DataLoader:
     """Build high-throughput DataLoader using RAM-cached molecular and multi-modal features."""
     dataset = CachedDDIPairDataset(
@@ -245,6 +265,7 @@ def build_cached_multimodal_dataloader(
         source_col=source_col,
         target_col=target_col,
         label_col=label_col,
+        neighbor_memory=neighbor_memory,
     )
     return DataLoader(
         dataset,

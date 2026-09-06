@@ -41,9 +41,34 @@ def _open_geo_file(file_path: Path):
     return open(file_path, 'r', encoding='utf-8', errors='replace')
 
 
+TARGET_TO_GENE_MAP = {
+    'ADENOSINE RECEPTOR A2A': 'ADORA2A',
+    'ADENOSINE A2A': 'ADORA2A',
+    'CYCLOOXYGENASE-1': 'PTGS1',
+    'CYCLOOXYGENASE-2': 'PTGS2',
+    'COX-1': 'PTGS1',
+    'COX-2': 'PTGS2',
+    'CYTOCHROME P450 3A4': 'CYP3A4',
+    'CYTOCHROME P450 2D6': 'CYP2D6',
+    'CYTOCHROME P450 2C9': 'CYP2C9',
+    'CYTOCHROME P450 2C19': 'CYP2C19',
+    'CYTOCHROME P450 1A2': 'CYP1A2',
+    'DOPAMINE D2 RECEPTOR': 'DRD2',
+    'SEROTONIN 2A RECEPTOR': 'HTR2A',
+    '5-HT2A': 'HTR2A',
+    'BETA-1 ADRENERGIC RECEPTOR': 'ADRB1',
+    'BETA-2 ADRENERGIC RECEPTOR': 'ADRB2',
+    'ANGIOTENSIN-CONVERTING ENZYME': 'ACE',
+    'HMG-COA REDUCTASE': 'HMGCR',
+    'P-GLYCOPROTEIN': 'ABCB1',
+    'HER2': 'ERBB2',
+    'EGFR': 'EGFR',
+}
+
+
 def parse_disease_expression_file(
     file_path: str | Path,
-    max_genes: int = 500,
+    max_genes: int = 5000,
 ) -> dict[str, float]:
     """Parse a GEO disease expression file and extract top perturbed gene scores.
 
@@ -75,7 +100,7 @@ def parse_disease_expression_file(
             if not has_table_marker and stripped.startswith(('!', '^', '#')):
                 continue
             raw_lines.append(stripped)
-            if len(raw_lines) >= 15000:
+            if len(raw_lines) >= 25000:
                 break
 
     if not raw_lines:
@@ -148,7 +173,7 @@ def parse_disease_expression_file(
 
 def parse_geo_directory(
     geo_dir: str | Path,
-    max_genes_per_disease: int = 200,
+    max_genes_per_disease: int = 5000,
 ) -> dict[str, dict[str, float]]:
     """Parse all GEO disease datasets in directory.
 
@@ -182,7 +207,7 @@ def update_master_nodes_with_geo(
     geo_dir_or_signatures: str | Path | dict[str, dict[str, float]],
     output_path: str | Path | None = None,
     impute_by_tanimoto: bool = True,
-    tanimoto_threshold: float = 0.30,
+    tanimoto_threshold: float = 0.15,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Enrich master_drug_nodes.csv with GEO disease transcriptomic signatures.
 
@@ -237,6 +262,12 @@ def update_master_nodes_with_geo(
                 drug_genes.update(str(t).strip().upper() for t in targets.keys())
             except Exception:
                 pass
+
+        # Map common target aliases to HGNC symbols
+        for t in list(drug_genes):
+            for pattern, sym in TARGET_TO_GENE_MAP.items():
+                if pattern in t:
+                    drug_genes.add(sym)
 
         scores: dict[str, float] = {}
         vec: list[float] = []

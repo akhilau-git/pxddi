@@ -101,6 +101,7 @@ def train_extended_multimodal(
     use_cross_drug_attention: bool = False,
     use_target_encoder: bool = False,
     use_neighbor_memory: bool = False,
+    select_best_by: str = 's1',
 ) -> tuple[PxDDIModel, pd.DataFrame, dict[str, Any]]:
     """Train the multimodal model across extended epochs with checkpointing."""
     if device is None:
@@ -111,11 +112,21 @@ def train_extended_multimodal(
 
     is_multimodal = (architecture_version != MODEL_ARCHITECTURE_EDGE_AWARE)
 
-    train_loader = build_cached_multimodal_dataloader(train_df, cache, batch_size=batch_size, shuffle=True)
-    val_loader = build_cached_multimodal_dataloader(val_df, cache, batch_size=batch_size, shuffle=False)
+    neighbor_mem = None
+    if use_neighbor_memory:
+        from src.models.neighbor_memory import AuditableNeighborMemory
+        src_col = 'drug_a_id' if 'drug_a_id' in train_df.columns else ('source' if 'source' in train_df.columns else train_df.columns[0])
+        tgt_col = 'drug_b_id' if 'drug_b_id' in train_df.columns else ('target' if 'target' in train_df.columns else train_df.columns[1])
+        lbl_col = 'label' if 'label' in train_df.columns else train_df.columns[-1]
+        neighbor_mem = AuditableNeighborMemory(k_neighbors=5)
+        neighbor_mem.fit(train_df[src_col].tolist(), train_df[tgt_col].tolist(), train_df[lbl_col].tolist())
+        print(f"AuditableNeighborMemory fitted on {len(train_df)} training edges with {len(neighbor_mem.training_smiles)} unique drugs.")
+
+    train_loader = build_cached_multimodal_dataloader(train_df, cache, batch_size=batch_size, shuffle=True, neighbor_memory=neighbor_mem)
+    val_loader = build_cached_multimodal_dataloader(val_df, cache, batch_size=batch_size, shuffle=False, neighbor_memory=neighbor_mem)
 
     test_loaders = {
-        name: build_cached_multimodal_dataloader(df, cache, batch_size=batch_size, shuffle=False)
+        name: build_cached_multimodal_dataloader(df, cache, batch_size=batch_size, shuffle=False, neighbor_memory=neighbor_mem)
         for name, df in test_splits.items()
     }
 
@@ -279,10 +290,12 @@ def train_extended_multimodal(
               f"Val AUROC: {val_metrics['auroc']:.4f} | S1 AUROC: {s1_metrics['auroc']:.4f}{best_mark}{s1_mark}")
 
     # Load best checkpoint for final evaluation
-    if best_weights_path.is_file():
-        ckpt = torch.load(best_weights_path, map_location=device)
+    target_weights_path = best_s1_weights_path if (select_best_by == 's1' and best_s1_weights_path.is_file()) else best_weights_path
+    if target_weights_path.is_file():
+        ckpt = torch.load(target_weights_path, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'])
-        print(f"\nLoaded best validation model from epoch {ckpt['epoch']} (Val AUROC: {ckpt['val_auroc']:.4f})")
+        sel_label = "Peak S1 Validation" if target_weights_path == best_s1_weights_path else "Best Transductive Val"
+        print(f"\nLoaded {sel_label} model from epoch {ckpt['epoch']} (S1 AUROC: {ckpt.get('s1_auroc', 'N/A')}, Val AUROC: {ckpt.get('val_auroc', 'N/A')})")
 
     history_df = pd.DataFrame(history_records)
     history_df.to_csv(out_p / f'{architecture_version}_training_history.csv', index=False)
@@ -666,9 +679,10 @@ def run_full_multimodal_study(
 
     chembl_pretrained_path: str | Path | None = kwargs.pop('chembl_pretrained_path', None)
     use_cross_modal_attention: bool = kwargs.pop('use_cross_modal_attention', True)
-    use_cross_drug_attention: bool = kwargs.pop('use_cross_drug_attention', True)
+    use_cross_drug_attention: bool = kwargs.pop('use_cross_drug_attention', False)
     use_target_encoder: bool = kwargs.pop('use_target_encoder', True)
-    use_neighbor_memory: bool = kwargs.pop('use_neighbor_memory', False)
+    use_neighbor_memory: bool = kwargs.pop('use_neighbor_memory', True)
+    select_best_by: str = kwargs.pop('select_best_by', 's1')
 
     # 3. Extended Training (Full Multimodal Model)
     best_model, history_df, extended_metrics = train_extended_multimodal(
@@ -686,6 +700,7 @@ def run_full_multimodal_study(
         use_cross_drug_attention=use_cross_drug_attention,
         use_target_encoder=use_target_encoder,
         use_neighbor_memory=use_neighbor_memory,
+        select_best_by=select_best_by,
     )
 
     # 4. Modality Ablation Study

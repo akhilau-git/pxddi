@@ -215,6 +215,8 @@ def safe_forward_multimodal(
             kwargs['target_b'] = batch['target_b'].to(device)
             kwargs['target_mask_a'] = batch['target_mask_a'].to(device)
             kwargs['target_mask_b'] = batch['target_mask_b'].to(device)
+        if ('memory_features' in sig or has_var_kwargs) and 'memory_features' in batch and batch['memory_features'] is not None:
+            kwargs['memory_features'] = batch['memory_features'].to(device)
     except Exception:
         pass
     return model(**kwargs)
