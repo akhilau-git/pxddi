@@ -12,6 +12,7 @@ MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE = 'motif_edge_aware_gat_v1'
 MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE = 'cross_attention_edge_aware_gat_v1'
 MODEL_ARCHITECTURE_GRAPH_FP_FUSION = 'graph_fp_fusion_v1'
 MODEL_ARCHITECTURE_AUDITDDI_MEMORY = 'auditddi_memory_fusion_v1'
+MODEL_ARCHITECTURE_MULTIMODAL = 'auditddi_multimodal_v1'
 
 
 def architecture_uses_edge_features(architecture_version: str) -> bool:
@@ -22,6 +23,7 @@ def architecture_uses_edge_features(architecture_version: str) -> bool:
         MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE,
         MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
         MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
+        MODEL_ARCHITECTURE_MULTIMODAL,
     }
 
 
@@ -40,7 +42,13 @@ def architecture_requires_fingerprint_features(architecture_version: str) -> boo
     return architecture_version in {
         MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
         MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
+        MODEL_ARCHITECTURE_MULTIMODAL,
     }
+
+
+def architecture_requires_multimodal_features(architecture_version: str) -> bool:
+    """Return whether a checkpoint consumes pharmacogenomic gene and clinical toxicity features."""
+    return architecture_version == MODEL_ARCHITECTURE_MULTIMODAL
 
 
 def model_from_checkpoint(checkpoint):
@@ -57,6 +65,9 @@ def model_from_checkpoint(checkpoint):
         motif_feature_dim=checkpoint.get('motif_feature_dim'),
         motif_hidden_channels=checkpoint.get('motif_hidden_channels'),
         use_neighbor_memory=checkpoint.get('use_neighbor_memory', False),
+        gene_feature_dim=checkpoint.get('gene_feature_dim', 50),
+        gene_hidden_channels=checkpoint.get('gene_hidden_channels', 64),
+        use_clinical_toxicity=checkpoint.get('use_clinical_toxicity', False),
     )
 
 class PxDDIModel(nn.Module):
@@ -72,11 +83,18 @@ class PxDDIModel(nn.Module):
         motif_feature_dim=None,
         motif_hidden_channels=None,
         use_neighbor_memory=False,
+        gene_feature_dim=50,
+        gene_hidden_channels=64,
+        use_clinical_toxicity=False,
     ):
         super().__init__()
         self.use_chemberta = use_chemberta
         self.architecture_version = architecture_version
         self.use_toxicity_pair_features = use_toxicity_pair_features
+        self.gene_feature_dim = gene_feature_dim
+        self.gene_hidden_channels = gene_hidden_channels
+        self.use_clinical_toxicity = use_clinical_toxicity or (architecture_version == MODEL_ARCHITECTURE_MULTIMODAL)
+
         if use_chemberta:
             from .encoder import MolecularEncoderChemBERTa
             self.encoder = MolecularEncoderChemBERTa(hidden_channels)
@@ -116,6 +134,20 @@ class PxDDIModel(nn.Module):
         else:
             self.fp_encoder = None
 
+        if architecture_requires_multimodal_features(architecture_version):
+            self.gene_encoder = nn.Sequential(
+                nn.Linear(gene_feature_dim, gene_hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+            )
+            self.gene_gate = nn.Sequential(
+                nn.Linear(gene_hidden_channels, 1),
+                nn.Sigmoid(),
+            )
+        else:
+            self.gene_encoder = None
+            self.gene_gate = None
+
         self.cross_drug_attention = (
             CrossDrugAttention(hidden_channels)
             if architecture_requires_cross_drug_attention(architecture_version)
@@ -132,6 +164,8 @@ class PxDDIModel(nn.Module):
             motif_hidden_channels if self.motif_encoder is not None else 0
         ) + (hidden_channels if self.cross_drug_attention is not None else 0) + (
             128 if self.fp_encoder is not None else 0
+        ) + (
+            gene_hidden_channels if self.gene_encoder is not None else 0
         )
         self.use_neighbor_memory = (
             use_neighbor_memory or architecture_version == MODEL_ARCHITECTURE_AUDITDDI_MEMORY
@@ -140,10 +174,26 @@ class PxDDIModel(nn.Module):
             2 if use_toxicity_pair_features else 0
         ) + (
             3 if self.use_neighbor_memory else 0
+        ) + (
+            2 if self.use_clinical_toxicity else 0
         )
         self.risk_classifier = nn.Sequential(
             nn.Linear(risk_input_channels, 64), nn.ReLU(), nn.Dropout(0.4), nn.Linear(64,1))
-    def forward(self, drug_a, drug_b, patient=None, memory_features=None):
+    def forward(
+        self,
+        drug_a,
+        drug_b,
+        patient=None,
+        memory_features=None,
+        fp_a=None,
+        fp_b=None,
+        gene_a=None,
+        gene_b=None,
+        gene_mask_a=None,
+        gene_mask_b=None,
+        clinical_tox_a=None,
+        clinical_tox_b=None,
+    ):
         if self.use_chemberta:
             device = next(self.parameters()).device
             ea = self.encoder(drug_a.smiles, device)
@@ -188,12 +238,36 @@ class PxDDIModel(nn.Module):
             ea_for_risk, eb_for_risk = ea, eb
 
         if self.fp_encoder is not None:
-            if not hasattr(drug_a, 'fingerprint_features') or not hasattr(drug_b, 'fingerprint_features'):
-                raise ValueError('The fusion candidate requires fingerprint_features on both drug graphs.')
-            fp_a = self.fp_encoder(drug_a.fingerprint_features.float().view(-1, 1024))
-            fp_b = self.fp_encoder(drug_b.fingerprint_features.float().view(-1, 1024))
-            ea_for_risk = torch.cat((ea_for_risk, fp_a), dim=1)
-            eb_for_risk = torch.cat((eb_for_risk, fp_b), dim=1)
+            if fp_a is not None and fp_b is not None:
+                enc_fp_a = self.fp_encoder(fp_a.float().view(-1, 1024))
+                enc_fp_b = self.fp_encoder(fp_b.float().view(-1, 1024))
+            elif hasattr(drug_a, 'fingerprint_features') and hasattr(drug_b, 'fingerprint_features'):
+                enc_fp_a = self.fp_encoder(drug_a.fingerprint_features.float().view(-1, 1024))
+                enc_fp_b = self.fp_encoder(drug_b.fingerprint_features.float().view(-1, 1024))
+            else:
+                enc_fp_a = torch.zeros((ea.size(0), 128), device=ea.device, dtype=ea.dtype)
+                enc_fp_b = torch.zeros((eb.size(0), 128), device=eb.device, dtype=eb.dtype)
+            ea_for_risk = torch.cat((ea_for_risk, enc_fp_a), dim=1)
+            eb_for_risk = torch.cat((eb_for_risk, enc_fp_b), dim=1)
+
+        if self.gene_encoder is not None and self.gene_gate is not None:
+            if gene_a is not None and gene_b is not None:
+                ga = self.gene_encoder(gene_a.float().view(-1, self.gene_feature_dim))
+                ga_gate = self.gene_gate(ga)
+                if gene_mask_a is not None:
+                    ga_gate = ga_gate * gene_mask_a.view(-1, 1)
+                ga_rep = ga_gate * ga
+
+                gb = self.gene_encoder(gene_b.float().view(-1, self.gene_feature_dim))
+                gb_gate = self.gene_gate(gb)
+                if gene_mask_b is not None:
+                    gb_gate = gb_gate * gene_mask_b.view(-1, 1)
+                gb_rep = gb_gate * gb
+            else:
+                ga_rep = torch.zeros((ea.size(0), self.gene_hidden_channels), device=ea.device, dtype=ea.dtype)
+                gb_rep = torch.zeros((eb.size(0), self.gene_hidden_channels), device=eb.device, dtype=eb.dtype)
+            ea_for_risk = torch.cat((ea_for_risk, ga_rep), dim=1)
+            eb_for_risk = torch.cat((eb_for_risk, gb_rep), dim=1)
 
         if self.cross_drug_attention is not None:
             ea_for_risk = torch.cat((ea_for_risk, cross_a), dim=1)
@@ -211,6 +285,11 @@ class PxDDIModel(nn.Module):
                 (toxicity_a_probability + toxicity_b_probability).unsqueeze(-1),
                 torch.abs(toxicity_a_probability - toxicity_b_probability).unsqueeze(-1),
             ])
+        if self.use_clinical_toxicity:
+            if clinical_tox_a is not None and clinical_tox_b is not None:
+                features.append(torch.stack([clinical_tox_a.float().view(-1), clinical_tox_b.float().view(-1)], dim=1))
+            else:
+                features.append(torch.zeros((ea.size(0), 2), device=ea.device, dtype=ea.dtype))
         if self.use_neighbor_memory:
             if memory_features is None:
                 memory_features = torch.zeros(
