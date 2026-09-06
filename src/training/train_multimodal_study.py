@@ -130,9 +130,18 @@ def train_extended_multimodal(
     in_channels = sample_batch['drug_a'].x.size(1)
     edge_dim = sample_batch['drug_a'].edge_attr.size(1)
 
+    hidden_dim = 64
+    if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
+        try:
+            bundle_meta = torch.load(chembl_pretrained_path, map_location='cpu', weights_only=False)
+            if isinstance(bundle_meta, dict) and 'encoder_configuration' in bundle_meta:
+                hidden_dim = int(bundle_meta['encoder_configuration'].get('hidden_channels', 64))
+        except Exception:
+            pass
+
     model = PxDDIModel(
         in_channels=in_channels,
-        hidden_channels=64,
+        hidden_channels=hidden_dim,
         edge_feature_dim=edge_dim,
         architecture_version=architecture_version,
         gene_feature_dim=cache.gene_dim,
@@ -143,14 +152,14 @@ def train_extended_multimodal(
 
     if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
         from src.models.encoder_pretraining import load_pretrained_edge_aware_encoder
-        print(f"Loading ChEMBL pre-trained encoder weights from: {chembl_pretrained_path}")
+        print(f"Loading ChEMBL pre-trained encoder weights from: {chembl_pretrained_path} (hidden_dim={hidden_dim})")
         try:
             load_pretrained_edge_aware_encoder(
                 encoder=model.encoder,
                 path=chembl_pretrained_path,
                 expected_in_channels=in_channels,
                 expected_edge_feature_dim=edge_dim,
-                expected_hidden_channels=64,
+                expected_hidden_channels=hidden_dim,
                 map_location=device,
             )
             print("Successfully initialized molecular encoder with ChEMBL representations.")
