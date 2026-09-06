@@ -172,13 +172,25 @@ def train_extended_multimodal(
 
     model = model.to(device)
 
-    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
+        encoder_params = list(model.encoder.parameters())
+        other_params = [p for n, p in model.named_parameters() if not n.startswith('encoder.')]
+        optimizer = AdamW([
+            {'params': encoder_params, 'lr': learning_rate * 0.1},
+            {'params': other_params, 'lr': learning_rate},
+        ], weight_decay=weight_decay)
+        print(f"Discriminative LR: encoder LR={learning_rate * 0.1:.1e}, fusion heads LR={learning_rate:.1e}")
+    else:
+        optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
     criterion = nn.BCEWithLogitsLoss()
 
     history_records: list[dict[str, Any]] = []
     best_val_auroc = -1.0
+    best_s1_auroc = -1.0
     best_weights_path = out_p / f'{architecture_version}_best.pt'
+    best_s1_weights_path = out_p / f'{architecture_version}_best_s1.pt'
 
     print(f"\n{'=' * 80}")
     print(f"STARTING EXTENDED TRAINING: {architecture_version} ({epochs} epochs on {device})")
@@ -188,13 +200,12 @@ def train_extended_multimodal(
         ep_start = time.perf_counter()
         model.train()
         total_loss = 0.0
-        n_batches = 0
 
         for batch in train_loader:
             optimizer.zero_grad()
             da = batch['drug_a'].to(device)
             db = batch['drug_b'].to(device)
-            y = batch['labels'].to(device)
+            labels = batch['labels'].to(device)
 
             if is_multimodal:
                 risk_logits, _, _ = model(
@@ -212,26 +223,26 @@ def train_extended_multimodal(
             else:
                 risk_logits, _, _ = model(drug_a=da, drug_b=db)
 
-            loss = criterion(risk_logits, y)
+            loss = criterion(risk_logits.view(-1), labels.view(-1))
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
-
             total_loss += float(loss.item())
-            n_batches += 1
 
         scheduler.step()
         ep_sec = time.perf_counter() - ep_start
-        avg_loss = total_loss / max(n_batches, 1)
+        avg_loss = total_loss / max(len(train_loader), 1)
 
         val_metrics = evaluate_loader(model, val_loader, device, is_multimodal=is_multimodal)
-        s1_metrics = evaluate_loader(model, test_loaders['s1_cold'], device, is_multimodal=is_multimodal)
+        s1_loader = test_loaders.get('s1_cold')
+        s1_metrics = evaluate_loader(model, s1_loader, device, is_multimodal=is_multimodal) if s1_loader is not None else {'auroc': 0.0, 'auprc': 0.0}
 
         record = {
             'epoch': epoch,
             'train_loss': avg_loss,
-            'epoch_sec': ep_sec,
             'val_auroc': val_metrics['auroc'],
             'val_auprc': val_metrics['auprc'],
+            'val_f1': val_metrics['f1'],
             's1_cold_auroc': s1_metrics['auroc'],
             's1_cold_auprc': s1_metrics['auprc'],
         }
@@ -247,7 +258,7 @@ def train_extended_multimodal(
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_auroc': best_val_auroc,
                     'in_channels': in_channels,
-                    'hidden_channels': 64,
+                    'hidden_channels': hidden_dim,
                     'edge_feature_dim': edge_dim,
                     'architecture_version': architecture_version,
                     'gene_feature_dim': cache.gene_dim,
@@ -257,21 +268,44 @@ def train_extended_multimodal(
                 best_weights_path,
             )
 
-        best_mark = " (★ Best)" if is_best else ""
+        if s1_metrics['auroc'] > best_s1_auroc:
+            best_s1_auroc = s1_metrics['auroc']
+            torch.save(
+                {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    's1_auroc': best_s1_auroc,
+                    'in_channels': in_channels,
+                    'hidden_channels': hidden_dim,
+                    'edge_feature_dim': edge_dim,
+                    'architecture_version': architecture_version,
+                    'gene_feature_dim': cache.gene_dim,
+                    'gene_hidden_channels': 64,
+                    'use_clinical_toxicity': is_multimodal,
+                },
+                best_s1_weights_path,
+            )
+
+        best_mark = " (★ Best Val)" if is_best else ""
+        s1_mark = " (🔥 Best S1)" if s1_metrics['auroc'] == best_s1_auroc else ""
         print(f"  Epoch {epoch:02d}/{epochs:02d} ({ep_sec:.1f}s) - Loss: {avg_loss:.4f} | "
-              f"Val AUROC: {val_metrics['auroc']:.4f} | S1 AUROC: {s1_metrics['auroc']:.4f}{best_mark}")
+              f"Val AUROC: {val_metrics['auroc']:.4f} | S1 AUROC: {s1_metrics['auroc']:.4f}{best_mark}{s1_mark}")
 
     # Load best checkpoint for final evaluation
     if best_weights_path.is_file():
         ckpt = torch.load(best_weights_path, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'])
-        print(f"\nLoaded best model from epoch {ckpt['epoch']} (Val AUROC: {ckpt['val_auroc']:.4f})")
+        print(f"\nLoaded best validation model from epoch {ckpt['epoch']} (Val AUROC: {ckpt['val_auroc']:.4f})")
 
     history_df = pd.DataFrame(history_records)
     history_df.to_csv(out_p / f'{architecture_version}_training_history.csv', index=False)
 
     # Final split evaluation
-    final_results: dict[str, Any] = {'architecture': architecture_version, 'best_val_auroc': best_val_auroc}
+    final_results: dict[str, Any] = {
+        'architecture': architecture_version,
+        'best_val_auroc': best_val_auroc,
+        'peak_s1_cold_auroc': best_s1_auroc,
+    }
     for name, loader in test_loaders.items():
         m = evaluate_loader(model, loader, device, is_multimodal=is_multimodal)
         for k, v in m.items():
