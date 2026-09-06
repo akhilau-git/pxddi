@@ -455,6 +455,26 @@ def safe_checkpoint_save(state_dict_bundle: dict[str, Any], path: str | Path) ->
 save_checkpoint_safe = safe_checkpoint_save
 
 
+def persist_finalized_checkpoint(
+    checkpoint: dict[str, Any],
+    checkpoint_path: str | Path,
+    *,
+    evaluation_only: bool,
+) -> str:
+    """Persist training finalization, but keep checkpoint-only evaluation read-only.
+
+    An evaluation run may regenerate reports from the same audited inputs, but
+    it must not silently change the model bundle, its artifact pointers, or
+    its SHA-256 identity. Normal training finalization remains atomic.
+    """
+    path = Path(checkpoint_path)
+    if evaluation_only:
+        if not path.is_file():
+            raise FileNotFoundError(f'Checkpoint does not exist: {path}.')
+        return get_file_hash(path)
+    return safe_checkpoint_save(checkpoint, path)
+
+
 def build_run_manifest() -> dict[str, Any]:
     """Capture immutable inputs before any model fitting begins."""
     required_paths = {
@@ -2328,11 +2348,16 @@ def main() -> None:
         ),
     }
 
-    # Preserve the real convergence record before updating the reviewed
-    # checkpoint. Checkpoint-only evaluation must never fabricate this data.
+    # Preserve the real convergence record in this run's artifacts. A
+    # checkpoint-only evaluation reads the existing history but never rewrites
+    # the checkpoint to point at its newly created report copy.
     plot_training_curves(history, figure_dir)
     history_summary = save_training_history(history, RUN_ARTIFACTS_DIR)
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
+    checkpoint = (
+        evaluation_checkpoint
+        if EVALUATE_ONLY
+        else torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
+    )
     model.load_state_dict(checkpoint['model_state_dict'])
     validation_true, validation_raw_predictions = collect_predictions(
         model, posthoc_validation_loader
@@ -2388,32 +2413,35 @@ def main() -> None:
     frozen_threshold = select_validation_threshold(
         validation_true[threshold_indices], validation_calibrated_predictions[threshold_indices]
     )
-    checkpoint['threshold'] = frozen_threshold
-    checkpoint['calibration'] = calibration
-    checkpoint['toxicity_head_output'] = 'logits_v1'
-    checkpoint['conformal'] = conformal
-    checkpoint['use_neighbor_memory'] = USE_NEIGHBOR_MEMORY
-    checkpoint['neighbor_memory_state'] = (
-        neighbor_memory.export_state() if neighbor_memory is not None else None
+    if not EVALUATE_ONLY:
+        checkpoint['threshold'] = frozen_threshold
+        checkpoint['calibration'] = calibration
+        checkpoint['toxicity_head_output'] = 'logits_v1'
+        checkpoint['conformal'] = conformal
+        checkpoint['use_neighbor_memory'] = USE_NEIGHBOR_MEMORY
+        checkpoint['neighbor_memory_state'] = (
+            neighbor_memory.export_state() if neighbor_memory is not None else None
+        )
+        checkpoint['applicability_domain'] = applicability_domain.export_checkpoint_state()
+        checkpoint['posthoc_validation_partition'] = {
+            key: value for key, value in posthoc_partition_artifact.items()
+            if key not in {'path', 'sha256'}
+        }
+        checkpoint['validation_role_partition'] = validation_role_partition
+        checkpoint['pretraining_initialization'] = pretraining_initialization
+        checkpoint['evaluation_provenance'] = evaluation_checkpoint_provenance(
+            manifest, split_manifest
+        )
+        checkpoint['external_overlap_training_split'] = external_overlap_training_split(
+            split_manifest, train_split_key
+        )
+        checkpoint['external_overlap_development_splits'] = external_overlap_development_splits(
+            split_manifest
+        )
+        checkpoint['training_history'] = history_summary
+    checkpoint_hash = persist_finalized_checkpoint(
+        checkpoint, CHECKPOINT_PATH, evaluation_only=EVALUATE_ONLY
     )
-    checkpoint['applicability_domain'] = applicability_domain.export_checkpoint_state()
-    checkpoint['posthoc_validation_partition'] = {
-        key: value for key, value in posthoc_partition_artifact.items()
-        if key not in {'path', 'sha256'}
-    }
-    checkpoint['validation_role_partition'] = validation_role_partition
-    checkpoint['pretraining_initialization'] = pretraining_initialization
-    checkpoint['evaluation_provenance'] = evaluation_checkpoint_provenance(
-        manifest, split_manifest
-    )
-    checkpoint['external_overlap_training_split'] = external_overlap_training_split(
-        split_manifest, train_split_key
-    )
-    checkpoint['external_overlap_development_splits'] = external_overlap_development_splits(
-        split_manifest
-    )
-    checkpoint['training_history'] = history_summary
-    checkpoint_hash = safe_checkpoint_save(checkpoint, CHECKPOINT_PATH)
     validation_prediction_path = save_prediction_artifact(
         'Validation',
         posthoc_validation_loader,
@@ -2646,6 +2674,10 @@ def main() -> None:
         'checkpoint': {
             'path': str(CHECKPOINT_PATH),
             'sha256': checkpoint_hash,
+            'write_mode': (
+                'read_only_checkpoint_evaluation'
+                if EVALUATE_ONLY else 'training_posthoc_finalization'
+            ),
             'epoch': checkpoint['epoch'],
             'validation_auroc': checkpoint['auroc'],
             'validation_selected_threshold': frozen_threshold,

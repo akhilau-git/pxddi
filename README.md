@@ -193,7 +193,9 @@ Every completed run writes `evaluation_metrics.csv` before its latest-results
 mirror is published. To re-evaluate a checkpoint, set one explicit
 `PXDDI_CHECKPOINT_PATH` and use `src/training/evaluate_saved_checkpoint.py`;
 it rejects checkpoints whose architecture, input hash, split evidence, or
-real training-history artifact cannot be verified.
+real training-history artifact cannot be verified. Checkpoint-only evaluation
+is read-only: it writes a new report folder but never changes the selected
+checkpoint or its hash.
 
 ### Phase 7 evaluation protocol
 

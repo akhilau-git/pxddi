@@ -82,6 +82,7 @@ backend/latest_results/
 
 # Experiment run artifacts — large CSVs, figures, checkpoints — live in Drive only.
 backend/experiments/
+backend/new results 5-9-26/
 
 # Deliverable binaries (PowerPoint, etc.) — too large and binary for git.
 deliverables/

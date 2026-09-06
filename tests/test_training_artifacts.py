@@ -29,6 +29,7 @@ with patch('torch.cuda.is_available', return_value=True):
         publish_latest_results,
         partition_validation_for_posthoc,
         posthoc_validation_partition_summary,
+        persist_finalized_checkpoint,
         resolve_results_base,
         runtime_environment,
         save_counterion_curation_candidates,
@@ -84,6 +85,24 @@ def test_safe_checkpoint_save_atomic_replace():
         
         loaded_state = torch.load(final_path, map_location='cpu', weights_only=False)
         assert torch.equal(loaded_state['test_key'], state['test_key'])
+
+
+def test_checkpoint_only_evaluation_never_rewrites_the_selected_checkpoint(tmp_path):
+    checkpoint_path = tmp_path / 'reviewed_model.pt'
+    original = {'test_key': torch.tensor([1, 2, 3])}
+    torch.save(original, checkpoint_path)
+    original_bytes = checkpoint_path.read_bytes()
+
+    observed_hash = persist_finalized_checkpoint(
+        {'test_key': torch.tensor([99])}, checkpoint_path, evaluation_only=True
+    )
+
+    assert observed_hash == get_file_hash(checkpoint_path)
+    assert checkpoint_path.read_bytes() == original_bytes
+    assert torch.equal(
+        torch.load(checkpoint_path, map_location='cpu', weights_only=False)['test_key'],
+        original['test_key'],
+    )
 
 
 def test_metrics_handle_evaluable_and_one_class_splits():

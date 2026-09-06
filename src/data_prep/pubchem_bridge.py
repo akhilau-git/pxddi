@@ -44,49 +44,69 @@ def pubchem_query_url(drug_name: str) -> str:
 
 
 def lookup_pubchem_smiles(
-    drug_name: str,
+    drug_name: str | None,
     max_retries: int = 3,
     timeout_seconds: int = 10,
     request_get=requests.get,
     sleep=time.sleep,
+    lookup_cache: dict[str, PubChemLookupResult] | None = None,
 ) -> PubChemLookupResult:
     """Query PubChem with bounded retries and record the outcome.
 
     A 404 is a valid unresolved name and is not retried. Transient HTTP errors
     and network failures are retried so a short outage is not silently treated
-    as a chemical mapping failure.
+    as a chemical mapping failure. NaN, None, or empty names are safely skipped.
     """
+    if drug_name is None or not isinstance(drug_name, str) or not drug_name.strip() or drug_name.strip().lower() in {'nan', 'none', 'null'}:
+        return PubChemLookupResult(None, 'invalid_or_nan_name', 0, '')
+
+    cleaned_name = drug_name.strip().upper()
+    if lookup_cache is not None and cleaned_name in lookup_cache:
+        return lookup_cache[cleaned_name]
+
     if max_retries < 1:
         raise ValueError('max_retries must be at least 1.')
     if timeout_seconds <= 0:
         raise ValueError('timeout_seconds must be positive.')
 
-    query_url = pubchem_query_url(drug_name)
+    query_url = pubchem_query_url(cleaned_name)
     for attempt in range(1, max_retries + 1):
         try:
             response = request_get(query_url, timeout=timeout_seconds)
         except requests.exceptions.RequestException:
             if attempt == max_retries:
-                return PubChemLookupResult(None, 'network_error', attempt, query_url)
+                res = PubChemLookupResult(None, 'network_error', attempt, query_url)
+                if lookup_cache is not None:
+                    lookup_cache[cleaned_name] = res
+                return res
             sleep(attempt)
             continue
 
         if response.status_code == 200:
             smiles = response.text.strip()
             status = 'matched' if smiles else 'empty_response'
-            return PubChemLookupResult(smiles or None, status, attempt, query_url)
+            res = PubChemLookupResult(smiles or None, status, attempt, query_url)
+            if lookup_cache is not None:
+                lookup_cache[cleaned_name] = res
+            return res
         if response.status_code in {400, 404}:
-            return PubChemLookupResult(None, f'not_found_http_{response.status_code}', attempt, query_url)
+            res = PubChemLookupResult(None, f'not_found_http_{response.status_code}', attempt, query_url)
+            if lookup_cache is not None:
+                lookup_cache[cleaned_name] = res
+            return res
         if response.status_code == 429 or 500 <= response.status_code < 600:
             if attempt < max_retries:
                 sleep(attempt)
                 continue
-        return PubChemLookupResult(
+        res = PubChemLookupResult(
             None,
             f'http_{response.status_code}',
             attempt,
             query_url,
         )
+        if lookup_cache is not None:
+            lookup_cache[cleaned_name] = res
+        return res
 
     raise AssertionError('PubChem retry loop exited unexpectedly.')
 
@@ -204,11 +224,52 @@ def load_validated_bridge_cache(cache_path: str | Path) -> pd.DataFrame:
     return validate_bridge_dataframe(pd.read_csv(path))
 
 
+def _load_or_create_lookup_cache(cache_file: Path | None) -> dict[str, PubChemLookupResult]:
+    """Load persistent disk lookup cache if available."""
+    if cache_file is None or not cache_file.exists():
+        return {}
+    try:
+        data = json.loads(cache_file.read_text(encoding='utf-8'))
+        return {
+            k: PubChemLookupResult(
+                smiles=v.get('smiles'),
+                status=v.get('status', 'cached'),
+                attempts=v.get('attempts', 1),
+                query_url=v.get('query_url', ''),
+            )
+            for k, v in data.items()
+        }
+    except Exception as exc:
+        print(f'Warning: could not read PubChem lookup cache {cache_file}: {exc}')
+        return {}
+
+
+def _save_lookup_cache(cache_file: Path | None, cache: dict[str, PubChemLookupResult]) -> None:
+    """Save persistent disk lookup cache."""
+    if cache_file is None:
+        return
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        serializable = {
+            k: {
+                'smiles': v.smiles,
+                'status': v.status,
+                'attempts': v.attempts,
+                'query_url': v.query_url,
+            }
+            for k, v in cache.items()
+        }
+        cache_file.write_text(json.dumps(serializable, indent=2), encoding='utf-8')
+    except Exception as exc:
+        print(f'Warning: could not save PubChem lookup cache {cache_file}: {exc}')
+
+
 def build_name_to_smiles_bridge(
     tox_labels_df: pd.DataFrame,
     cache_path: str | Path,
     top_n: int = 500,
     delay: float = 0.25,
+    lookup_cache_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """Build or validate an auditable FAERS-to-PubChem toxicity bridge."""
     if top_n < 1:
@@ -225,20 +286,33 @@ def build_name_to_smiles_bridge(
         print(f'Loading and validating cached bridge from {cache}')
         return load_validated_bridge_cache(cache)
 
-    top_drugs = tox_labels_df.sort_values('n_reports', ascending=False).head(top_n)
+    lookup_cache_file = Path(lookup_cache_path) if lookup_cache_path else cache.parent / 'pubchem_lookup_cache.json'
+    lookup_cache = _load_or_create_lookup_cache(lookup_cache_file)
+    print(f'Loaded {len(lookup_cache)} cached PubChem queries from {lookup_cache_file}')
+
+    # Filter out NaNs, blanks, and invalid drugnames
+    valid_drugs = tox_labels_df.dropna(subset=['drugname']).copy()
+    valid_drugs['drugname_clean'] = valid_drugs['drugname'].astype(str).str.strip()
+    valid_drugs = valid_drugs[
+        ~valid_drugs['drugname_clean'].str.lower().isin({'', 'nan', 'none', 'null'})
+    ]
+
+    top_drugs = valid_drugs.sort_values('n_reports', ascending=False).head(top_n)
     print(f'Querying PubChem for top {len(top_drugs)} most-reported drugs...')
     fetched_at = datetime.now(timezone.utc).isoformat()
     results = []
+
     for index, row in enumerate(top_drugs.itertuples(index=False), 1):
-        lookup = lookup_pubchem_smiles(str(row.drugname))
+        raw_name = str(row.drugname).strip().upper()
+        lookup = lookup_pubchem_smiles(raw_name, lookup_cache=lookup_cache)
         canonical = canonicalize(lookup.smiles)
         results.append({
-            'drugname': row.drugname,
+            'drugname': raw_name,
             'raw_smiles': lookup.smiles,
             'canonical_smiles': canonical,
-            'toxicity_score': row.toxicity_score,
-            'n_reports': row.n_reports,
-            'query_name': str(row.drugname),
+            'toxicity_score': float(row.toxicity_score),
+            'n_reports': int(row.n_reports),
+            'query_name': raw_name,
             'pubchem_query_url': lookup.query_url,
             'pubchem_lookup_status': lookup.status,
             'pubchem_lookup_attempts': lookup.attempts,
@@ -247,9 +321,11 @@ def build_name_to_smiles_bridge(
         if index % 50 == 0:
             matched = sum(result['canonical_smiles'] is not None for result in results)
             print(f'  Progress: {index}/{len(top_drugs)}; {matched} structures matched so far')
-        if delay:
+            _save_lookup_cache(lookup_cache_file, lookup_cache)
+        if delay and lookup.status not in {'cached', 'invalid_or_nan_name'}:
             time.sleep(delay)
 
+    _save_lookup_cache(lookup_cache_file, lookup_cache)
     bridge = validate_bridge_dataframe(pd.DataFrame(results))
     summary, conflicts = audit_toxicity_bridge(bridge)
     print(
@@ -265,3 +341,20 @@ def build_name_to_smiles_bridge(
     bridge.to_csv(cache, index=False)
     print(f'Cached validated bridge at {cache}')
     return bridge
+
+
+def rebuild_faers_toxicity_bridge_from_ascii(
+    faers_ascii_dir: str | Path,
+    output_bridge_path: str | Path,
+    top_n: int = 500,
+    min_reports: int = 5,
+    delay: float = 0.25,
+) -> pd.DataFrame:
+    """End-to-end pipeline: Parse FAERS ASCII tables, aggregate severity, and build PubChem bridge."""
+    from .faers_pipeline import build_toxicity_labels
+
+    print(f'Parsing FAERS ASCII files from {faers_ascii_dir}...')
+    tox_labels = build_toxicity_labels(str(faers_ascii_dir), min_reports=min_reports)
+    print(f'Built toxicity labels for {len(tox_labels)} drugs.')
+    return build_name_to_smiles_bridge(tox_labels, cache_path=output_bridge_path, top_n=top_n, delay=delay)
+
