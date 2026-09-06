@@ -148,3 +148,71 @@ def test_benchmark_model_smoke():
     assert "s1_cold_auroc" in res
     assert "avg_epoch_time_sec" in res
     assert res["avg_epoch_time_sec"] > 0.0
+
+
+def test_ensure_benchmark_splits_and_run_benchmark():
+    from src.training.benchmark_cold_start import ensure_benchmark_splits, run_benchmark
+
+    drugs = [
+        "CC(=O)Oc1ccccc1C(=O)O",  # Aspirin
+        "Cn1c(=O)c2c(ncn2C)n(C)c1=O",  # Caffeine
+        "CC(C)Cc1ccc(cc1)C(C)C(=O)O",  # Ibuprofen
+        "CN1C2CCC1C(C(C2)OC(=O)c3ccccc3)C(=O)OC",  # Cocaine
+        "CN1CCC[C@H]1c2cccnc2",  # Nicotine
+        "CC(=O)Nc1ccc(O)cc1",  # Paracetamol
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_p = Path(tmpdir)
+        graph_dir = tmp_p / "unified_graph"
+        graph_dir.mkdir(parents=True)
+
+        nodes_df = pd.DataFrame([
+            {
+                "drug_id": drug,
+                "canonical_smiles": drug,
+                "gene_vector_multihot": [1 if i % 2 == 0 else 0 for i in range(50)],
+                "toxicity_score": 0.25,
+            }
+            for drug in drugs
+        ])
+        nodes_path = graph_dir / "master_drug_nodes.csv"
+        nodes_df.to_csv(nodes_path, index=False)
+
+        # Generate dense pairs among the 6 drugs
+        edges = []
+        for i in range(len(drugs)):
+            for j in range(i + 1, len(drugs)):
+                edges.append({
+                    "drug_a_id": drugs[i],
+                    "drug_b_id": drugs[j],
+                    "interaction_type": "adverse_interaction",
+                    "evidence_count": 1,
+                })
+        edges_df = pd.DataFrame(edges)
+        edges_path = graph_dir / "master_ddi_edges.csv"
+        edges_df.to_csv(edges_path, index=False)
+
+        # 1. Test ensure_benchmark_splits with splits_dir=None
+        splits_path = ensure_benchmark_splits(
+            splits_dir=None,
+            master_nodes_path=nodes_path,
+            holdout_fraction=0.33,
+        )
+        assert splits_path.is_dir()
+        assert (splits_path / "transductive_train.csv").is_file()
+        assert (splits_path / "s1_test.csv").is_file()
+
+        # 2. Test run_benchmark with splits_dir=None
+        out_dir = tmp_p / "bench_out"
+        comp_df = run_benchmark(
+            master_nodes_path=nodes_path,
+            splits_dir=None,
+            output_dir=out_dir,
+            epochs=1,
+            batch_size=4,
+            device=torch.device("cpu"),
+        )
+        assert len(comp_df) == 2
+        assert "architecture" in comp_df.columns
+        assert (out_dir / "benchmark_results.csv").is_file()

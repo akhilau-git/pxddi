@@ -127,9 +127,23 @@ class CachedDDIPairDataset(Dataset):
         self.cache = molecular_cache
         self.samples: list[tuple[str, str, float]] = []
 
+        actual_source = source_col
+        if actual_source not in edges_df.columns:
+            for cand in ['source', 'drug1_id', 'drug_a_id', 'drug_1', 'drug_a']:
+                if cand in edges_df.columns:
+                    actual_source = cand
+                    break
+
+        actual_target = target_col
+        if actual_target not in edges_df.columns:
+            for cand in ['target', 'drug2_id', 'drug_b_id', 'drug_2', 'drug_b']:
+                if cand in edges_df.columns:
+                    actual_target = cand
+                    break
+
         # Validate that edges have registered drugs
         for _, row in edges_df.iterrows():
-            sa, sb = str(row[source_col]).strip(), str(row[target_col]).strip()
+            sa, sb = str(row[actual_source]).strip(), str(row[actual_target]).strip()
             if sa in self.cache.graphs and sb in self.cache.graphs:
                 raw_label = row.get(label_col, 1.0)
                 lbl = 1.0 if (raw_label is True or raw_label == 1.0 or str(raw_label).lower() in {'1', 'true'}) else 0.0

@@ -38,11 +38,149 @@ from src.data_prep.cached_graph_loader import (
     MolecularCache,
     build_cached_multimodal_dataloader,
 )
+from src.data_prep.splits import create_split_aware_binary_splits
 from src.models.ddi_model import (
     MODEL_ARCHITECTURE_EDGE_AWARE,
     MODEL_ARCHITECTURE_MULTIMODAL,
     PxDDIModel,
 )
+
+REQUIRED_SPLIT_FILES = [
+    'transductive_train.csv',
+    'validation.csv',
+    'transductive_test.csv',
+    's1_test.csv',
+    's2_test.csv',
+]
+
+
+def ensure_benchmark_splits(
+    splits_dir: str | Path | None = None,
+    master_nodes_path: str | Path | None = None,
+    master_edges_path: str | Path | None = None,
+    seed: int = 42,
+    holdout_fraction: float = 0.15,
+) -> Path:
+    """Ensure benchmark splits exist; generate them automatically if missing.
+
+    If splits_dir is None, attempts to resolve a 'splits' folder next to or
+    above master_nodes_path. If split CSV files are missing, loads positive pairs
+    from master_edges_path (or inferred paths) and generates leakage-safe
+    transductive, S1, and S2 splits.
+    """
+    splits_path: Path | None = None
+    if splits_dir is not None and str(splits_dir).strip().lower() not in ('none', ''):
+        splits_path = Path(splits_dir)
+    elif master_nodes_path is not None:
+        nodes_p = Path(master_nodes_path).resolve()
+        candidate_parent = nodes_p.parent.parent / 'splits'
+        candidate_sibling = nodes_p.parent / 'splits'
+        if candidate_parent.is_dir() and all((candidate_parent / f).is_file() for f in REQUIRED_SPLIT_FILES):
+            splits_path = candidate_parent
+        elif candidate_sibling.is_dir() and all((candidate_sibling / f).is_file() for f in REQUIRED_SPLIT_FILES):
+            splits_path = candidate_sibling
+        else:
+            splits_path = candidate_parent
+    else:
+        splits_path = Path('splits')
+
+    splits_path.mkdir(parents=True, exist_ok=True)
+
+    # Check if all required files exist and are non-empty
+    existing_files = [
+        f for f in REQUIRED_SPLIT_FILES
+        if (splits_path / f).is_file() and (splits_path / f).stat().st_size > 0
+    ]
+    if len(existing_files) == len(REQUIRED_SPLIT_FILES):
+        print(f"Using existing benchmark splits from: {splits_path}")
+        return splits_path
+
+    print(f"Benchmark split files missing in {splits_path}. Auto-generating leakage-safe splits...")
+
+    # Locate edges file
+    edge_candidates: list[Path] = []
+    if master_edges_path is not None and str(master_edges_path).strip().lower() not in ('none', ''):
+        edge_candidates.append(Path(master_edges_path))
+
+    if master_nodes_path is not None:
+        nodes_p = Path(master_nodes_path).resolve()
+        edge_candidates.extend([
+            nodes_p.parent / 'master_ddi_edges.csv',
+            nodes_p.parent.parent / 'unified_graph' / 'master_ddi_edges.csv',
+            nodes_p.parent.parent / 'twosides' / 'drug_drug_edges.csv',
+            nodes_p.parent / 'drug_drug_edges.csv',
+        ])
+
+    edge_candidates.extend([
+        Path('unified_graph') / 'master_ddi_edges.csv',
+        Path('twosides') / 'drug_drug_edges.csv',
+        Path('drug_drug_edges.csv'),
+    ])
+
+    resolved_edges = next((p for p in edge_candidates if p.is_file()), None)
+    if resolved_edges is None:
+        raise FileNotFoundError(
+            f"Could not find DDI edges to generate benchmark splits. "
+            f"Looked in: {[str(p) for p in edge_candidates[:4]]}. "
+            f"Please specify master_edges_path or pre-generate splits into '{splits_path}'."
+        )
+
+    print(f"Loading positive interaction pairs from: {resolved_edges}")
+    header_sample = pd.read_csv(resolved_edges, nrows=2)
+
+    src_col = 'drug_a_id'
+    if src_col not in header_sample.columns:
+        for cand in ['source', 'drug1_id', 'drug_a']:
+            if cand in header_sample.columns:
+                src_col = cand
+                break
+
+    dst_col = 'drug_b_id'
+    if dst_col not in header_sample.columns:
+        for cand in ['target', 'drug2_id', 'drug_b']:
+            if cand in header_sample.columns:
+                dst_col = cand
+                break
+
+    df_raw = pd.read_csv(resolved_edges, usecols=[src_col, dst_col], low_memory=False)
+
+    # Unique pairs (ignore redundant polypharmacy side-effect rows for split generation)
+    pairs_df = df_raw[[src_col, dst_col]].drop_duplicates().rename(
+        columns={src_col: 'drug_a_id', dst_col: 'drug_b_id'}
+    )
+
+    # If master nodes given, filter pairs to registered nodes only
+    if master_nodes_path is not None and Path(master_nodes_path).is_file():
+        nodes_df = pd.read_csv(master_nodes_path)
+        node_id_col = 'drug_id' if 'drug_id' in nodes_df.columns else (
+            'canonical_smiles' if 'canonical_smiles' in nodes_df.columns else nodes_df.columns[0]
+        )
+        valid_nodes = set(nodes_df[node_id_col].astype(str).str.strip())
+        pairs_df = pairs_df[
+            pairs_df['drug_a_id'].astype(str).str.strip().isin(valid_nodes)
+            & pairs_df['drug_b_id'].astype(str).str.strip().isin(valid_nodes)
+        ].reset_index(drop=True)
+
+    print(f"Constructing leakage-safe splits across {len(pairs_df):,} unique positive drug pairs...")
+    splits, audit = create_split_aware_binary_splits(
+        positive_pairs=pairs_df,
+        known_reported_positive_pairs=pairs_df,
+        source_col='drug_a_id',
+        target_col='drug_b_id',
+        holdout_fraction=holdout_fraction,
+        seed=seed,
+        negative_sampling_strategy='uniform',
+    )
+
+    for name, df in splits.items():
+        out_file = splits_path / f'{name}.csv'
+        df.to_csv(out_file, index=False)
+        print(f"  Generated {name}.csv: {len(df):,} pairs")
+
+    audit_path = splits_path / 'split_audit.json'
+    audit_path.write_text(json.dumps(audit, indent=2), encoding='utf-8')
+    print(f"All benchmark splits successfully written to: {splits_path}")
+    return splits_path
 
 
 def evaluate_loader(
@@ -206,18 +344,32 @@ def train_benchmark_model(
 
 def run_benchmark(
     master_nodes_path: str | Path,
-    splits_dir: str | Path,
-    output_dir: str | Path,
+    splits_dir: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    master_edges_path: str | Path | None = None,
     epochs: int = 5,
     batch_size: int = 64,
+    learning_rate: float = 5e-4,
+    device: torch.device | None = None,
 ) -> pd.DataFrame:
     """Execute complete cold-start benchmark comparing baseline vs multimodal GNN."""
-    out_dir = Path(output_dir)
+    if output_dir is None:
+        out_dir = Path(master_nodes_path).resolve().parent.parent / 'benchmark_results'
+    else:
+        out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    splits_path = Path(splits_dir)
+
+    splits_path = ensure_benchmark_splits(
+        splits_dir=splits_dir,
+        master_nodes_path=master_nodes_path,
+        master_edges_path=master_edges_path,
+    )
 
     print("=" * 80)
     print("STARTING AUDITDDI COLD-START BENCHMARK")
+    print(f"Master Nodes : {master_nodes_path}")
+    print(f"Splits Dir   : {splits_path}")
+    print(f"Output Dir   : {out_dir}")
     print("=" * 80)
 
     # 1. Populate Cache
@@ -246,6 +398,8 @@ def run_benchmark(
         test_splits=test_splits,
         epochs=epochs,
         batch_size=batch_size,
+        learning_rate=learning_rate,
+        device=device,
     )
 
     # 4. Train Multi-Modal
@@ -257,6 +411,8 @@ def run_benchmark(
         test_splits=test_splits,
         epochs=epochs,
         batch_size=batch_size,
+        learning_rate=learning_rate,
+        device=device,
     )
 
     # 5. Export Summary
