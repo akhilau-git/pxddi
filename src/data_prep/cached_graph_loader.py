@@ -150,6 +150,7 @@ class CachedDDIPairDataset(Dataset):
         target_col: str = 'drug_b_id',
         label_col: str = 'label',
         neighbor_memory: Any = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__()
         self.cache = molecular_cache
@@ -257,6 +258,7 @@ def build_cached_multimodal_dataloader(
     target_col: str = 'drug_b_id',
     label_col: str = 'label',
     neighbor_memory: Any = None,
+    **kwargs: Any,
 ) -> DataLoader:
     """Build high-throughput DataLoader using RAM-cached molecular and multi-modal features."""
     dataset = CachedDDIPairDataset(

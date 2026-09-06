@@ -32,10 +32,32 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+import importlib
+import src.data_prep.cached_graph_loader as _cgl_mod
+try:
+    importlib.reload(_cgl_mod)
+except Exception:
+    pass
+
 from src.data_prep.cached_graph_loader import (
     MolecularCache,
     build_cached_multimodal_dataloader,
 )
+
+
+def _make_dataloader(
+    df: pd.DataFrame,
+    cache: MolecularCache,
+    batch_size: int = 128,
+    shuffle: bool = True,
+    neighbor_memory: Any = None,
+) -> Any:
+    """Safely build dataloader across dynamic module reloads."""
+    import inspect
+    sig = inspect.signature(build_cached_multimodal_dataloader)
+    if 'neighbor_memory' in sig.parameters:
+        return build_cached_multimodal_dataloader(df, cache, batch_size=batch_size, shuffle=shuffle, neighbor_memory=neighbor_memory)
+    return build_cached_multimodal_dataloader(df, cache, batch_size=batch_size, shuffle=shuffle)
 from src.models.calibration import (
     apply_calibrator,
     expected_calibration_error,
@@ -122,11 +144,11 @@ def train_extended_multimodal(
         neighbor_mem.fit(train_df[src_col].tolist(), train_df[tgt_col].tolist(), train_df[lbl_col].tolist())
         print(f"AuditableNeighborMemory fitted on {len(train_df)} training edges with {len(neighbor_mem.training_smiles)} unique drugs.")
 
-    train_loader = build_cached_multimodal_dataloader(train_df, cache, batch_size=batch_size, shuffle=True, neighbor_memory=neighbor_mem)
-    val_loader = build_cached_multimodal_dataloader(val_df, cache, batch_size=batch_size, shuffle=False, neighbor_memory=neighbor_mem)
+    train_loader = _make_dataloader(train_df, cache, batch_size=batch_size, shuffle=True, neighbor_memory=neighbor_mem)
+    val_loader = _make_dataloader(val_df, cache, batch_size=batch_size, shuffle=False, neighbor_memory=neighbor_mem)
 
     test_loaders = {
-        name: build_cached_multimodal_dataloader(df, cache, batch_size=batch_size, shuffle=False, neighbor_memory=neighbor_mem)
+        name: _make_dataloader(df, cache, batch_size=batch_size, shuffle=False, neighbor_memory=neighbor_mem)
         for name, df in test_splits.items()
     }
 
