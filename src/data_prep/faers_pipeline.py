@@ -76,11 +76,18 @@ def build_toxicity_labels(
     Returns a DataFrame: drugname -> toxicity_score (0-1)
     toxicity_score = fraction of reports for that drug with a severe outcome.
     """
-    print("Loading FAERS DRUG file...")
-    drug = pd.read_csv(f'{faers_base_path}/DRUG23Q4.txt', sep='$',
+    from pathlib import Path
+    base = Path(faers_base_path)
+    drug_files = sorted(list(base.glob('*[Dd][Rr][Uu][Gg]*.txt')) + list(base.glob('*[Dd][Rr][Uu][Gg]*.TXT')))
+    outc_files = sorted(list(base.glob('*[Oo][Uu][Tt][Cc]*.txt')) + list(base.glob('*[Oo][Uu][Tt][Cc]*.TXT')))
+    drug_path = drug_files[0] if drug_files else base / 'DRUG23Q4.txt'
+    outc_path = outc_files[0] if outc_files else base / 'OUTC23Q4.txt'
+
+    print(f"Loading FAERS DRUG file ({drug_path.name})...")
+    drug = pd.read_csv(drug_path, sep='$',
                         usecols=['primaryid', 'drugname'], low_memory=False)
-    print("Loading FAERS OUTC file...")
-    outc = pd.read_csv(f'{faers_base_path}/OUTC23Q4.txt', sep='$',
+    print(f"Loading FAERS OUTC file ({outc_path.name})...")
+    outc = pd.read_csv(outc_path, sep='$',
                         usecols=['primaryid', 'outc_cod'], low_memory=False)
     print("Aggregating one outcome flag per report before grouping by drug...")
     tox_scores = aggregate_toxicity_labels(
@@ -89,7 +96,7 @@ def build_toxicity_labels(
         min_reports=min_reports,
         missing_outcome_policy=missing_outcome_policy,
     )
-    print(f"Built toxicity labels for {len(tox_scores)} drugs (min 5 reports each)")
+    print(f"Built toxicity labels for {len(tox_scores)} drugs (min {min_reports} reports each)")
     return tox_scores
 
 

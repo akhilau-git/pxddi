@@ -407,21 +407,81 @@ def rebuild_faers_toxicity_bridge_from_ascii(
 
 
 def build_faers_bridge(
-    faers_signals_path: str | Path,
+    faers_signals_path: str | Path | None = None,
+    faers_ascii_dir: str | Path | None = None,
     master_nodes_path: str | Path | None = None,
     output_path: str | Path | None = None,
     top_n_faers: int = 1500,
     top_n: int | None = None,
     cache_path: str | Path | None = None,
+    min_reports: int = 5,
     delay: float = 0.25,
     force_rebuild: bool = False,
 ) -> pd.DataFrame:
-    """Build or expand the FAERS-to-PubChem bridge from an existing signals/toxicity CSV.
+    """Build or expand the FAERS-to-PubChem bridge from an existing signals CSV or raw ASCII tables.
 
-    Loads FAERS signals, extracts target drug names from master_drug_nodes.csv,
-    prioritizes them, and builds or expands the toxicity bridge.
+    Supports both pre-computed signals CSVs and raw FAERS ASCII directories
+    (e.g., 'data/faers/ASCII'). Automatically detects available data sources.
     """
     n_drugs = top_n if top_n is not None else top_n_faers
+
+    # Determine bridge output path and lookup cache path
+    if output_path is not None:
+        target_output = Path(output_path)
+    elif cache_path is not None and str(cache_path).endswith('.csv'):
+        target_output = Path(cache_path)
+    elif faers_signals_path is not None:
+        target_output = Path(faers_signals_path).parent / 'faers_bridge.csv'
+    elif master_nodes_path is not None:
+        target_output = Path(master_nodes_path).parent / 'faers_bridge.csv'
+    else:
+        target_output = Path('faers_bridge.csv')
+
+    lookup_cache = cache_path if (cache_path and str(cache_path).endswith('.json')) else None
+
+    # Check if faers_ascii_dir is provided or if faers_signals_path is an ASCII directory
+    candidate_ascii = None
+    if faers_ascii_dir and Path(faers_ascii_dir).is_dir():
+        candidate_ascii = Path(faers_ascii_dir)
+    elif faers_signals_path and Path(faers_signals_path).is_dir():
+        candidate_ascii = Path(faers_signals_path)
+    elif faers_signals_path and not Path(faers_signals_path).exists():
+        # Check standard relative paths
+        base_candidates = [
+            Path(faers_signals_path).parent,
+            Path(faers_signals_path).parent.parent,
+        ]
+        if master_nodes_path:
+            base_candidates.extend([
+                Path(master_nodes_path).parent,
+                Path(master_nodes_path).parent.parent,
+            ])
+        for base in base_candidates:
+            if (base / 'faers' / 'ASCII').is_dir():
+                candidate_ascii = base / 'faers' / 'ASCII'
+                break
+            elif (base / 'ASCII').is_dir():
+                candidate_ascii = base / 'ASCII'
+                break
+
+    if candidate_ascii is not None:
+        print(f'Found FAERS ASCII directory at: {candidate_ascii}')
+        return rebuild_faers_toxicity_bridge_from_ascii(
+            faers_ascii_dir=candidate_ascii,
+            output_bridge_path=target_output,
+            top_n=n_drugs,
+            min_reports=min_reports,
+            delay=delay,
+            master_nodes_path=master_nodes_path,
+            force_rebuild=force_rebuild,
+        )
+
+    if faers_signals_path is None or not Path(faers_signals_path).is_file():
+        raise FileNotFoundError(
+            f'Neither a valid signals CSV ({faers_signals_path}) nor a FAERS ASCII '
+            'directory was found. Please specify faers_ascii_dir (e.g. data/faers/ASCII).'
+        )
+
     signals_df = pd.read_csv(faers_signals_path)
 
     # Normalize expected column names if necessary
@@ -457,18 +517,6 @@ def build_faers_bridge(
                     except Exception:
                         resolved_targets.add(str(val).strip().upper())
 
-    # Determine bridge output path and lookup cache path
-    if output_path is None:
-        if cache_path is not None and str(cache_path).endswith('.csv'):
-            target_output = Path(cache_path)
-            lookup_cache = None
-        else:
-            target_output = Path(faers_signals_path).parent / 'faers_bridge.csv'
-            lookup_cache = cache_path
-    else:
-        target_output = Path(output_path)
-        lookup_cache = cache_path if (cache_path and str(cache_path).endswith('.json')) else None
-
     return build_name_to_smiles_bridge(
         tox_labels_df=signals_df,
         cache_path=target_output,
@@ -478,5 +526,6 @@ def build_faers_bridge(
         target_names=resolved_targets if resolved_targets else None,
         force_rebuild=force_rebuild,
     )
+
 
 

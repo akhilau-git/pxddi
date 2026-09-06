@@ -84,3 +84,39 @@ def test_build_faers_bridge_import_and_execution(tmp_path, monkeypatch):
     assert out_csv.exists()
     assert 'canonical_smiles' in df.columns
 
+
+def test_build_faers_bridge_with_ascii_dir(tmp_path, monkeypatch):
+    """Verify build_faers_bridge discovers and builds from FAERS ascii directory."""
+    from src.data_prep.pubchem_bridge import build_faers_bridge, PubChemLookupResult
+
+    monkeypatch.setattr(
+        'src.data_prep.pubchem_bridge.lookup_pubchem_smiles',
+        lambda drug_name, **kwargs: PubChemLookupResult('CCO', 'matched', 1, 'http://test'),
+    )
+
+    ascii_dir = tmp_path / 'faers' / 'ASCII'
+    ascii_dir.mkdir(parents=True)
+    # Write minimal ASCII files
+    (ascii_dir / 'DRUG20Q1.txt').write_text(
+        'primaryid$drug_seq$role_cod$drugname\n1$1$PS$ASPIRIN\n2$1$PS$WARFARIN\n',
+        encoding='utf-8',
+    )
+    (ascii_dir / 'OUTC20Q1.txt').write_text(
+        'primaryid$outc_cod\n1$DE\n2$HO\n',
+        encoding='utf-8',
+    )
+
+    out_csv = tmp_path / 'faers_bridge.csv'
+    # Test auto-detection when faers_signals_path points to nonexistent signals in a sibling directory
+    nonexistent_signals = tmp_path / 'clinical_evidence' / 'faers_drug_event_signals.csv'
+    df = build_faers_bridge(
+        faers_signals_path=nonexistent_signals,
+        output_path=out_csv,
+        top_n_faers=10,
+        min_reports=1,
+        delay=0.0,
+    )
+    assert len(df) >= 1
+    assert out_csv.exists()
+
+
