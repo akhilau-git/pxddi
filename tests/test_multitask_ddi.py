@@ -19,6 +19,7 @@ def test_multitask_side_effect_study_smoke():
         "Cn1c(=O)c2c(ncn2C)n(C)c1=O",
         "CC(C)Cc1ccc(cc1)C(C)C(=O)O",
         "CN1C2CCC1C(C(C2)OC(=O)c3ccccc3)C(=O)OC",
+        "[Ca+2]",  # Single ion with no bonds to test defensive filtering
     ]
     effects = ["Hypotension", "Headache", "Hyperkalemia"]
 

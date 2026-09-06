@@ -38,6 +38,7 @@ def extract_top_side_effects(
 def prepare_multitask_pairs(
     master_edges_path: str | Path,
     top_side_effects: list[str],
+    valid_drugs: set[str] | list[str] | None = None,
     max_pairs: int | None = None,
 ) -> pd.DataFrame:
     """Aggregate pairwise TWOSIDES edges into multi-hot binary label vectors."""
@@ -51,6 +52,13 @@ def prepare_multitask_pairs(
     )
     # Filter to top side effects
     filtered = df_edges[df_edges['interaction_type'].isin(effect_to_idx)].copy()
+
+    # Filter out single ions or invalid molecules that could not form molecular graphs
+    if valid_drugs is not None:
+        valid_set = set(valid_drugs)
+        filtered = filtered[
+            filtered['drug_a_id'].isin(valid_set) & filtered['drug_b_id'].isin(valid_set)
+        ].copy()
 
     # Canonical order for undirected pairs
     filtered['pair_a'] = filtered[['drug_a_id', 'drug_b_id']].min(axis=1)
@@ -79,7 +87,10 @@ class MultitaskCachedDataset(Dataset):
     """Dataset serving multi-modal cached drug graphs with multi-hot side-effect targets."""
 
     def __init__(self, pairs_df: pd.DataFrame, cache: MolecularCache):
-        self.pairs = pairs_df.reset_index(drop=True)
+        valid_set = set(cache.graphs.keys())
+        self.pairs = pairs_df[
+            pairs_df['drug_a_id'].isin(valid_set) & pairs_df['drug_b_id'].isin(valid_set)
+        ].reset_index(drop=True)
         self.cache = cache
 
     def __len__(self) -> int:
@@ -213,8 +224,14 @@ def run_multitask_side_effect_study(
     cache = MolecularCache(gene_dim=50)
     cache.populate_from_master_nodes(master_nodes_path)
 
-    # 3. Build Multi-Task Pairs
-    pairs_df = prepare_multitask_pairs(master_edges_path, top_effects, max_pairs=max_pairs)
+    # 3. Build Multi-Task Pairs (excluding inorganic single ions without graphs)
+    valid_drugs = set(cache.graphs.keys())
+    pairs_df = prepare_multitask_pairs(
+        master_edges_path,
+        top_effects,
+        valid_drugs=valid_drugs,
+        max_pairs=max_pairs,
+    )
     print(f'Built Multi-Task Dataset: {len(pairs_df)} unique drug pairs across {len(top_effects)} targets.')
 
     # Train/Validation/Test split (80/10/10)
