@@ -623,7 +623,7 @@ def evaluate_multimodal_calibration(
 
 
 def run_full_multimodal_study(
-    master_nodes_path: str | Path,
+    master_nodes_path: str | Path | None = None,
     splits_dir: str | Path | None = None,
     output_dir: str | Path | None = None,
     master_edges_path: str | Path | None = None,
@@ -632,9 +632,15 @@ def run_full_multimodal_study(
     batch_size: int = 64,
     learning_rate: float = 5e-4,
     device: torch.device | None = None,
+    pretrained_encoder_path: str | Path | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Execute complete extended training, ablation study, error analysis, and calibration."""
+    if master_nodes_path is None:
+        master_nodes_path = kwargs.pop('master_nodes_csv', None)
+    if master_nodes_path is None:
+        raise ValueError('master_nodes_path (or master_nodes_csv) must be provided')
+
     # Support flexible parameter aliases
     if 'epochs' in kwargs:
         extended_epochs = int(kwargs.pop('epochs'))
@@ -677,7 +683,11 @@ def run_full_multimodal_study(
         's2_semi': pd.read_csv(splits_p / 's2_test.csv'),
     }
 
-    chembl_pretrained_path: str | Path | None = kwargs.pop('chembl_pretrained_path', None)
+    chembl_pretrained_path: str | Path | None = (
+        pretrained_encoder_path
+        or kwargs.pop('chembl_pretrained_path', None)
+        or kwargs.pop('pretrained_checkpoint', None)
+    )
     use_cross_modal_attention: bool = kwargs.pop('use_cross_modal_attention', True)
     use_cross_drug_attention: bool = kwargs.pop('use_cross_drug_attention', False)
     use_target_encoder: bool = kwargs.pop('use_target_encoder', True)
@@ -761,6 +771,7 @@ def run_full_multimodal_study(
     }
     peak_s1_metrics = {
         's1_cold_auroc': peak_s1_auroc,
+        'test_auroc': peak_s1_auroc,
         's1_best_epoch': extended_metrics.get('s1_best_epoch'),
         's1_best_auprc': extended_metrics.get('s1_best_auprc'),
     }

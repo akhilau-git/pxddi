@@ -95,3 +95,14 @@ def test_run_full_study_alias_import():
     from src.training.train_multimodal_study import run_full_study, run_full_multimodal_study
     assert run_full_study is run_full_multimodal_study
 
+
+def test_run_full_study_keyword_aliases():
+    """Verify run_full_study accepts master_nodes_csv and pretrained_encoder_path."""
+    import inspect
+    from src.training.train_multimodal_study import run_full_study
+    sig = inspect.signature(run_full_study)
+    assert "master_nodes_path" in sig.parameters
+    assert sig.parameters["master_nodes_path"].default is None
+    assert "pretrained_encoder_path" in sig.parameters
+
+
