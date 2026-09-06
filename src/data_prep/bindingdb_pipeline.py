@@ -360,24 +360,25 @@ def update_master_nodes_with_bindingdb(
 
     if isinstance(bindingdb_dir_or_profiles, pd.DataFrame):
         df_profiles = bindingdb_dir_or_profiles
-    elif Path(bindingdb_dir_or_profiles).is_dir():
-        df_profiles, _ = parse_bindingdb_directory(
-            bindingdb_dir_or_profiles,
-            master_nodes_path=nodes_p,
-            top_k_targets=top_k_targets,
-        )
-    elif Path(bindingdb_dir_or_profiles).is_file():
+    else:
         p = Path(bindingdb_dir_or_profiles)
-        if (p.parent / 'bindingdb_drugs.csv').is_file() or p.suffix in ['.tsv', '.txt']:
+        if p.is_dir():
             df_profiles, _ = parse_bindingdb_directory(
-                p.parent,
+                p,
+                master_nodes_path=nodes_p,
+                top_k_targets=top_k_targets,
+            )
+        elif p.is_file() and not ((p.parent / 'bindingdb_drugs.csv').is_file() or p.suffix in ['.tsv', '.txt']):
+            df_profiles = pd.read_csv(p)
+        elif p.is_file() or p.parent.is_dir():
+            target_dir = p.parent if (p.parent / 'bindingdb_drugs.csv').is_file() or p.parent.is_dir() else p
+            df_profiles, _ = parse_bindingdb_directory(
+                target_dir,
                 master_nodes_path=nodes_p,
                 top_k_targets=top_k_targets,
             )
         else:
-            df_profiles = pd.read_csv(p)
-    else:
-        raise ValueError(f'Invalid bindingdb source: {bindingdb_dir_or_profiles}')
+            raise ValueError(f'Invalid bindingdb source: {bindingdb_dir_or_profiles}')
 
     vocab = extract_top_target_vocabulary(
         [json.loads(x) if isinstance(x, str) else list(x) for x in df_profiles['targets_list']],

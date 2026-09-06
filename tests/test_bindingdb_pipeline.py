@@ -186,3 +186,14 @@ def test_update_master_nodes_keyword_aliases(mock_bindingdb_dir, tmp_path):
     assert out_csv.is_file()
     assert summary["nodes_with_bindingdb_targets"] >= 1
 
+    # Call with non-existent file path inside valid directory
+    non_existent = mock_bindingdb_dir / "BindingDB_All_does_not_exist.tsv"
+    updated_df2, summary2 = update_master_nodes_with_bindingdb(
+        master_nodes_csv=nodes_csv,
+        bindingdb_tsv_path=non_existent,
+        output_csv=out_csv,
+        tanimoto_threshold=0.15,
+    )
+    assert summary2["nodes_with_bindingdb_targets"] >= 1
+
+

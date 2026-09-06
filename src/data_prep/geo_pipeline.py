@@ -241,10 +241,14 @@ def update_master_nodes_with_geo(
 
     if isinstance(geo_dir_or_signatures, dict):
         disease_signatures = geo_dir_or_signatures
-    elif Path(geo_dir_or_signatures).is_dir():
-        disease_signatures = parse_geo_directory(geo_dir_or_signatures, max_genes_per_disease=max_genes)
     else:
-        raise ValueError(f'Invalid GEO source: {geo_dir_or_signatures}')
+        p = Path(geo_dir_or_signatures)
+        if p.is_dir():
+            disease_signatures = parse_geo_directory(p, max_genes_per_disease=max_genes)
+        elif p.parent.is_dir():
+            disease_signatures = parse_geo_directory(p.parent, max_genes_per_disease=max_genes)
+        else:
+            raise ValueError(f'Invalid GEO source: {geo_dir_or_signatures}')
 
     disease_names = sorted(list(disease_signatures.keys()))
 
