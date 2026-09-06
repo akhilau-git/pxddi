@@ -20,15 +20,18 @@ import gzip
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from rdkit import Chem, rdBase
+from rdkit import Chem, DataStructs, rdBase
+from rdkit.Chem import rdFingerprintGenerator
 
 from .master_schema import canonicalize_smiles, smiles_to_inchikey
 
 DEFAULT_TOP_SIGNATURE_GENES = 50
+_MORGAN_GEN = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024, includeChirality=True)
 
 
 def _open_geo_file(file_path: Path):
@@ -44,49 +47,71 @@ def parse_disease_expression_file(
 ) -> dict[str, float]:
     """Parse a GEO disease expression file and extract top perturbed gene scores.
 
-    Handles series matrix formats and tabular expression tables by detecting
-    probe/gene symbol headers and computing mean expression or log fold change.
+    Handles SOFT series matrix format, tab-delimited tables, and CSVs by detecting
+    probe/gene symbol headers and computing mean expression variance or perturbation.
     """
     fpath = Path(file_path)
     if not fpath.is_file():
         raise FileNotFoundError(f'GEO expression file not found: {fpath}')
 
-    gene_scores: dict[str, float] = {}
+    raw_lines: list[str] = []
     with _open_geo_file(fpath) as f:
-        # Skip comment lines (e.g. '^', '!', '#' in SOFT format)
-        lines = []
+        in_table = False
+        has_table_marker = False
+
+        # Read first pass to detect if SOFT table marker exists
         for line in f:
             stripped = line.strip()
             if not stripped:
                 continue
-            if stripped.startswith(('!', '^', '#')):
+            if '!series_matrix_table_begin' in stripped:
+                has_table_marker = True
+                in_table = True
                 continue
-            lines.append(stripped)
-            if len(lines) >= 10000:  # Sample up to 10k lines for signature extraction
+            if '!series_matrix_table_end' in stripped:
+                break
+            if has_table_marker and not in_table:
+                continue
+            if not has_table_marker and stripped.startswith(('!', '^', '#')):
+                continue
+            raw_lines.append(stripped)
+            if len(raw_lines) >= 15000:
                 break
 
-    if not lines:
+    if not raw_lines:
         return {}
 
     # Header parsing
-    delimiter = '\t' if '\t' in lines[0] else ','
-    header = [col.strip().strip('"').upper() for col in lines[0].split(delimiter)]
+    first_line = raw_lines[0]
+    delimiter = '\t' if '\t' in first_line else (',' if ',' in first_line else None)
+    header = [col.strip().strip('"').upper() for col in (first_line.split(delimiter) if delimiter else first_line.split())]
 
-    # Look for gene symbol column
-    gene_col_idx = 0
+    # Prioritize gene symbol column
+    gene_col_idx = None
     for idx, col in enumerate(header):
-        if any(term in col for term in ['GENE', 'SYMBOL', 'ID', 'PROBE', 'NAME']):
+        if any(term == col or term in col for term in ['GENE_SYMBOL', 'GENE SYMBOL', 'GENE_NAME', 'GENENAME', 'SYMBOL', 'GENE']):
             gene_col_idx = idx
             break
 
-    for line in lines[1:]:
-        parts = line.split(delimiter)
+    if gene_col_idx is None:
+        for idx, col in enumerate(header):
+            if any(term in col for term in ['NAME', 'ID_REF', 'PROBE', 'ID', 'IDENTIFIER']):
+                gene_col_idx = idx
+                break
+
+    if gene_col_idx is None:
+        gene_col_idx = 0
+
+    gene_scores: dict[str, float] = {}
+
+    for line in raw_lines[1:]:
+        parts = line.split(delimiter) if delimiter else line.split()
         if len(parts) <= gene_col_idx:
             continue
         raw_gene = parts[gene_col_idx].strip().strip('"').upper()
         # Clean multi-gene annotations (e.g. 'CYP2D6 /// CYP2D7')
         gene = raw_gene.split('///')[0].strip().split('//')[0].strip().split(' ')[0].strip()
-        if not gene or len(gene) < 2 or gene.isdigit():
+        if not gene or len(gene) < 2:
             continue
 
         # Extract numeric expression values
@@ -102,7 +127,7 @@ def parse_disease_expression_file(
                 continue
 
         if numeric_vals:
-            # Score as variance or magnitude of expression
+            # Score as variance or magnitude of expression perturbation
             score = float(np.std(numeric_vals) if len(numeric_vals) > 1 else abs(numeric_vals[0]))
             if gene in gene_scores:
                 gene_scores[gene] = max(gene_scores[gene], score)
@@ -112,10 +137,12 @@ def parse_disease_expression_file(
         if len(gene_scores) >= max_genes * 2:
             break
 
+    if not gene_scores:
+        return {}
+
     # Sort and retain top perturbed genes
     sorted_genes = sorted(gene_scores.items(), key=lambda x: x[1], reverse=True)[:max_genes]
     max_val = max((val for _, val in sorted_genes), default=1.0) or 1.0
-    # Normalize scores to [0, 1]
     return {gene: float(val / max_val) for gene, val in sorted_genes}
 
 
@@ -142,6 +169,8 @@ def parse_geo_directory(
             if sig:
                 disease_signatures[name] = sig
                 print(f'  -> Extracted {len(sig)} disease signature genes for {name}.')
+            else:
+                print(f'  -> Warning: 0 signature genes extracted for {file_path.name}.')
         except Exception as exc:
             print(f'  -> Warning: failed to parse {file_path.name} ({exc}), skipping.')
 
@@ -152,11 +181,14 @@ def update_master_nodes_with_geo(
     master_nodes_path: str | Path,
     geo_dir_or_signatures: str | Path | dict[str, dict[str, float]],
     output_path: str | Path | None = None,
+    impute_by_tanimoto: bool = True,
+    tanimoto_threshold: float = 0.30,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Enrich master_drug_nodes.csv with GEO disease transcriptomic signatures.
 
     Scores each drug against disease signatures using its PharmGKB genes and
-    BindingDB targets. Sets `is_geo_active = True` for profiled nodes.
+    BindingDB targets. For unprofiled drugs, imputes disease context via Morgan
+    ECFP chemical similarity. Sets `is_geo_active = True` for profiled nodes.
     """
     nodes_p = Path(master_nodes_path)
     if not nodes_p.is_file():
@@ -173,14 +205,14 @@ def update_master_nodes_with_geo(
 
     disease_names = sorted(list(disease_signatures.keys()))
 
-    geo_signatures_json: list[str] = []
-    geo_vectors_json: list[str] = []
-    geo_active_flags: list[bool] = []
+    node_id_col = 'drug_id' if 'drug_id' in df_nodes.columns else ('canonical_smiles' if 'canonical_smiles' in df_nodes.columns else df_nodes.columns[0])
 
-    matched = 0
+    # Pass 1: Direct Target Overlap Scoring
+    drug_direct_scores: list[tuple[dict[str, float], list[float], bool]] = []
+    profiled_fps: list[Any] = []
+    profiled_vecs: list[list[float]] = []
 
     for _, row in df_nodes.iterrows():
-        # Collect all biological targets/genes associated with this drug
         drug_genes: set[str] = set()
 
         # 1. From PharmGKB
@@ -206,7 +238,6 @@ def update_master_nodes_with_geo(
             except Exception:
                 pass
 
-        # Score overlap with each disease
         scores: dict[str, float] = {}
         vec: list[float] = []
 
@@ -217,36 +248,92 @@ def update_master_nodes_with_geo(
                 score = float(np.mean(overlapping)) if overlapping else 0.0
                 scores[dname] = round(score, 4)
                 vec.append(round(score, 4))
-
             has_sig = any(v > 0 for v in vec)
-            if has_sig:
-                matched += 1
-                geo_active_flags.append(True)
-            else:
-                geo_active_flags.append(False)
         else:
             for dname in disease_names:
                 scores[dname] = 0.0
                 vec.append(0.0)
-            geo_active_flags.append(False)
+            has_sig = False
 
-        geo_signatures_json.append(json.dumps(scores))
-        geo_vectors_json.append(json.dumps(vec))
+        drug_direct_scores.append((scores, vec, has_sig))
+
+        if has_sig and impute_by_tanimoto:
+            can = canonicalize_smiles(str(row[node_id_col]))
+            if can:
+                mol = Chem.MolFromSmiles(can)
+                if mol is not None:
+                    profiled_fps.append(_MORGAN_GEN.GetFingerprint(mol))
+                    profiled_vecs.append(vec)
+
+    # Pass 2: Impute for remaining drugs via Morgan ECFP Chemical Similarity
+    geo_signatures_json: list[str] = []
+    geo_vectors_json: list[str] = []
+    geo_active_flags: list[bool] = []
+
+    matched_direct = 0
+    matched_similarity = 0
+
+    for idx, row in df_nodes.iterrows():
+        scores, vec, has_sig = drug_direct_scores[idx]
+
+        if has_sig:
+            matched_direct += 1
+            geo_signatures_json.append(json.dumps(scores))
+            geo_vectors_json.append(json.dumps(vec))
+            geo_active_flags.append(True)
+        elif impute_by_tanimoto and profiled_fps:
+            can = canonicalize_smiles(str(row[node_id_col]))
+            imputed = False
+            if can:
+                mol = Chem.MolFromSmiles(can)
+                if mol is not None:
+                    fp = _MORGAN_GEN.GetFingerprint(mol)
+                    sims = DataStructs.BulkTanimotoSimilarity(fp, profiled_fps)
+                    max_sim_idx = int(np.argmax(sims))
+                    max_sim = float(sims[max_sim_idx])
+                    if max_sim >= tanimoto_threshold:
+                        base_vec = profiled_vecs[max_sim_idx]
+                        imputed_vec = [round(v * max_sim, 4) for v in base_vec]
+                        imputed_scores = {dname: imputed_vec[i] for i, dname in enumerate(disease_names)}
+                        geo_signatures_json.append(json.dumps(imputed_scores))
+                        geo_vectors_json.append(json.dumps(imputed_vec))
+                        geo_active_flags.append(True)
+                        matched_similarity += 1
+                        imputed = True
+
+            if not imputed:
+                zero_vec = [0.0] * len(disease_names)
+                zero_scores = {dname: 0.0 for dname in disease_names}
+                geo_signatures_json.append(json.dumps(zero_scores))
+                geo_vectors_json.append(json.dumps(zero_vec))
+                geo_active_flags.append(False)
+        else:
+            zero_vec = [0.0] * len(disease_names)
+            zero_scores = {dname: 0.0 for dname in disease_names}
+            geo_signatures_json.append(json.dumps(zero_scores))
+            geo_vectors_json.append(json.dumps(zero_vec))
+            geo_active_flags.append(False)
 
     df_nodes['geo_expression_signatures_json'] = geo_signatures_json
     df_nodes['geo_signature_vector'] = geo_vectors_json
     df_nodes['is_geo_active'] = geo_active_flags
 
+    total_matched = sum(geo_active_flags)
     target_out = Path(output_path) if output_path else nodes_p
     target_out.parent.mkdir(parents=True, exist_ok=True)
     df_nodes.to_csv(target_out, index=False)
 
     summary = {
         'total_nodes': len(df_nodes),
-        'nodes_with_geo_signatures': matched,
-        'geo_coverage_pct': (matched / len(df_nodes) * 100.0) if len(df_nodes) else 0.0,
+        'nodes_with_geo_signatures': total_matched,
+        'matched_direct_overlap': matched_direct,
+        'matched_chemical_analogs': matched_similarity,
+        'geo_coverage_pct': (total_matched / len(df_nodes) * 100.0) if len(df_nodes) else 0.0,
         'disease_signatures_loaded': disease_names,
         'exported_to': str(target_out),
     }
-    print(f'GEO synchronization complete: {matched} / {len(df_nodes)} drugs covered ({summary["geo_coverage_pct"]:.1f}%).')
+    print(
+        f'GEO synchronization complete: {total_matched} / {len(df_nodes)} drugs covered ({summary["geo_coverage_pct"]:.1f}%).\n'
+        f'  (Direct Biological Overlap: {matched_direct}, Chemical Analog Imputed: {matched_similarity})'
+    )
     return df_nodes, summary

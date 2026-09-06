@@ -98,6 +98,9 @@ def train_extended_multimodal(
     device: torch.device | None = None,
     chembl_pretrained_path: str | Path | None = None,
     use_cross_modal_attention: bool = True,
+    use_cross_drug_attention: bool = False,
+    use_target_encoder: bool = False,
+    use_neighbor_memory: bool = False,
 ) -> tuple[PxDDIModel, pd.DataFrame, dict[str, Any]]:
     """Train the multimodal model across extended epochs with checkpointing."""
     if device is None:
@@ -138,6 +141,11 @@ def train_extended_multimodal(
         gene_hidden_channels=64,
         use_clinical_toxicity=is_multimodal,
         use_cross_modal_attention=use_cross_modal_attention if is_multimodal else False,
+        use_cross_drug_attention=use_cross_drug_attention,
+        use_target_encoder=use_target_encoder,
+        target_feature_dim=cache.target_dim,
+        target_hidden_channels=64,
+        use_neighbor_memory=use_neighbor_memory,
     )
 
     if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
@@ -301,6 +309,11 @@ def train_extended_multimodal(
             gene_hidden_channels=64,
             use_clinical_toxicity=is_multimodal,
             use_cross_modal_attention=use_cross_modal_attention if is_multimodal else False,
+            use_cross_drug_attention=use_cross_drug_attention,
+            use_target_encoder=use_target_encoder,
+            target_feature_dim=cache.target_dim,
+            target_hidden_channels=64,
+            use_neighbor_memory=use_neighbor_memory,
         ).to(device)
         s1_eval_model.load_state_dict(ckpt_s1['model_state_dict'])
         s1_best_metrics = evaluate_loader(s1_eval_model, test_loaders['s1_cold'], device, is_multimodal=is_multimodal)
@@ -653,6 +666,9 @@ def run_full_multimodal_study(
 
     chembl_pretrained_path: str | Path | None = kwargs.pop('chembl_pretrained_path', None)
     use_cross_modal_attention: bool = kwargs.pop('use_cross_modal_attention', True)
+    use_cross_drug_attention: bool = kwargs.pop('use_cross_drug_attention', True)
+    use_target_encoder: bool = kwargs.pop('use_target_encoder', True)
+    use_neighbor_memory: bool = kwargs.pop('use_neighbor_memory', False)
 
     # 3. Extended Training (Full Multimodal Model)
     best_model, history_df, extended_metrics = train_extended_multimodal(
@@ -667,6 +683,9 @@ def run_full_multimodal_study(
         device=device,
         chembl_pretrained_path=chembl_pretrained_path,
         use_cross_modal_attention=use_cross_modal_attention,
+        use_cross_drug_attention=use_cross_drug_attention,
+        use_target_encoder=use_target_encoder,
+        use_neighbor_memory=use_neighbor_memory,
     )
 
     # 4. Modality Ablation Study
@@ -713,9 +732,28 @@ def run_full_multimodal_study(
     print(f"All models, ablation reports, and error analysis saved to: {out_p}")
     print("=" * 80)
 
+    # Format return dictionary to support all client conventions
+    transductive_test_auroc = extended_metrics.get('transductive_auroc', extended_metrics.get('transductive_test_auroc', 0.0))
+    s1_auroc = extended_metrics.get('s1_cold_auroc', extended_metrics.get('s1_test_auroc', 0.0))
+    s2_auroc = extended_metrics.get('s2_semi_auroc', extended_metrics.get('s2_test_auroc', 0.0))
+    peak_s1_auroc = extended_metrics.get('s1_best_auroc', extended_metrics.get('peak_s1_cold_auroc', s1_auroc))
+
+    transductive_and_cold_metrics = {
+        'test_auroc': transductive_test_auroc,
+        's1_cold_auroc': s1_auroc,
+        's2_semi_auroc': s2_auroc,
+        **extended_metrics,
+    }
+    peak_s1_metrics = {
+        's1_cold_auroc': peak_s1_auroc,
+        's1_best_epoch': extended_metrics.get('s1_best_epoch'),
+        's1_best_auprc': extended_metrics.get('s1_best_auprc'),
+    }
+
     return {
         'extended_metrics': extended_metrics,
-        'transductive_and_cold_metrics': extended_metrics,
+        'transductive_and_cold_metrics': transductive_and_cold_metrics,
+        'peak_s1_metrics': peak_s1_metrics,
         'ablation': ablation_dict,
         'ablation_results': ablation_dict,
         'tier_summary': tier_dict,

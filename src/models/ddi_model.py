@@ -83,6 +83,10 @@ def model_from_checkpoint(checkpoint):
         use_clinical_toxicity=checkpoint.get('use_clinical_toxicity', False),
         num_side_effects=checkpoint.get('num_side_effects', 1),
         use_cross_modal_attention=checkpoint.get('use_cross_modal_attention', False),
+        use_cross_drug_attention=checkpoint.get('use_cross_drug_attention', False),
+        use_target_encoder=checkpoint.get('use_target_encoder', False),
+        target_feature_dim=checkpoint.get('target_feature_dim', 50),
+        target_hidden_channels=checkpoint.get('target_hidden_channels', 64),
     )
 
 
@@ -198,11 +202,32 @@ class PxDDIModel(nn.Module):
             self.gene_encoder = None
             self.gene_gate = None
 
+        self.use_cross_drug_attention = bool(
+            kwargs.get('use_cross_drug_attention', False)
+            or architecture_requires_cross_drug_attention(architecture_version)
+        )
         self.cross_drug_attention = (
             CrossDrugAttention(hidden_channels)
-            if architecture_requires_cross_drug_attention(architecture_version)
+            if self.use_cross_drug_attention
             else None
         )
+
+        self.use_target_encoder = bool(kwargs.get('use_target_encoder', False))
+        self.target_feature_dim = kwargs.get('target_feature_dim', 50)
+        self.target_hidden_channels = kwargs.get('target_hidden_channels', 64)
+        if self.use_target_encoder and architecture_requires_multimodal_features(architecture_version):
+            self.target_encoder = nn.Sequential(
+                nn.Linear(self.target_feature_dim, self.target_hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+            )
+            self.target_gate = nn.Sequential(
+                nn.Linear(self.target_hidden_channels, 1),
+                nn.Sigmoid(),
+            )
+        else:
+            self.target_encoder = None
+            self.target_gate = None
 
         self.toxicity_head = ToxicityHead(hidden_channels)
         self.patient_encoder = PatientContextEncoder(n_comorbidities, hidden_channels)
@@ -211,6 +236,7 @@ class PxDDIModel(nn.Module):
         )
         motif_dim = int(motif_hidden_channels) if (self.motif_encoder is not None and motif_hidden_channels is not None) else 0
         gene_dim = int(gene_hidden_channels) if (self.gene_encoder is not None and gene_hidden_channels is not None) else 0
+        target_dim = int(self.target_hidden_channels) if (self.target_encoder is not None) else 0
         pair_feature_multiplier = 3 if self.uses_multiplicative_fusion else 2
         pair_embedding_channels = (
             hidden_channels
@@ -218,6 +244,7 @@ class PxDDIModel(nn.Module):
             + (hidden_channels if self.cross_drug_attention is not None else 0)
             + (128 if self.fp_encoder is not None else 0)
             + gene_dim
+            + target_dim
         )
         self.use_neighbor_memory = (
             use_neighbor_memory or architecture_version == MODEL_ARCHITECTURE_AUDITDDI_MEMORY
@@ -365,6 +392,29 @@ class PxDDIModel(nn.Module):
                 gb_rep = torch.zeros((eb.size(0), self.gene_hidden_channels), device=eb.device, dtype=eb.dtype)
             ea_for_risk = torch.cat((ea_for_risk, ga_rep), dim=1)
             eb_for_risk = torch.cat((eb_for_risk, gb_rep), dim=1)
+
+        if self.target_encoder is not None and self.target_gate is not None:
+            if target_a is not None and target_b is not None:
+                t_in_a = target_a.float().view(-1, self.target_feature_dim)
+                t_in_b = target_b.float().view(-1, self.target_feature_dim)
+                ta = self.target_encoder(t_in_a)
+                tb = self.target_encoder(t_in_b)
+                if self.cross_modal_attention is not None:
+                    ta = ta + self.cross_modal_attention(ea, t_in_a, target_mask_a)
+                    tb = tb + self.cross_modal_attention(eb, t_in_b, target_mask_b)
+                ta_gate = self.target_gate(ta)
+                tb_gate = self.target_gate(tb)
+                if target_mask_a is not None:
+                    ta_gate = ta_gate * target_mask_a.view(-1, 1)
+                if target_mask_b is not None:
+                    tb_gate = tb_gate * target_mask_b.view(-1, 1)
+                ta_rep = ta_gate * ta
+                tb_rep = tb_gate * tb
+            else:
+                ta_rep = torch.zeros((ea.size(0), self.target_hidden_channels), device=ea.device, dtype=ea.dtype)
+                tb_rep = torch.zeros((eb.size(0), self.target_hidden_channels), device=eb.device, dtype=eb.dtype)
+            ea_for_risk = torch.cat((ea_for_risk, ta_rep), dim=1)
+            eb_for_risk = torch.cat((eb_for_risk, tb_rep), dim=1)
 
         if self.cross_drug_attention is not None and cross_a is not None and cross_b is not None:
             ea_for_risk = torch.cat((ea_for_risk, cross_a), dim=1)
