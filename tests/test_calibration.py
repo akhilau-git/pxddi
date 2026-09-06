@@ -36,3 +36,20 @@ def test_calibration_records_its_exact_fit_partition_role():
 
     assert calibration['fitted_on'] == 'validation_calibration_partition'
     assert calibration['fitted_partition_sample_count'] == 4
+
+
+def test_temperature_scaling_calibration():
+    from src.models.calibration import fit_temperature_scaling, apply_calibrator
+
+    labels = np.array([0, 0, 0, 1, 1, 1])
+    raw_scores = np.array([0.1, 0.2, 0.3, 0.7, 0.8, 0.9])
+
+    cal = fit_temperature_scaling(labels, raw_scores)
+    assert cal['status'] == 'fitted'
+    assert 'temperature' in cal
+    assert cal['temperature'] > 0
+
+    calibrated = apply_calibrator(raw_scores, cal)
+    assert len(calibrated) == len(raw_scores)
+    assert np.all((calibrated > 0) & (calibrated < 1))
+

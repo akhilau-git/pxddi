@@ -223,3 +223,39 @@ def test_expanded_pharmgkb_bridge(tmp_path):
     assert out_csv.is_file()
 
 
+def test_update_master_nodes_with_faers(tmp_path):
+    from src.data_prep.build_unified_graph import update_master_nodes_with_faers
+
+    smi_a = "CC(=O)Oc1ccccc1C(=O)O"  # Aspirin
+    smi_b = "Cn1c(=O)c2c(ncn2C)n(C)c1=O"  # Caffeine
+
+    nodes_csv = tmp_path / "master_nodes.csv"
+    pd.DataFrame({
+        "canonical_smiles": [smi_a, smi_b],
+        "toxicity_score": [None, None],
+        "n_faers_reports": [None, None],
+    }).to_csv(nodes_csv, index=False)
+
+    faers_csv = tmp_path / "faers_bridge.csv"
+    pd.DataFrame({
+        "canonical_smiles": [smi_a],
+        "toxicity_score": [0.42],
+        "n_reports": [540],
+    }).to_csv(faers_csv, index=False)
+
+    out_csv = tmp_path / "master_nodes_updated.csv"
+    df_up, summary = update_master_nodes_with_faers(
+        master_nodes_path=nodes_csv,
+        faers_bridge_path=faers_csv,
+        output_path=out_csv,
+    )
+
+    assert summary["previous_faers_coverage"] == 0
+    assert summary["updated_faers_coverage"] == 1
+    assert summary["coverage_percentage"] == 50.0
+    assert out_csv.is_file()
+    assert df_up.loc[df_up["canonical_smiles"] == smi_a, "toxicity_score"].iloc[0] == 0.42
+    assert df_up.loc[df_up["canonical_smiles"] == smi_a, "n_faers_reports"].iloc[0] == 540
+
+
+

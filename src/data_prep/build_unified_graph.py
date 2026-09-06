@@ -182,3 +182,89 @@ def build_unified_graph(
         summary['exported_gene_vocab_path'] = str(vocab_path)
 
     return catalog, summary
+
+
+def update_master_nodes_with_faers(
+    master_nodes_path: str | Path,
+    faers_bridge_path: str | Path,
+    output_path: str | Path | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Update an existing master_drug_nodes.csv with a newly expanded FAERS bridge in seconds.
+
+    Avoids re-processing millions of TWOSIDES edges when only clinical evidence
+    annotations have been expanded.
+    """
+    nodes_p = Path(master_nodes_path)
+    if not nodes_p.is_file():
+        raise FileNotFoundError(f'Master nodes file not found: {nodes_p}')
+
+    bridge_p = Path(faers_bridge_path)
+    if not bridge_p.is_file():
+        raise FileNotFoundError(f'FAERS bridge file not found: {bridge_p}')
+
+    df_nodes = pd.read_csv(nodes_p)
+    df_bridge = pd.read_csv(bridge_p)
+
+    target_out = Path(output_path) if output_path else nodes_p
+
+    # Build lookup map: canonical_smiles -> (toxicity_score, n_reports)
+    faers_lookup: dict[str, tuple[float, int]] = {}
+    for _, row in df_bridge.iterrows():
+        raw_smi = row.get('canonical_smiles')
+        if pd.isna(raw_smi):
+            raw_smi = row.get('raw_smiles')
+        can = canonicalize_smiles(str(raw_smi)) if pd.notna(raw_smi) else None
+        if can and pd.notna(row.get('toxicity_score')):
+            score = float(row['toxicity_score'])
+            n_rep = int(row['n_reports']) if pd.notna(row.get('n_reports')) else 0
+            faers_lookup[can] = (score, n_rep)
+
+    initial_coverage = int((df_nodes['toxicity_score'].notna() & (df_nodes['toxicity_score'] > 0)).sum()) if 'toxicity_score' in df_nodes.columns else 0
+
+    # Match and update
+    node_id_col = 'canonical_smiles' if 'canonical_smiles' in df_nodes.columns else ('drug_id' if 'drug_id' in df_nodes.columns else df_nodes.columns[0])
+
+    updated_scores: list[float | None] = []
+    updated_reports: list[int | None] = []
+
+    for _, row in df_nodes.iterrows():
+        can = canonicalize_smiles(str(row[node_id_col]))
+        if can and can in faers_lookup:
+            score, n_rep = faers_lookup[can]
+            updated_scores.append(score)
+            updated_reports.append(n_rep)
+        else:
+            # Preserve existing if already present
+            existing_score = row.get('toxicity_score')
+            existing_rep = row.get('n_faers_reports')
+            updated_scores.append(float(existing_score) if (pd.notna(existing_score) and existing_score is not None) else None)
+            updated_reports.append(int(existing_rep) if (pd.notna(existing_rep) and existing_rep is not None) else None)
+
+    df_nodes['toxicity_score'] = updated_scores
+    df_nodes['n_faers_reports'] = updated_reports
+
+    new_coverage = int(df_nodes['toxicity_score'].notna().sum())
+    total_nodes = len(df_nodes)
+    cov_pct = (new_coverage / total_nodes * 100.0) if total_nodes > 0 else 0.0
+
+    target_out.parent.mkdir(parents=True, exist_ok=True)
+    df_nodes.to_csv(target_out, index=False)
+
+    summary = {
+        'total_nodes': total_nodes,
+        'previous_faers_coverage': initial_coverage,
+        'updated_faers_coverage': new_coverage,
+        'coverage_percentage': cov_pct,
+        'output_path': str(target_out),
+    }
+
+    print('=' * 70)
+    print('FAERS CLINICAL TOXICITY SYNCHRONIZATION COMPLETE')
+    print('=' * 70)
+    print(f'Previous FAERS Coverage : {initial_coverage} / {total_nodes}')
+    print(f'Updated FAERS Coverage  : {new_coverage} / {total_nodes} ({cov_pct:.1f}%)')
+    print(f'Saved updated master nodes to: {target_out}')
+    print('=' * 70)
+
+    return df_nodes, summary
+

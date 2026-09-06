@@ -655,6 +655,26 @@ def explain_multimodal_pair(
     # 4. Calibration
     calibrated_prob = float(apply_calibrator(np.array([p_full]), calibrator)[0]) if calibrator else p_full
 
+    # 5. Optional MC-Dropout Epistemic Uncertainty Estimation
+    n_mc_passes = kwargs.get('n_mc_passes', 20 if kwargs.get('mc_dropout', False) else 0)
+    uncertainty_dict: dict[str, Any] = {}
+    if n_mc_passes > 0:
+        from src.models.uncertainty import predict_mc_dropout
+        uncertainty_dict = predict_mc_dropout(
+            model=model,
+            batch_a=batch_a,
+            batch_b=batch_b,
+            n_passes=n_mc_passes,
+            fp_a=fp_t_a,
+            fp_b=fp_t_b,
+            gene_a=gene_t_a,
+            gene_b=gene_t_b,
+            gene_mask_a=gmask_t_a,
+            gene_mask_b=gmask_t_b,
+            clinical_tox_a=tox_t_a,
+            clinical_tox_b=tox_t_b,
+        )
+
     shared_gene_hotspots = []
     if gene_vocabulary is not None and gene_a is not None and gene_b is not None:
         vocab_map = {g: idx for idx, g in enumerate(gene_vocabulary)}
@@ -668,7 +688,7 @@ def explain_multimodal_pair(
     else:
         shared_gene_hotspots = [{'gene': enzyme, 'combined_signal': 1.0} for enzyme in shared_enzymes]
 
-    return {
+    result: dict[str, Any] = {
         'smiles_a': smiles_a,
         'smiles_b': smiles_b,
         'predicted_raw_probability': p_full,
@@ -699,4 +719,13 @@ def explain_multimodal_pair(
             'drug_b_faers_score': float(tox_b.item()) if tox_b is not None else None,
         },
     }
+
+    if uncertainty_dict:
+        result['uncertainty'] = uncertainty_dict
+        result['epistemic_variance'] = uncertainty_dict.get('epistemic_variance')
+        result['epistemic_std'] = uncertainty_dict.get('epistemic_std')
+        result['credible_interval_95'] = uncertainty_dict.get('credible_interval_95')
+
+    return result
+
 

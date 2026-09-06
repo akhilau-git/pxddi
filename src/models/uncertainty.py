@@ -143,3 +143,54 @@ def summarize_conformal_test_labels(
         'observed_coverage': float(covered.mean()),
         'abstention_rate': float(np.asarray(prediction_sets['abstain'], dtype=bool).mean()),
     }
+
+
+def predict_mc_dropout(
+    model: Any,
+    batch_a: Any,
+    batch_b: Any,
+    n_passes: int = 20,
+    uncertainty_threshold: float = 0.10,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Run Monte Carlo Dropout forward passes to estimate epistemic model uncertainty.
+
+    Enables dropout during inference and collects N stochastic predictions.
+    """
+    import torch
+
+    was_training = model.training
+    # Enable dropout modules specifically
+    model.eval()
+    for m in model.modules():
+        if isinstance(m, torch.nn.Dropout):
+            m.train()
+
+    preds: list[float] = []
+    try:
+        with torch.no_grad():
+            for _ in range(n_passes):
+                out = model(batch_a, batch_b, **kwargs)
+                logits = out[0] if isinstance(out, tuple) else out
+                prob = float(torch.sigmoid(logits).reshape(-1)[0].cpu().item())
+                preds.append(prob)
+    finally:
+        model.train(was_training)
+
+    arr = np.array(preds, dtype=float)
+    mean_p = float(np.mean(arr))
+    var_p = float(np.var(arr))
+    std_p = float(np.std(arr))
+    ci_lower = float(np.percentile(arr, 2.5))
+    ci_upper = float(np.percentile(arr, 97.5))
+
+    return {
+        'n_passes': n_passes,
+        'mean_probability': mean_p,
+        'epistemic_variance': var_p,
+        'epistemic_std': std_p,
+        'credible_interval_95': (ci_lower, ci_upper),
+        'high_uncertainty_flag': bool(std_p >= uncertainty_threshold),
+        'sample_predictions': [float(p) for p in preds],
+    }
+

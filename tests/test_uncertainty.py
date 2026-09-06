@@ -70,3 +70,35 @@ def test_applicability_domain_exports_a_checkpoint_safe_reference_state():
     assert state['reference_canonical_smiles'] == ['CCN', 'CCO']
     assert state['include_chirality'] is True
     assert 'does not measure DDI-pair novelty' in state['interpretation_warning']
+
+
+def test_predict_mc_dropout_estimates_variance():
+    from src.models.uncertainty import predict_mc_dropout
+    from src.models.ddi_model import PxDDIModel, MODEL_ARCHITECTURE_MULTIMODAL
+    from src.data_prep.prepare_twosides import smiles_to_graph, FEATURE_SCHEMA_RICH
+    from torch_geometric.data import Batch
+
+    graph_a = smiles_to_graph('CCO', feature_schema=FEATURE_SCHEMA_RICH)
+    graph_b = smiles_to_graph('CCN', feature_schema=FEATURE_SCHEMA_RICH)
+    assert graph_a is not None and graph_b is not None
+
+    batch_a = Batch.from_data_list([graph_a])
+    batch_b = Batch.from_data_list([graph_b])
+
+    model = PxDDIModel(
+        in_channels=graph_a.x.size(1),
+        hidden_channels=16,
+        architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+        edge_feature_dim=graph_a.edge_attr.size(1),
+        gene_feature_dim=10,
+        gene_hidden_channels=16,
+        use_clinical_toxicity=True,
+    )
+
+    res = predict_mc_dropout(model, batch_a, batch_b, n_passes=5)
+    assert res['n_passes'] == 5
+    assert 0.0 <= res['mean_probability'] <= 1.0
+    assert res['epistemic_variance'] >= 0.0
+    assert res['epistemic_std'] >= 0.0
+    assert len(res['credible_interval_95']) == 2
+

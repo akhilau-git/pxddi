@@ -210,11 +210,16 @@ def test_explain_multimodal_pair_with_cache():
         drug_a_smiles=drug_a,
         drug_b_smiles=drug_b,
         gene_names=vocab,
+        mc_dropout=True,
+        n_mc_passes=5,
     )
 
     assert 'overall_risk_score' in exp
     assert 'modality_contributions' in exp
     assert len(exp['shared_pharmacogenomic_genes']) == 1
     assert exp['shared_pharmacogenomic_genes'][0]['gene'] == 'GENE_2'
+    assert 'uncertainty' in exp
+    assert 'epistemic_std' in exp
+    assert exp['epistemic_std'] >= 0.0
 
 

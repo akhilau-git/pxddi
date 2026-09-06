@@ -106,6 +106,8 @@ def train_extended_multimodal(
     weight_decay: float = 1e-5,
     architecture_version: str = MODEL_ARCHITECTURE_MULTIMODAL,
     device: torch.device | None = None,
+    chembl_pretrained_path: str | Path | None = None,
+    use_cross_modal_attention: bool = True,
 ) -> tuple[PxDDIModel, pd.DataFrame, dict[str, Any]]:
     """Train the multimodal model across extended epochs with checkpointing."""
     if device is None:
@@ -136,7 +138,26 @@ def train_extended_multimodal(
         gene_feature_dim=cache.gene_dim,
         gene_hidden_channels=64,
         use_clinical_toxicity=is_multimodal,
-    ).to(device)
+        use_cross_modal_attention=use_cross_modal_attention if is_multimodal else False,
+    )
+
+    if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
+        from src.models.encoder_pretraining import load_pretrained_edge_aware_encoder
+        print(f"Loading ChEMBL pre-trained encoder weights from: {chembl_pretrained_path}")
+        try:
+            load_pretrained_edge_aware_encoder(
+                encoder=model.encoder,
+                path=chembl_pretrained_path,
+                expected_in_channels=in_channels,
+                expected_edge_feature_dim=edge_dim,
+                expected_hidden_channels=64,
+                map_location=device,
+            )
+            print("Successfully initialized molecular encoder with ChEMBL representations.")
+        except Exception as exc:
+            print(f"Warning: could not load ChEMBL weights ({exc}), proceeding with random initialization.")
+
+    model = model.to(device)
 
     optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
@@ -555,6 +576,9 @@ def run_full_multimodal_study(
         's2_semi': pd.read_csv(splits_p / 's2_test.csv'),
     }
 
+    chembl_pretrained_path: str | Path | None = kwargs.pop('chembl_pretrained_path', None)
+    use_cross_modal_attention: bool = kwargs.pop('use_cross_modal_attention', True)
+
     # 3. Extended Training (Full Multimodal Model)
     best_model, history_df, extended_metrics = train_extended_multimodal(
         cache=cache,
@@ -566,6 +590,8 @@ def run_full_multimodal_study(
         batch_size=batch_size,
         learning_rate=learning_rate,
         device=device,
+        chembl_pretrained_path=chembl_pretrained_path,
+        use_cross_modal_attention=use_cross_modal_attention,
     )
 
     # 4. Modality Ablation Study
