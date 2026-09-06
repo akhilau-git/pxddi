@@ -215,6 +215,10 @@ def evaluate_loader(
                     gene_mask_b=batch['gene_mask_b'].to(device),
                     clinical_tox_a=batch['tox_a'].to(device),
                     clinical_tox_b=batch['tox_b'].to(device),
+                    target_a=batch.get('target_a', torch.zeros((da.num_graphs, 50))).to(device) if 'target_a' in batch else None,
+                    target_b=batch.get('target_b', torch.zeros((db.num_graphs, 50))).to(device) if 'target_b' in batch else None,
+                    target_mask_a=batch.get('target_mask_a', torch.zeros(da.num_graphs)).to(device) if 'target_mask_a' in batch else None,
+                    target_mask_b=batch.get('target_mask_b', torch.zeros(db.num_graphs)).to(device) if 'target_mask_b' in batch else None,
                 )
             else:
                 risk_logits, _, _ = model(drug_a=da, drug_b=db)
