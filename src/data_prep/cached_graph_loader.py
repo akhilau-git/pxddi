@@ -81,7 +81,7 @@ class MolecularCache:
 
         # FAERS Clinical Toxicity Score
         if toxicity_score is not None and not pd.isna(toxicity_score):
-            self.toxicity_scalars[smiles] = torch.tensor(float(toxicity_score), dtype=torch.float32)
+            self.toxicity_scalars[smiles] = torch.tensor(toxicity_score, dtype=torch.float32)
             self.toxicity_masks[smiles] = torch.tensor(1.0, dtype=torch.float32)
         else:
             self.toxicity_scalars[smiles] = torch.tensor(0.0, dtype=torch.float32)
@@ -93,20 +93,24 @@ class MolecularCache:
         """Pre-populate the entire cache from master_drug_nodes.csv."""
         df_nodes = pd.read_csv(master_nodes_path)
         count = 0
+        node_id_col = 'drug_id' if 'drug_id' in df_nodes.columns else ('canonical_smiles' if 'canonical_smiles' in df_nodes.columns else df_nodes.columns[0])
+
         for _, row in df_nodes.iterrows():
-            smi = str(row['drug_id']).strip()
-            gvec_raw = row.get('gene_vector_json')
-            gvec = None
-            if pd.notna(gvec_raw):
+            smi = str(row[node_id_col]).strip()
+            # Extract gene vector if serialized
+            gene_vec = None
+            if 'gene_vector_multihot' in row and pd.notna(row['gene_vector_multihot']):
+                val = row['gene_vector_multihot']
                 try:
-                    gvec = json.loads(gvec_raw) if isinstance(gvec_raw, str) else list(gvec_raw)
+                    gene_vec = json.loads(val) if isinstance(val, str) else list(val)
                 except Exception:
-                    gvec = None
+                    pass
 
-            tox = row.get('toxicity_score')
-            tox_val = float(tox) if pd.notna(tox) else None
+            # Extract toxicity score
+            tox = row.get('toxicity_score', None)
+            tox_score = float(tox) if (pd.notna(tox) and tox is not None) else None
 
-            if self.register_drug(smi, gene_vector=gvec, toxicity_score=tox_val):
+            if self.register_drug(smi, gene_vector=gene_vec, toxicity_score=tox_score):
                 count += 1
         print(f'MolecularCache populated: {count} drugs cached with graphs, ECFP, genes, and toxicity.')
         return count
@@ -152,8 +156,8 @@ class CachedDDIPairDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> dict[str, Any]:
-        sa, sb, lbl = self.samples[idx]
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        sa, sb, lbl = self.samples[index]
         return {
             'graph_a': self.cache.graphs[sa],
             'graph_b': self.cache.graphs[sb],
