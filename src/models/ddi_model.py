@@ -81,6 +81,8 @@ def model_from_checkpoint(checkpoint):
         gene_feature_dim=checkpoint.get('gene_feature_dim', 50),
         gene_hidden_channels=checkpoint.get('gene_hidden_channels', 64),
         use_clinical_toxicity=checkpoint.get('use_clinical_toxicity', False),
+        num_side_effects=checkpoint.get('num_side_effects', 1),
+        use_cross_modal_attention=checkpoint.get('use_cross_modal_attention', False),
     )
 
 
@@ -129,10 +131,11 @@ class PxDDIModel(nn.Module):
         use_clinical_toxicity=False,
         num_side_effects=1,
         use_cross_modal_attention=False,
+        **kwargs,
     ):
         super().__init__()
         self.num_side_effects = num_side_effects
-        self.use_cross_modal_attention = use_cross_modal_attention
+        self.use_cross_modal_attention = use_cross_modal_attention or kwargs.get('use_cross_modal_attention', False)
         self.use_chemberta = use_chemberta
         self.architecture_version = architecture_version
         self.use_toxicity_pair_features = use_toxicity_pair_features
