@@ -51,6 +51,7 @@ from src.models.ddi_model import (
 from src.training.benchmark_cold_start import (
     ensure_benchmark_splits,
     evaluate_loader,
+    safe_forward_multimodal,
 )
 
 
@@ -72,22 +73,7 @@ def predict_loader(
             lbls = batch['labels'].cpu().numpy().ravel()
 
             if is_multimodal:
-                risk_logits, _, _ = model(
-                    drug_a=da,
-                    drug_b=db,
-                    fp_a=batch['fp_a'].to(device),
-                    fp_b=batch['fp_b'].to(device),
-                    gene_a=batch['gene_a'].to(device),
-                    gene_b=batch['gene_b'].to(device),
-                    gene_mask_a=batch['gene_mask_a'].to(device),
-                    gene_mask_b=batch['gene_mask_b'].to(device),
-                    clinical_tox_a=batch['tox_a'].to(device),
-                    clinical_tox_b=batch['tox_b'].to(device),
-                    target_a=batch.get('target_a', torch.zeros((da.num_graphs, 50))).to(device) if 'target_a' in batch else None,
-                    target_b=batch.get('target_b', torch.zeros((db.num_graphs, 50))).to(device) if 'target_b' in batch else None,
-                    target_mask_a=batch.get('target_mask_a', torch.zeros(da.num_graphs)).to(device) if 'target_mask_a' in batch else None,
-                    target_mask_b=batch.get('target_mask_b', torch.zeros(db.num_graphs)).to(device) if 'target_mask_b' in batch else None,
-                )
+                risk_logits, _, _ = safe_forward_multimodal(model, batch, da, db, device)
             else:
                 risk_logits, _, _ = model(drug_a=da, drug_b=db)
 
@@ -212,22 +198,7 @@ def train_extended_multimodal(
             labels = batch['labels'].to(device)
 
             if is_multimodal:
-                risk_logits, _, _ = model(
-                    drug_a=da,
-                    drug_b=db,
-                    fp_a=batch['fp_a'].to(device),
-                    fp_b=batch['fp_b'].to(device),
-                    gene_a=batch['gene_a'].to(device),
-                    gene_b=batch['gene_b'].to(device),
-                    gene_mask_a=batch['gene_mask_a'].to(device),
-                    gene_mask_b=batch['gene_mask_b'].to(device),
-                    clinical_tox_a=batch['tox_a'].to(device),
-                    clinical_tox_b=batch['tox_b'].to(device),
-                    target_a=batch.get('target_a', torch.zeros((da.num_graphs, 50))).to(device) if 'target_a' in batch else None,
-                    target_b=batch.get('target_b', torch.zeros((db.num_graphs, 50))).to(device) if 'target_b' in batch else None,
-                    target_mask_a=batch.get('target_mask_a', torch.zeros(da.num_graphs)).to(device) if 'target_mask_a' in batch else None,
-                    target_mask_b=batch.get('target_mask_b', torch.zeros(db.num_graphs)).to(device) if 'target_mask_b' in batch else None,
-                )
+                risk_logits, _, _ = safe_forward_multimodal(model, batch, da, db, device)
             else:
                 risk_logits, _, _ = model(drug_a=da, drug_b=db)
 
