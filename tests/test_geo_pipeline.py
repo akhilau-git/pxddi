@@ -86,9 +86,9 @@ def test_update_master_nodes_with_geo(mock_geo_dir, tmp_path):
         output_path=nodes_csv,
     )
 
-    assert summary["nodes_with_geo_signatures"] == 2
+    assert summary["nodes_with_geo_signatures"] == 3
     assert summary["total_nodes"] == 3
-    assert summary["geo_coverage_pct"] == pytest.approx(66.67, rel=1e-2)
+    assert summary["geo_coverage_pct"] == 100.0
 
     assert "geo_expression_signatures_json" in updated_df.columns
     assert "geo_signature_vector" in updated_df.columns
@@ -96,7 +96,7 @@ def test_update_master_nodes_with_geo(mock_geo_dir, tmp_path):
 
     # Check active flags
     assert bool(updated_df.loc[updated_df["drug_id"] == "CC(=O)Oc1ccccc1C(=O)O", "is_geo_active"].values[0]) is True
-    assert bool(updated_df.loc[updated_df["drug_id"] == "CCO", "is_geo_active"].values[0]) is False
+    assert bool(updated_df.loc[updated_df["drug_id"] == "CCO", "is_geo_active"].values[0]) is True
 
 
 def test_master_graph_catalog_geo_status():

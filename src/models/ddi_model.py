@@ -249,12 +249,19 @@ class PxDDIModel(nn.Module):
         self.use_neighbor_memory = (
             use_neighbor_memory or architecture_version == MODEL_ARCHITECTURE_AUDITDDI_MEMORY
         )
+        self.use_geo_features = bool(
+            kwargs.get('use_geo_features', False)
+            and architecture_requires_multimodal_features(architecture_version)
+        )
+        self.geo_dim = kwargs.get('geo_dim', 2)
         risk_input_channels = pair_embedding_channels * pair_feature_multiplier + (
             2 if use_toxicity_pair_features else 0
         ) + (
             3 if self.use_neighbor_memory else 0
         ) + (
             2 if self.use_clinical_toxicity else 0
+        ) + (
+            (self.geo_dim * 2) if self.use_geo_features else 0
         )
         if self.use_cross_modal_attention and architecture_requires_multimodal_features(architecture_version):
             self.cross_modal_attention = CrossModalGeneAttention(
@@ -307,6 +314,10 @@ class PxDDIModel(nn.Module):
         target_b=None,
         target_mask_a=None,
         target_mask_b=None,
+        geo_a=None,
+        geo_b=None,
+        geo_mask_a=None,
+        geo_mask_b=None,
         **kwargs,
     ):
         cross_a: torch.Tensor | None = None
@@ -443,6 +454,17 @@ class PxDDIModel(nn.Module):
                     (ea.size(0), 3), device=ea.device, dtype=ea.dtype
                 )
             features.append(memory_features)
+        if self.use_geo_features:
+            if geo_a is not None and geo_b is not None:
+                g_a = geo_a.float().view(ea.size(0), -1)
+                g_b = geo_b.float().view(eb.size(0), -1)
+                if geo_mask_a is not None:
+                    g_a = g_a * geo_mask_a.view(-1, 1)
+                if geo_mask_b is not None:
+                    g_b = g_b * geo_mask_b.view(-1, 1)
+                features.append(torch.cat([g_a + g_b, torch.abs(g_a - g_b)], dim=1))
+            else:
+                features.append(torch.zeros((ea.size(0), self.geo_dim * 2), device=ea.device, dtype=ea.dtype))
         combined = torch.cat(features, dim=1)
 
         risk_out = self.risk_classifier(combined)

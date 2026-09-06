@@ -217,6 +217,11 @@ def safe_forward_multimodal(
             kwargs['target_mask_b'] = batch['target_mask_b'].to(device)
         if ('memory_features' in sig or has_var_kwargs) and 'memory_features' in batch and batch['memory_features'] is not None:
             kwargs['memory_features'] = batch['memory_features'].to(device)
+        if ('geo_a' in sig or has_var_kwargs) and 'geo_a' in batch and batch['geo_a'] is not None:
+            kwargs['geo_a'] = batch['geo_a'].to(device)
+            kwargs['geo_b'] = batch['geo_b'].to(device)
+            kwargs['geo_mask_a'] = batch['geo_mask_a'].to(device)
+            kwargs['geo_mask_b'] = batch['geo_mask_b'].to(device)
     except Exception:
         pass
     return model(**kwargs)

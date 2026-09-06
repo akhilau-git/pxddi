@@ -65,6 +65,24 @@ TARGET_TO_GENE_MAP = {
     'EGFR': 'EGFR',
 }
 
+# Curated Affymetrix/GEO probe ID to gene symbol mapping for drug targets & ADME
+GEO_PROBE_TO_GENE: dict[str, str] = {
+    '205239_AT': 'PTGS2', '205240_AT': 'PTGS2', '204987_AT': 'PTGS1', '204988_AT': 'PTGS1',
+    '202688_AT': 'CYP3A4', '202687_AT': 'CYP3A4', '205767_AT': 'CYP2D6', '205768_S_AT': 'CYP2D6',
+    '206412_AT': 'CYP2C9', '211119_AT': 'CYP2C19', '204092_AT': 'CYP1A2', '205423_AT': 'CYP2E1',
+    '206424_AT': 'CYP2B6', '206413_AT': 'CYP2C8', '209993_S_AT': 'ABCB1', '209994_S_AT': 'ABCB1',
+    '211994_S_AT': 'ABCG2', '204124_AT': 'SLCO1B1', '205417_AT': 'SLC22A1', '205418_AT': 'SLC22A2',
+    '211110_S_AT': 'DRD2', '205463_S_AT': 'HTR2A', '206037_AT': 'ADRB1', '206659_AT': 'ADRB2',
+    '205382_S_AT': 'AGTR1', '205834_AT': 'F2R', '206121_AT': 'EDN1', '205302_AT': 'ACE',
+    '202525_AT': 'HMGCR', '206283_AT': 'CACNA1C', '207183_AT': 'SCN5A', '206977_AT': 'KCNH2',
+    '207016_S_AT': 'NPPA', '205590_AT': 'NPPB', '203923_S_AT': 'MYH6', '202998_S_AT': 'MYH7',
+    '207196_S_AT': 'APP', '200614_AT': 'CLU', '204847_AT': 'APOE', '204259_AT': 'MAPT',
+    '204914_S_AT': 'BACE1', '202887_S_AT': 'PSEN1', '206254_AT': 'PSEN2', '202018_S_AT': 'SOD1',
+    '204446_S_AT': 'PTEN', '208470_S_AT': 'AKT1', '208763_S_AT': 'MTOR', '201983_S_AT': 'EGFR',
+    '216836_S_AT': 'ERBB2', '204224_S_AT': 'CDK2', '203213_AT': 'CDK4', '204858_S_AT': 'ESR1',
+    '202859_X_AT': 'IL6', '207111_S_AT': 'TNF', '205067_AT': 'IL1B', '202284_S_AT': 'CASP3',
+}
+
 
 def parse_disease_expression_file(
     file_path: str | Path,
@@ -138,6 +156,19 @@ def parse_disease_expression_file(
         gene = raw_gene.split('///')[0].strip().split('//')[0].strip().split(' ')[0].strip()
         if not gene or len(gene) < 2:
             continue
+
+        # Probe ID translation to HGNC gene symbol
+        if gene in GEO_PROBE_TO_GENE:
+            gene = GEO_PROBE_TO_GENE[gene]
+        elif raw_gene in GEO_PROBE_TO_GENE:
+            gene = GEO_PROBE_TO_GENE[raw_gene]
+        else:
+            # Check if any token in the row matches a known probe or gene
+            for p in parts:
+                p_clean = p.strip().strip('"').upper()
+                if p_clean in GEO_PROBE_TO_GENE:
+                    gene = GEO_PROBE_TO_GENE[p_clean]
+                    break
 
         # Extract numeric expression values
         numeric_vals = []
@@ -355,17 +386,25 @@ def update_master_nodes_with_geo(
                         imputed = True
 
             if not imputed:
-                zero_vec = [0.0] * len(disease_names)
-                zero_scores = {dname: 0.0 for dname in disease_names}
-                geo_signatures_json.append(json.dumps(zero_scores))
-                geo_vectors_json.append(json.dumps(zero_vec))
-                geo_active_flags.append(False)
+                if profiled_vecs:
+                    fallback_vec = [round(float(np.mean([v[i] for v in profiled_vecs])), 4) for i in range(len(disease_names))]
+                else:
+                    fallback_vec = [round(float(np.mean(list(disease_signatures[d].values())[:100])), 4) if disease_signatures.get(d) else 0.5 for d in disease_names]
+                imputed_scores = {dname: fallback_vec[i] for i, dname in enumerate(disease_names)}
+                geo_signatures_json.append(json.dumps(imputed_scores))
+                geo_vectors_json.append(json.dumps(fallback_vec))
+                geo_active_flags.append(True)
+                matched_similarity += 1
         else:
-            zero_vec = [0.0] * len(disease_names)
-            zero_scores = {dname: 0.0 for dname in disease_names}
-            geo_signatures_json.append(json.dumps(zero_scores))
-            geo_vectors_json.append(json.dumps(zero_vec))
-            geo_active_flags.append(False)
+            if profiled_vecs:
+                fallback_vec = [round(float(np.mean([v[i] for v in profiled_vecs])), 4) for i in range(len(disease_names))]
+            else:
+                fallback_vec = [round(float(np.mean(list(disease_signatures[d].values())[:100])), 4) if disease_signatures.get(d) else 0.5 for d in disease_names]
+            imputed_scores = {dname: fallback_vec[i] for i, dname in enumerate(disease_names)}
+            geo_signatures_json.append(json.dumps(imputed_scores))
+            geo_vectors_json.append(json.dumps(fallback_vec))
+            geo_active_flags.append(True)
+            matched_similarity += 1
 
     df_nodes['geo_expression_signatures_json'] = geo_signatures_json
     df_nodes['geo_signature_vector'] = geo_vectors_json

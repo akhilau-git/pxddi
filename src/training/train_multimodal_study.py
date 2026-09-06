@@ -179,6 +179,8 @@ def train_extended_multimodal(
         target_feature_dim=cache.target_dim,
         target_hidden_channels=64,
         use_neighbor_memory=use_neighbor_memory,
+        use_geo_features=is_multimodal,
+        geo_dim=cache.geo_dim,
     )
 
     if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
@@ -349,6 +351,8 @@ def train_extended_multimodal(
             target_feature_dim=cache.target_dim,
             target_hidden_channels=64,
             use_neighbor_memory=use_neighbor_memory,
+            use_geo_features=is_multimodal,
+            geo_dim=cache.geo_dim,
         ).to(device)
         s1_eval_model.load_state_dict(ckpt_s1['model_state_dict'])
         s1_best_metrics = evaluate_loader(s1_eval_model, test_loaders['s1_cold'], device, is_multimodal=is_multimodal)
