@@ -531,3 +531,119 @@ def select_representative_indices(
         key=lambda item: (-abs(predictions[item] - threshold), item),
     )
     return selected + [int(index) for index in remaining[: maximum_examples - len(selected)]]
+
+
+def explain_multimodal_pair(
+    model: Any,
+    graph_a: Data,
+    graph_b: Data,
+    smiles_a: str,
+    smiles_b: str,
+    fp_a: torch.Tensor | None = None,
+    fp_b: torch.Tensor | None = None,
+    gene_a: torch.Tensor | None = None,
+    gene_b: torch.Tensor | None = None,
+    gene_mask_a: torch.Tensor | None = None,
+    gene_mask_b: torch.Tensor | None = None,
+    tox_a: torch.Tensor | None = None,
+    tox_b: torch.Tensor | None = None,
+    gene_vocabulary: list[str] | None = None,
+    calibrator: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Provide structured clinical and chemical attribution for a multimodal pair.
+
+    Quantifies:
+    1. Overall predicted raw and calibrated interaction probability.
+    2. Modality contribution ablations (Graph vs +ECFP vs +Genes vs +Toxicity).
+    3. Active metabolizing enzymes (CYP450 / Transporters) present on each drug.
+    """
+    from src.models.calibration import apply_calibrator
+
+    device = _model_device(model)
+    was_training = model.training
+    model.eval()
+
+    try:
+        with torch.no_grad():
+            batch_a = _single_graph_batch(graph_a, device)
+            batch_b = _single_graph_batch(graph_b, device)
+
+            fp_t_a = fp_a.unsqueeze(0).to(device) if fp_a is not None else None
+            fp_t_b = fp_b.unsqueeze(0).to(device) if fp_b is not None else None
+            gene_t_a = gene_a.unsqueeze(0).to(device) if gene_a is not None else None
+            gene_t_b = gene_b.unsqueeze(0).to(device) if gene_b is not None else None
+            gmask_t_a = gene_mask_a.unsqueeze(0).to(device) if gene_mask_a is not None else None
+            gmask_t_b = gene_mask_b.unsqueeze(0).to(device) if gene_mask_b is not None else None
+            tox_t_a = tox_a.unsqueeze(0).to(device) if tox_a is not None else None
+            tox_t_b = tox_b.unsqueeze(0).to(device) if tox_b is not None else None
+
+            # 1. Full Multimodal Prediction
+            logits_full, _, _ = model(
+                batch_a, batch_b,
+                fp_a=fp_t_a, fp_b=fp_t_b,
+                gene_a=gene_t_a, gene_b=gene_t_b,
+                gene_mask_a=gmask_t_a, gene_mask_b=gmask_t_b,
+                clinical_tox_a=tox_t_a, clinical_tox_b=tox_t_b,
+            )
+            p_full = float(torch.sigmoid(logits_full).reshape(-1)[0].cpu().item())
+
+            # 2. Ablations to isolate modality contribution
+            logits_no_tox, _, _ = model(
+                batch_a, batch_b,
+                fp_a=fp_t_a, fp_b=fp_t_b,
+                gene_a=gene_t_a, gene_b=gene_t_b,
+                gene_mask_a=gmask_t_a, gene_mask_b=gmask_t_b,
+                clinical_tox_a=None, clinical_tox_b=None,
+            )
+            p_no_tox = float(torch.sigmoid(logits_no_tox).reshape(-1)[0].cpu().item())
+
+            logits_no_gene, _, _ = model(
+                batch_a, batch_b,
+                fp_a=fp_t_a, fp_b=fp_t_b,
+                gene_a=None, gene_b=None,
+                clinical_tox_a=tox_t_a, clinical_tox_b=tox_t_b,
+            )
+            p_no_gene = float(torch.sigmoid(logits_no_gene).reshape(-1)[0].cpu().item())
+
+            logits_graph_only, _, _ = model(batch_a, batch_b)
+            p_graph_only = float(torch.sigmoid(logits_graph_only).reshape(-1)[0].cpu().item())
+
+    finally:
+        model.train(was_training)
+
+    # 3. Active Gene / Enzyme extraction
+    active_genes_a: list[str] = []
+    active_genes_b: list[str] = []
+    if gene_vocabulary is not None and gene_a is not None and gene_b is not None:
+        active_genes_a = [gene_vocabulary[i] for i, val in enumerate(gene_a.cpu().numpy().ravel()) if val > 0.5 and i < len(gene_vocabulary)]
+        active_genes_b = [gene_vocabulary[i] for i, val in enumerate(gene_b.cpu().numpy().ravel()) if val > 0.5 and i < len(gene_vocabulary)]
+
+    shared_enzymes = sorted(set(active_genes_a).intersection(set(active_genes_b)))
+
+    # 4. Calibration
+    calibrated_prob = float(apply_calibrator(np.array([p_full]), calibrator)[0]) if calibrator else p_full
+
+    return {
+        'smiles_a': smiles_a,
+        'smiles_b': smiles_b,
+        'predicted_raw_probability': p_full,
+        'predicted_calibrated_probability': calibrated_prob,
+        'risk_level': 'High Risk' if calibrated_prob >= 0.65 else ('Moderate Risk' if calibrated_prob >= 0.35 else 'Low Risk'),
+        'modality_marginal_contributions': {
+            'molecular_graph_baseline': p_graph_only,
+            'delta_faers_clinical_toxicity': p_full - p_no_tox,
+            'delta_pharmgkb_pharmacogenomics': p_full - p_no_gene,
+            'delta_combined_external_knowledge': p_full - p_graph_only,
+        },
+        'pharmacogenomic_context': {
+            'drug_a_enzymes': active_genes_a,
+            'drug_b_enzymes': active_genes_b,
+            'shared_cyp_competition': shared_enzymes,
+            'potential_metabolic_bottleneck': len(shared_enzymes) > 0,
+        },
+        'clinical_toxicity_context': {
+            'drug_a_faers_score': float(tox_a.item()) if tox_a is not None else None,
+            'drug_b_faers_score': float(tox_b.item()) if tox_b is not None else None,
+        },
+    }
+

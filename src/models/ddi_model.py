@@ -1,4 +1,8 @@
-import torch, torch.nn as nn
+from __future__ import annotations
+
+from pathlib import Path
+import torch
+import torch.nn as nn
 from torch_geometric.nn import global_mean_pool
 
 from .encoder import CrossDrugAttention, EdgeAwareMolecularEncoder, MolecularEncoder
@@ -79,6 +83,34 @@ def model_from_checkpoint(checkpoint):
         use_clinical_toxicity=checkpoint.get('use_clinical_toxicity', False),
     )
 
+
+class CrossModalGeneAttention(nn.Module):
+    """Pair-isolated cross-modal attention between molecular graph and pharmacogenomic gene vectors."""
+
+    def __init__(self, mol_dim: int, gene_dim: int, hidden_dim: int = 64, n_heads: int = 2):
+        super().__init__()
+        self.mol_proj = nn.Linear(mol_dim, hidden_dim)
+        self.gene_proj = nn.Linear(gene_dim, hidden_dim)
+        self.cross_attn = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=n_heads, batch_first=True)
+        self.gate = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(
+        self,
+        mol_emb: torch.Tensor,
+        gene_vec: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        q = self.mol_proj(mol_emb).unsqueeze(1)
+        k = v = self.gene_proj(gene_vec).unsqueeze(1)
+        attn_out, _ = self.cross_attn(q, k, v)
+        attn_out = attn_out.squeeze(1)
+        gated = self.gate(attn_out) * attn_out
+        if mask is not None:
+            gated = gated * mask.view(-1, 1)
+        return self.norm(gated)
+
+
 class PxDDIModel(nn.Module):
     def __init__(
         self,
@@ -95,8 +127,12 @@ class PxDDIModel(nn.Module):
         gene_feature_dim=50,
         gene_hidden_channels=64,
         use_clinical_toxicity=False,
+        num_side_effects=1,
+        use_cross_modal_attention=False,
     ):
         super().__init__()
+        self.num_side_effects = num_side_effects
+        self.use_cross_modal_attention = use_cross_modal_attention
         self.use_chemberta = use_chemberta
         self.architecture_version = architecture_version
         self.use_toxicity_pair_features = use_toxicity_pair_features
@@ -188,8 +224,37 @@ class PxDDIModel(nn.Module):
         ) + (
             2 if self.use_clinical_toxicity else 0
         )
+        if self.use_cross_modal_attention and architecture_requires_multimodal_features(architecture_version):
+            self.cross_modal_attention = CrossModalGeneAttention(
+                mol_dim=hidden_channels,
+                gene_dim=gene_feature_dim,
+                hidden_dim=gene_hidden_channels,
+            )
+        else:
+            self.cross_modal_attention = None
+
         self.risk_classifier = nn.Sequential(
-            nn.Linear(risk_input_channels, 64), nn.ReLU(), nn.Dropout(0.4), nn.Linear(64,1))
+            nn.Linear(risk_input_channels, 64),
+            nn.ReLU(),
+            nn.Dropout(0.4),
+            nn.Linear(64, num_side_effects),
+        )
+
+    def load_pretrained_encoder(self, checkpoint_path: str | Path) -> None:
+        """Load weights from a self-supervised pretrained encoder checkpoint."""
+        ckpt_p = Path(checkpoint_path)
+        if not ckpt_p.is_file():
+            raise FileNotFoundError(f"Pretrained checkpoint not found: {ckpt_p}")
+        ckpt = torch.load(ckpt_p, map_location=next(self.parameters()).device)
+        state_dict = ckpt.get('encoder_state_dict', ckpt.get('model_state_dict', ckpt))
+        encoder_dict = {
+            k.replace('encoder.', ''): v
+            for k, v in state_dict.items()
+            if 'encoder' in k or k in self.encoder.state_dict()
+        }
+        self.encoder.load_state_dict(encoder_dict if encoder_dict else state_dict, strict=False)
+        print(f"Successfully loaded pretrained encoder weights from: {ckpt_p}")
+
     def forward(
         self,
         drug_a,
@@ -263,13 +328,18 @@ class PxDDIModel(nn.Module):
 
         if self.gene_encoder is not None and self.gene_gate is not None:
             if gene_a is not None and gene_b is not None:
-                ga = self.gene_encoder(gene_a.float().view(-1, self.gene_feature_dim))
+                g_in_a = gene_a.float().view(-1, self.gene_feature_dim)
+                g_in_b = gene_b.float().view(-1, self.gene_feature_dim)
+                ga = self.gene_encoder(g_in_a)
+                gb = self.gene_encoder(g_in_b)
+                if self.cross_modal_attention is not None:
+                    ga = ga + self.cross_modal_attention(ea, g_in_a, gene_mask_a)
+                    gb = gb + self.cross_modal_attention(eb, g_in_b, gene_mask_b)
                 ga_gate = self.gene_gate(ga)
                 if gene_mask_a is not None:
                     ga_gate = ga_gate * gene_mask_a.view(-1, 1)
                 ga_rep = ga_gate * ga
 
-                gb = self.gene_encoder(gene_b.float().view(-1, self.gene_feature_dim))
                 gb_gate = self.gene_gate(gb)
                 if gene_mask_b is not None:
                     gb_gate = gb_gate * gene_mask_b.view(-1, 1)
@@ -308,9 +378,13 @@ class PxDDIModel(nn.Module):
                 )
             features.append(memory_features)
         combined = torch.cat(features, dim=1)
-        
+
+        risk_out = self.risk_classifier(combined)
+        if self.num_side_effects == 1:
+            risk_out = risk_out.squeeze(-1)
+
         return (
-            self.risk_classifier(combined).squeeze(-1),
+            risk_out,
             toxicity_a_logits,
             toxicity_b_logits,
         )

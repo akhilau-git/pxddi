@@ -130,3 +130,49 @@ def test_occlusion_svg_is_a_vector_artifact_with_atom_indices(tmp_path):
     content = destination.read_text(encoding='utf-8')
     assert content.lstrip().startswith('<?xml')
     assert '<svg' in content
+
+
+def test_explain_multimodal_pair():
+    from src.models.candidate_explainability import explain_multimodal_pair
+    from src.models.ddi_model import MODEL_ARCHITECTURE_MULTIMODAL
+
+    graph_a, graph_b = _rich_graph('CCO'), _rich_graph('CCN')
+    model = PxDDIModel(
+        in_channels=RICH_NUM_ATOM_FEATURES,
+        hidden_channels=16,
+        architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+        edge_feature_dim=NUM_BOND_FEATURES,
+        gene_feature_dim=10,
+        gene_hidden_channels=16,
+        use_clinical_toxicity=True,
+        use_cross_modal_attention=True,
+    ).eval()
+
+    fp_a = torch.zeros(1024)
+    fp_b = torch.zeros(1024)
+    gene_a = torch.tensor([1.0 if i in {0, 2} else 0.0 for i in range(10)])
+    gene_b = torch.tensor([1.0 if i in {2, 4} else 0.0 for i in range(10)])
+    vocab = [f"GENE_{i}" for i in range(10)]
+
+    exp = explain_multimodal_pair(
+        model=model,
+        graph_a=graph_a,
+        graph_b=graph_b,
+        smiles_a='CCO',
+        smiles_b='CCN',
+        fp_a=fp_a,
+        fp_b=fp_b,
+        gene_a=gene_a,
+        gene_b=gene_b,
+        gene_mask_a=torch.tensor(1.0),
+        gene_mask_b=torch.tensor(1.0),
+        tox_a=torch.tensor(0.35),
+        tox_b=torch.tensor(0.20),
+        gene_vocabulary=vocab,
+    )
+
+    assert 'predicted_raw_probability' in exp
+    assert 'modality_marginal_contributions' in exp
+    assert 'GENE_2' in exp['pharmacogenomic_context']['shared_cyp_competition']
+    assert exp['pharmacogenomic_context']['potential_metabolic_bottleneck'] is True
+

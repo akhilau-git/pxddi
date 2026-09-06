@@ -268,11 +268,17 @@ def _save_lookup_cache(cache_file: Path | None, cache: dict[str, PubChemLookupRe
 def build_name_to_smiles_bridge(
     tox_labels_df: pd.DataFrame,
     cache_path: str | Path,
-    top_n: int = 500,
+    top_n: int = 1500,
     delay: float = 0.25,
     lookup_cache_path: str | Path | None = None,
+    target_names: set[str] | list[str] | None = None,
+    force_rebuild: bool = False,
 ) -> pd.DataFrame:
-    """Build or validate an auditable FAERS-to-PubChem toxicity bridge."""
+    """Build or validate an auditable FAERS-to-PubChem toxicity bridge.
+
+    Prioritizes target drug names (e.g., from TWOSIDES/master nodes) before sorting
+    by reporting volume, ensuring maximum coverage on target compounds.
+    """
     if top_n < 1:
         raise ValueError('top_n must be at least 1.')
     if delay < 0:
@@ -283,9 +289,12 @@ def build_name_to_smiles_bridge(
         raise ValueError(f'Toxicity labels are missing required columns: {sorted(missing)}.')
 
     cache = Path(cache_path)
-    if cache.exists():
-        print(f'Loading and validating cached bridge from {cache}')
-        return load_validated_bridge_cache(cache)
+    if cache.exists() and not force_rebuild:
+        cached_df = load_validated_bridge_cache(cache)
+        if len(cached_df) >= top_n:
+            print(f'Loading and validating cached bridge from {cache} ({len(cached_df)} rows >= requested {top_n})')
+            return cached_df
+        print(f'Existing bridge has {len(cached_df)} rows. Expanding to {top_n} rows...')
 
     lookup_cache_file = Path(lookup_cache_path) if lookup_cache_path else cache.parent / 'pubchem_lookup_cache.json'
     lookup_cache = _load_or_create_lookup_cache(lookup_cache_file)
@@ -298,8 +307,19 @@ def build_name_to_smiles_bridge(
         ~valid_drugs['drugname_clean'].str.lower().isin({'', 'nan', 'none', 'null'})
     ]
 
-    top_drugs = valid_drugs.sort_values('n_reports', ascending=False).head(top_n)
-    print(f'Querying PubChem for top {len(top_drugs)} most-reported drugs...')
+    # Prioritize target drug names if provided
+    if target_names:
+        target_set = {str(n).strip().upper() for n in target_names if str(n).strip()}
+        valid_drugs['is_target'] = valid_drugs['drugname_clean'].str.upper().isin(target_set)
+        top_drugs = valid_drugs.sort_values(
+            by=['is_target', 'n_reports'], ascending=[False, False]
+        ).head(top_n)
+        target_matched = valid_drugs['is_target'].sum()
+        print(f'Target name prioritization: {target_matched} target drugs matched in FAERS.')
+    else:
+        top_drugs = valid_drugs.sort_values('n_reports', ascending=False).head(top_n)
+
+    print(f'Querying PubChem for top {len(top_drugs)} most-reported drugs (top_n={top_n})...')
     fetched_at = datetime.now(timezone.utc).isoformat()
     results = []
 
@@ -347,15 +367,41 @@ def build_name_to_smiles_bridge(
 def rebuild_faers_toxicity_bridge_from_ascii(
     faers_ascii_dir: str | Path,
     output_bridge_path: str | Path,
-    top_n: int = 500,
+    top_n: int = 1500,
     min_reports: int = 5,
     delay: float = 0.25,
+    target_names: set[str] | list[str] | None = None,
+    master_nodes_path: str | Path | None = None,
+    force_rebuild: bool = False,
 ) -> pd.DataFrame:
     """End-to-end pipeline: Parse FAERS ASCII tables, aggregate severity, and build PubChem bridge."""
     from .faers_pipeline import build_toxicity_labels
 
+    resolved_targets: set[str] = set()
+    if target_names:
+        resolved_targets.update({str(n).strip().upper() for n in target_names if str(n).strip()})
+
+    if master_nodes_path and Path(master_nodes_path).is_file():
+        nodes_df = pd.read_csv(master_nodes_path)
+        for col in ['synonyms_json', 'synonyms', 'drug_name', 'name']:
+            if col in nodes_df.columns:
+                for val in nodes_df[col].dropna():
+                    try:
+                        parsed = json.loads(val) if isinstance(val, str) and val.startswith('[') else [val]
+                        for item in parsed:
+                            resolved_targets.add(str(item).strip().upper())
+                    except Exception:
+                        resolved_targets.add(str(val).strip().upper())
+
     print(f'Parsing FAERS ASCII files from {faers_ascii_dir}...')
     tox_labels = build_toxicity_labels(str(faers_ascii_dir), min_reports=min_reports)
     print(f'Built toxicity labels for {len(tox_labels)} drugs.')
-    return build_name_to_smiles_bridge(tox_labels, cache_path=output_bridge_path, top_n=top_n, delay=delay)
+    return build_name_to_smiles_bridge(
+        tox_labels,
+        cache_path=output_bridge_path,
+        top_n=top_n,
+        delay=delay,
+        target_names=resolved_targets if resolved_targets else None,
+        force_rebuild=force_rebuild,
+    )
 
