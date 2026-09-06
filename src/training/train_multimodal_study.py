@@ -14,7 +14,7 @@ import json
 import os
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -151,18 +151,22 @@ def train_extended_multimodal(
     )
 
     if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
+        from src.models.encoder import EdgeAwareMolecularEncoder
         from src.models.encoder_pretraining import load_pretrained_edge_aware_encoder
         print(f"Loading ChEMBL pre-trained encoder weights from: {chembl_pretrained_path} (hidden_dim={hidden_dim})")
         try:
-            load_pretrained_edge_aware_encoder(
-                encoder=model.encoder,
-                path=chembl_pretrained_path,
-                expected_in_channels=in_channels,
-                expected_edge_feature_dim=edge_dim,
-                expected_hidden_channels=hidden_dim,
-                map_location=device,
-            )
-            print("Successfully initialized molecular encoder with ChEMBL representations.")
+            if isinstance(model.encoder, EdgeAwareMolecularEncoder):
+                load_pretrained_edge_aware_encoder(
+                    encoder=model.encoder,
+                    path=chembl_pretrained_path,
+                    expected_in_channels=in_channels,
+                    expected_edge_feature_dim=edge_dim,
+                    expected_hidden_channels=hidden_dim,
+                    map_location=device,
+                )
+                print("Successfully initialized molecular encoder with ChEMBL representations.")
+            else:
+                print("Warning: model encoder is not an EdgeAwareMolecularEncoder; skipping ChEMBL warm start.")
         except Exception as exc:
             print(f"Warning: could not load ChEMBL weights ({exc}), proceeding with random initialization.")
 
@@ -385,10 +389,10 @@ def analyze_cold_start_coverage_errors(
         prob = float(scores[idx])
         pred = int(preds[idx])
 
-        has_gene_a = bool(cache.gene_masks.get(sa, torch.tensor(0.0)).item() > 0.5)
-        has_gene_b = bool(cache.gene_masks.get(sb, torch.tensor(0.0)).item() > 0.5)
-        has_tox_a = bool(cache.toxicity_masks.get(sa, torch.tensor(0.0)).item() > 0.5)
-        has_tox_b = bool(cache.toxicity_masks.get(sb, torch.tensor(0.0)).item() > 0.5)
+        has_gene_a = cache.gene_masks.get(sa, torch.tensor(0.0)).item() > 0.5
+        has_gene_b = cache.gene_masks.get(sb, torch.tensor(0.0)).item() > 0.5
+        has_tox_a = cache.toxicity_masks.get(sa, torch.tensor(0.0)).item() > 0.5
+        has_tox_b = cache.toxicity_masks.get(sb, torch.tensor(0.0)).item() > 0.5
 
         has_any_ext_a = has_gene_a or has_tox_a
         has_any_ext_b = has_gene_b or has_tox_b
@@ -616,7 +620,7 @@ def run_full_multimodal_study(
             batch_size=batch_size,
             device=device,
         )
-        ablation_dict = ablation_df.to_dict(orient='records')
+        ablation_dict = cast(list[dict[str, Any]], ablation_df.to_dict(orient='records'))
 
     # 5. Cold-Start Error Analysis Stratified by External Coverage
     tier_dict: list[dict[str, Any]] = []
@@ -628,7 +632,7 @@ def run_full_multimodal_study(
             output_dir=out_p / 'error_analysis',
             device=device,
         )
-        tier_dict = tier_summary_df.to_dict(orient='records')
+        tier_dict = cast(list[dict[str, Any]], tier_summary_df.to_dict(orient='records'))
 
     # 6. Model Calibration (ECE & Reliability)
     calibration_report: dict[str, Any] = {}
