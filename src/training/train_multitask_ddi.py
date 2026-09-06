@@ -55,7 +55,9 @@ def prepare_multitask_pairs(
 
     # Filter out single ions or invalid molecules that could not form molecular graphs
     if valid_drugs is not None:
-        valid_set = set(valid_drugs)
+        valid_set = set(str(d).strip() for d in valid_drugs)
+        filtered['drug_a_id'] = filtered['drug_a_id'].astype(str).str.strip()
+        filtered['drug_b_id'] = filtered['drug_b_id'].astype(str).str.strip()
         filtered = filtered[
             filtered['drug_a_id'].isin(valid_set) & filtered['drug_b_id'].isin(valid_set)
         ].copy()
@@ -87,24 +89,31 @@ class MultitaskCachedDataset(Dataset):
     """Dataset serving multi-modal cached drug graphs with multi-hot side-effect targets."""
 
     def __init__(self, pairs_df: pd.DataFrame, cache: MolecularCache):
-        valid_set = set(cache.graphs.keys())
-        self.pairs = pairs_df[
-            pairs_df['drug_a_id'].isin(valid_set) & pairs_df['drug_b_id'].isin(valid_set)
-        ].reset_index(drop=True)
         self.cache = cache
+        valid_set = set(cache.graphs.keys())
+        p_df = pairs_df.copy()
+        p_df['drug_a_id'] = p_df['drug_a_id'].astype(str).str.strip()
+        p_df['drug_b_id'] = p_df['drug_b_id'].astype(str).str.strip()
+        self.pairs = p_df[
+            p_df['drug_a_id'].isin(valid_set) & p_df['drug_b_id'].isin(valid_set)
+        ].reset_index(drop=True)
+        self._fallback_graph = next(iter(cache.graphs.values())) if len(cache.graphs) > 0 else None
 
     def __len__(self) -> int:
         return len(self.pairs)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         row = self.pairs.iloc[idx]
-        drug_a = str(row['drug_a_id'])
-        drug_b = str(row['drug_b_id'])
+        drug_a = str(row['drug_a_id']).strip()
+        drug_b = str(row['drug_b_id']).strip()
         labels = torch.tensor(row['multitask_labels'], dtype=torch.float32)
 
+        g_a = self.cache.graphs.get(drug_a, self._fallback_graph)
+        g_b = self.cache.graphs.get(drug_b, self._fallback_graph)
+
         return {
-            'drug_a': self.cache.graphs[drug_a],
-            'drug_b': self.cache.graphs[drug_b],
+            'drug_a': g_a,
+            'drug_b': g_b,
             'fp_a': self.cache.fingerprints.get(drug_a, torch.zeros(1024)),
             'fp_b': self.cache.fingerprints.get(drug_b, torch.zeros(1024)),
             'gene_a': self.cache.gene_vectors.get(drug_a, torch.zeros(self.cache.gene_dim)),
