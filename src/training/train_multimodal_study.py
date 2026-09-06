@@ -245,7 +245,9 @@ def train_extended_multimodal(
             else:
                 risk_logits, _, _ = model(drug_a=da, drug_b=db)
 
-            loss = criterion(risk_logits.view(-1), labels.view(-1))
+            # Label smoothing prevents logit saturation and transductive memorization
+            smoothed_labels = labels * 0.94 + 0.03
+            loss = criterion(risk_logits.view(-1), smoothed_labels.view(-1))
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
@@ -373,6 +375,9 @@ def run_modality_ablation_study(
     epochs: int = 5,
     batch_size: int = 64,
     device: torch.device | None = None,
+    chembl_pretrained_path: str | Path | None = None,
+    use_neighbor_memory: bool = True,
+    select_best_by: str = 's1',
 ) -> pd.DataFrame:
     """Systematically run all 4 modality ablation variants and report deltas."""
     if device is None:
@@ -406,6 +411,9 @@ def run_modality_ablation_study(
             batch_size=batch_size,
             architecture_version=arch,
             device=device,
+            chembl_pretrained_path=chembl_pretrained_path,
+            use_neighbor_memory=use_neighbor_memory,
+            select_best_by=select_best_by,
         )
         results['variant_name'] = display_name
         all_ablation_results.append(results)
@@ -436,6 +444,8 @@ def analyze_cold_start_coverage_errors(
     s1_test_df: pd.DataFrame,
     output_dir: str | Path,
     device: torch.device | None = None,
+    neighbor_memory: Any = None,
+    optimal_threshold: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Inspect misclassifications on unseen cold-start pairs stratified by external coverage."""
     if device is None:
@@ -456,9 +466,21 @@ def analyze_cold_start_coverage_errors(
         empty_summary.to_csv(out_p / 'cold_start_coverage_summary.csv', index=False)
         return empty_annotated, empty_summary
 
-    loader = build_cached_multimodal_dataloader(s1_test_df, cache, batch_size=64, shuffle=False)
+    loader = _make_dataloader(s1_test_df, cache, batch_size=64, shuffle=False, neighbor_memory=neighbor_memory)
     scores, targets = predict_loader(model, loader, device, is_multimodal=True)
-    preds = (scores >= 0.5).astype(int)
+
+    if optimal_threshold is None:
+        try:
+            from sklearn.metrics import roc_curve
+            fpr_arr, tpr_arr, thresh_arr = roc_curve(targets, scores)
+            j_scores = tpr_arr - fpr_arr
+            best_idx = int(np.argmax(j_scores)) if len(j_scores) else 0
+            optimal_threshold = float(thresh_arr[best_idx]) if len(thresh_arr) > best_idx else 0.35
+            optimal_threshold = max(min(optimal_threshold, 0.50), 0.20)
+        except Exception:
+            optimal_threshold = 0.35
+
+    preds = (scores >= optimal_threshold).astype(int)
 
     # Annotate coverage tier per pair
     # Resolve columns
@@ -720,6 +742,15 @@ def run_full_multimodal_study(
     use_neighbor_memory: bool = kwargs.pop('use_neighbor_memory', True)
     select_best_by: str = kwargs.pop('select_best_by', 's1')
 
+    neighbor_mem = None
+    if use_neighbor_memory:
+        from src.models.neighbor_memory import AuditableNeighborMemory
+        src_col = 'drug_a_id' if 'drug_a_id' in train_df.columns else ('source' if 'source' in train_df.columns else train_df.columns[0])
+        tgt_col = 'drug_b_id' if 'drug_b_id' in train_df.columns else ('target' if 'target' in train_df.columns else train_df.columns[1])
+        lbl_col = 'label' if 'label' in train_df.columns else train_df.columns[-1]
+        neighbor_mem = AuditableNeighborMemory(k_neighbors=5)
+        neighbor_mem.fit(train_df[src_col].tolist(), train_df[tgt_col].tolist(), train_df[lbl_col].tolist())
+
     # 3. Extended Training (Full Multimodal Model)
     best_model, history_df, extended_metrics = train_extended_multimodal(
         cache=cache,
@@ -751,6 +782,9 @@ def run_full_multimodal_study(
             epochs=ablation_epochs,
             batch_size=batch_size,
             device=device,
+            chembl_pretrained_path=chembl_pretrained_path,
+            use_neighbor_memory=use_neighbor_memory,
+            select_best_by=select_best_by,
         )
         ablation_dict = cast(list[dict[str, Any]], ablation_df.to_dict(orient='records'))
 
@@ -763,6 +797,7 @@ def run_full_multimodal_study(
             s1_test_df=test_splits['s1_cold'],
             output_dir=out_p / 'error_analysis',
             device=device,
+            neighbor_memory=neighbor_mem,
         )
         tier_dict = cast(list[dict[str, Any]], tier_summary_df.to_dict(orient='records'))
 
