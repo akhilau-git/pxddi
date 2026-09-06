@@ -13,6 +13,8 @@ MODEL_ARCHITECTURE_CROSS_ATTENTION_EDGE_AWARE = 'cross_attention_edge_aware_gat_
 MODEL_ARCHITECTURE_GRAPH_FP_FUSION = 'graph_fp_fusion_v1'
 MODEL_ARCHITECTURE_AUDITDDI_MEMORY = 'auditddi_memory_fusion_v1'
 MODEL_ARCHITECTURE_MULTIMODAL = 'auditddi_multimodal_v1'
+MODEL_ARCHITECTURE_ABLATION_GENES = 'auditddi_ablation_genes'
+MODEL_ARCHITECTURE_ABLATION_FAERS = 'auditddi_ablation_faers'
 
 
 def architecture_uses_edge_features(architecture_version: str) -> bool:
@@ -24,6 +26,8 @@ def architecture_uses_edge_features(architecture_version: str) -> bool:
         MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
         MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
         MODEL_ARCHITECTURE_MULTIMODAL,
+        MODEL_ARCHITECTURE_ABLATION_GENES,
+        MODEL_ARCHITECTURE_ABLATION_FAERS,
     }
 
 
@@ -43,12 +47,17 @@ def architecture_requires_fingerprint_features(architecture_version: str) -> boo
         MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
         MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
         MODEL_ARCHITECTURE_MULTIMODAL,
+        MODEL_ARCHITECTURE_ABLATION_GENES,
+        MODEL_ARCHITECTURE_ABLATION_FAERS,
     }
 
 
 def architecture_requires_multimodal_features(architecture_version: str) -> bool:
-    """Return whether a checkpoint consumes pharmacogenomic gene and clinical toxicity features."""
-    return architecture_version == MODEL_ARCHITECTURE_MULTIMODAL
+    """Return whether a checkpoint consumes pharmacogenomic gene features."""
+    return architecture_version in {
+        MODEL_ARCHITECTURE_MULTIMODAL,
+        MODEL_ARCHITECTURE_ABLATION_GENES,
+    }
 
 
 def model_from_checkpoint(checkpoint):
@@ -93,7 +102,9 @@ class PxDDIModel(nn.Module):
         self.use_toxicity_pair_features = use_toxicity_pair_features
         self.gene_feature_dim = gene_feature_dim
         self.gene_hidden_channels = gene_hidden_channels
-        self.use_clinical_toxicity = use_clinical_toxicity or (architecture_version == MODEL_ARCHITECTURE_MULTIMODAL)
+        self.use_clinical_toxicity = use_clinical_toxicity or (
+            architecture_version in {MODEL_ARCHITECTURE_MULTIMODAL, MODEL_ARCHITECTURE_ABLATION_FAERS}
+        )
 
         if use_chemberta:
             from .encoder import MolecularEncoderChemBERTa
