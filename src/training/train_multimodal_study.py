@@ -425,9 +425,11 @@ def analyze_cold_start_coverage_errors(
         has_gene_b = cache.gene_masks.get(sb, torch.tensor(0.0)).item() > 0.5
         has_tox_a = cache.toxicity_masks.get(sa, torch.tensor(0.0)).item() > 0.5
         has_tox_b = cache.toxicity_masks.get(sb, torch.tensor(0.0)).item() > 0.5
+        has_target_a = cache.target_masks.get(sa, torch.tensor(0.0)).item() > 0.5
+        has_target_b = cache.target_masks.get(sb, torch.tensor(0.0)).item() > 0.5
 
-        has_any_ext_a = has_gene_a or has_tox_a
-        has_any_ext_b = has_gene_b or has_tox_b
+        has_any_ext_a = has_gene_a or has_tox_a or has_target_a
+        has_any_ext_b = has_gene_b or has_tox_b or has_target_b
 
         if has_any_ext_a and has_any_ext_b:
             tier = 'Both Drugs Profiled'
@@ -455,6 +457,8 @@ def analyze_cold_start_coverage_errors(
             'gene_b': has_gene_b,
             'faers_a': has_tox_a,
             'faers_b': has_tox_b,
+            'bindingdb_a': has_target_a,
+            'bindingdb_b': has_target_b,
         })
 
     annotated_df = pd.DataFrame(rows)
@@ -489,6 +493,31 @@ def analyze_cold_start_coverage_errors(
 
     summary_df = pd.DataFrame(tier_summary)
     summary_df.to_csv(out_p / 'cold_start_coverage_summary.csv', index=False)
+    summary_df.to_csv(out_p / 'coverage_tier_report.csv', index=False)
+
+    # Export structured JSON analysis for clinical auditing
+    overall_acc = float(accuracy_score(targets, preds)) if len(targets) else 0.0
+    overall_auroc = float(roc_auc_score(targets, scores)) if len(np.unique(targets)) > 1 else 0.5
+    overall_cm = confusion_matrix(targets, preds, labels=[0, 1])
+    _, o_fp, o_fn, _ = overall_cm.ravel()
+
+    misclassified = annotated_df[~annotated_df['is_correct']]
+    misclassified_sample = misclassified[[
+        'drug_a', 'drug_b', 'true_label', 'pred_prob', 'error_type', 'coverage_tier'
+    ]].to_dict(orient='records')
+
+    error_analysis_payload = {
+        'total_pairs_evaluated': len(annotated_df),
+        'overall_accuracy': overall_acc,
+        'overall_auroc': overall_auroc,
+        'total_false_positives': int(o_fp),
+        'total_false_negatives': int(o_fn),
+        'coverage_tier_performance': tier_summary,
+        'misclassified_pairs_count': len(misclassified),
+        'misclassified_pairs_sample': misclassified_sample[:50],
+    }
+    with open(out_p / 'error_analysis.json', 'w', encoding='utf-8') as f:
+        json.dump(error_analysis_payload, f, indent=2)
 
     print(f"\n{'=' * 80}")
     print("S1 COLD-START PERFORMANCE STRATIFIED BY EXTERNAL COVERAGE TIER:")
@@ -555,6 +584,7 @@ def evaluate_multimodal_calibration(
 
     out_json = out_p / 'calibration_metrics.json'
     out_json.write_text(json.dumps(calibration_report, indent=2), encoding='utf-8')
+    (out_p / 'calibration_report.json').write_text(json.dumps(calibration_report, indent=2), encoding='utf-8')
 
     print(f"\n{'=' * 80}")
     print("MODEL CALIBRATION RESULTS (ECE & BRIER SCORE):")

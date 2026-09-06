@@ -96,6 +96,7 @@ class DrugNode:
         res['gene_symbols_json'] = json.dumps(self.gene_symbols)
         res['gene_vector_json'] = json.dumps(self.gene_vector_multihot)
         res['bindingdb_targets_json'] = json.dumps(self.bindingdb_targets)
+        res['geo_expression_signatures_json'] = json.dumps(self.geo_expression_signatures)
         return res
 
 
@@ -119,12 +120,14 @@ class DDIEdge:
             raise ValueError('drug_b_id must be a non-empty canonical SMILES.')
         if self.drug_a_id == self.drug_b_id:
             raise ValueError(f'Self-loops are forbidden in DDI graph: {self.drug_a_id}')
-        if self.evidence_count < 0:
-            raise ValueError(f'evidence_count cannot be negative: {self.evidence_count}')
-        if self.split_group is not None:
-            valid_splits = {'train', 'val', 'test_transductive', 'test_s1_cold', 'test_s2_semi', 'unassigned'}
-            if self.split_group not in valid_splits:
-                raise ValueError(f'Invalid split_group: {self.split_group!r}. Must be one of {valid_splits}')
+        if self.evidence_count < 1:
+            raise ValueError(f'evidence_count must be at least 1, got: {self.evidence_count}')
+        if self.confidence_score is not None and not (0.0 <= self.confidence_score <= 1.0):
+            raise ValueError(f'confidence_score must be in [0.0, 1.0], got: {self.confidence_score}')
+        if self.split_group and self.split_group not in {
+            'train', 'val', 'test_transductive', 'test_s1_cold', 'test_s2_semi', 'unassigned'
+        }:
+            raise ValueError(f'Invalid split_group: {self.split_group}')
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize edge to dictionary."""
@@ -132,20 +135,22 @@ class DDIEdge:
 
 
 class MasterGraphCatalog:
-    """In-memory collection and validator for the unified heterogeneous graph."""
+    """In-memory validated graph repository with export capabilities."""
 
     def __init__(self) -> None:
         self.nodes: dict[str, DrugNode] = {}
         self.edges: list[DDIEdge] = []
 
     def add_node(self, node: DrugNode) -> None:
-        """Add or update a drug node."""
+        """Register a unique validated DrugNode."""
         if not isinstance(node, DrugNode):
             raise TypeError(f'Expected DrugNode, got {type(node)}')
+        if node.drug_id in self.nodes:
+            raise ValueError(f'Duplicate drug_id in graph: {node.drug_id}')
         self.nodes[node.drug_id] = node
 
     def add_edge(self, edge: DDIEdge) -> None:
-        """Add an interaction edge after ensuring endpoint nodes exist."""
+        """Register a validated DDIEdge, verifying that endpoints exist."""
         if not isinstance(edge, DDIEdge):
             raise TypeError(f'Expected DDIEdge, got {type(edge)}')
         if edge.drug_a_id not in self.nodes:
@@ -153,6 +158,7 @@ class MasterGraphCatalog:
         if edge.drug_b_id not in self.nodes:
             raise KeyError(f'drug_b_id {edge.drug_b_id} not registered in graph nodes.')
         self.edges.append(edge)
+
     def summary(self) -> dict[str, Any]:
         """Return diagnostic metrics of the catalog."""
         n_nodes = len(self.nodes)
@@ -161,6 +167,8 @@ class MasterGraphCatalog:
         nodes_with_tox = sum(1 for n in self.nodes.values() if n.toxicity_score is not None)
         nodes_with_bindingdb = sum(1 for n in self.nodes.values() if (n.is_bindingdb_active or n.bindingdb_targets))
         bindingdb_status = 'active' if nodes_with_bindingdb > 0 else 'inactive_expansion_module'
+        nodes_with_geo = sum(1 for n in self.nodes.values() if (n.is_geo_active or n.geo_expression_signatures))
+        geo_status = 'active' if nodes_with_geo > 0 else 'inactive_expansion_module'
         return {
             'total_nodes': n_nodes,
             'total_edges': n_edges,
@@ -171,7 +179,9 @@ class MasterGraphCatalog:
             'nodes_with_bindingdb_targets': nodes_with_bindingdb,
             'bindingdb_coverage_pct': (nodes_with_bindingdb / n_nodes * 100.0) if n_nodes else 0.0,
             'bindingdb_module_status': bindingdb_status,
-            'geo_module_status': 'inactive_expansion_module',
+            'nodes_with_geo_signatures': nodes_with_geo,
+            'geo_coverage_pct': (nodes_with_geo / n_nodes * 100.0) if n_nodes else 0.0,
+            'geo_module_status': geo_status,
         }
 
     def export_tables(self, output_dir: str | Path) -> tuple[Path, Path]:

@@ -27,6 +27,10 @@ from .bindingdb_pipeline import (
     encode_multihot_target_vector,
     update_master_nodes_with_bindingdb,
 )
+from .geo_pipeline import (
+    parse_geo_directory,
+    update_master_nodes_with_geo,
+)
 
 DEFAULT_TOP_GENES = 50
 
