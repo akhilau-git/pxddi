@@ -640,6 +640,7 @@ def run_full_multimodal_study(
 
     return {
         'extended_metrics': extended_metrics,
+        'transductive_and_cold_metrics': extended_metrics,
         'ablation': ablation_dict,
         'ablation_results': ablation_dict,
         'tier_summary': tier_dict,
