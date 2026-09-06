@@ -311,6 +311,25 @@ def train_extended_multimodal(
         for k, v in m.items():
             final_results[f'{name}_{k}'] = v
 
+    if best_s1_weights_path.is_file() and 's1_cold' in test_loaders:
+        ckpt_s1 = torch.load(best_s1_weights_path, map_location=device)
+        s1_eval_model = PxDDIModel(
+            in_channels=in_channels,
+            hidden_channels=hidden_dim,
+            edge_feature_dim=edge_dim,
+            architecture_version=architecture_version,
+            gene_feature_dim=cache.gene_dim,
+            gene_hidden_channels=64,
+            use_clinical_toxicity=is_multimodal,
+            use_cross_modal_attention=use_cross_modal_attention if is_multimodal else False,
+        ).to(device)
+        s1_eval_model.load_state_dict(ckpt_s1['model_state_dict'])
+        s1_best_metrics = evaluate_loader(s1_eval_model, test_loaders['s1_cold'], device, is_multimodal=is_multimodal)
+        final_results['s1_best_epoch'] = ckpt_s1.get('epoch')
+        final_results['s1_best_auroc'] = s1_best_metrics['auroc']
+        final_results['s1_best_auprc'] = s1_best_metrics['auprc']
+        print(f"Loaded Peak S1 Model from epoch {ckpt_s1.get('epoch')} -> S1 Test AUROC = {s1_best_metrics['auroc']:.4f}")
+
     return model, history_df, final_results
 
 
