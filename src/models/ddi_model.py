@@ -209,13 +209,15 @@ class PxDDIModel(nn.Module):
         self.uses_multiplicative_fusion = (
             architecture_version != MODEL_ARCHITECTURE_LEGACY
         )
+        motif_dim = int(motif_hidden_channels) if (self.motif_encoder is not None and motif_hidden_channels is not None) else 0
+        gene_dim = int(gene_hidden_channels) if (self.gene_encoder is not None and gene_hidden_channels is not None) else 0
         pair_feature_multiplier = 3 if self.uses_multiplicative_fusion else 2
-        pair_embedding_channels = hidden_channels + (
-            motif_hidden_channels if self.motif_encoder is not None else 0
-        ) + (hidden_channels if self.cross_drug_attention is not None else 0) + (
-            128 if self.fp_encoder is not None else 0
-        ) + (
-            gene_hidden_channels if self.gene_encoder is not None else 0
+        pair_embedding_channels = (
+            hidden_channels
+            + motif_dim
+            + (hidden_channels if self.cross_drug_attention is not None else 0)
+            + (128 if self.fp_encoder is not None else 0)
+            + gene_dim
         )
         self.use_neighbor_memory = (
             use_neighbor_memory or architecture_version == MODEL_ARCHITECTURE_AUDITDDI_MEMORY
@@ -273,6 +275,8 @@ class PxDDIModel(nn.Module):
         clinical_tox_a=None,
         clinical_tox_b=None,
     ):
+        cross_a: torch.Tensor | None = None
+        cross_b: torch.Tensor | None = None
         if self.use_chemberta:
             device = next(self.parameters()).device
             ea = self.encoder(drug_a.smiles, device)
@@ -281,6 +285,8 @@ class PxDDIModel(nn.Module):
             ea = self.encoder(drug_a.x, drug_a.edge_index, drug_a.batch)
             eb = self.encoder(drug_b.x, drug_b.edge_index, drug_b.batch)
         elif self.cross_drug_attention is not None:
+            if not isinstance(self.encoder, EdgeAwareMolecularEncoder):
+                raise TypeError('Expected EdgeAwareMolecularEncoder for cross-drug attention.')
             node_embeddings_a = self.encoder.encode_nodes(
                 drug_a.x, drug_a.edge_index, drug_a.edge_attr
             )
@@ -353,7 +359,7 @@ class PxDDIModel(nn.Module):
             ea_for_risk = torch.cat((ea_for_risk, ga_rep), dim=1)
             eb_for_risk = torch.cat((eb_for_risk, gb_rep), dim=1)
 
-        if self.cross_drug_attention is not None:
+        if self.cross_drug_attention is not None and cross_a is not None and cross_b is not None:
             ea_for_risk = torch.cat((ea_for_risk, cross_a), dim=1)
             eb_for_risk = torch.cat((eb_for_risk, cross_b), dim=1)
 
@@ -405,6 +411,8 @@ class PxDDIModel(nn.Module):
                 'Cross-drug attention maps are available only for the '
                 'cross_attention_edge_aware_gat_v1 candidate.'
             )
+        if not isinstance(self.encoder, EdgeAwareMolecularEncoder):
+            raise TypeError('Expected EdgeAwareMolecularEncoder for cross-drug attention.')
         node_embeddings_a = self.encoder.encode_nodes(
             drug_a.x, drug_a.edge_index, drug_a.edge_attr
         )
