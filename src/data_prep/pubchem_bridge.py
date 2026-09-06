@@ -405,3 +405,78 @@ def rebuild_faers_toxicity_bridge_from_ascii(
         force_rebuild=force_rebuild,
     )
 
+
+def build_faers_bridge(
+    faers_signals_path: str | Path,
+    master_nodes_path: str | Path | None = None,
+    output_path: str | Path | None = None,
+    top_n_faers: int = 1500,
+    top_n: int | None = None,
+    cache_path: str | Path | None = None,
+    delay: float = 0.25,
+    force_rebuild: bool = False,
+) -> pd.DataFrame:
+    """Build or expand the FAERS-to-PubChem bridge from an existing signals/toxicity CSV.
+
+    Loads FAERS signals, extracts target drug names from master_drug_nodes.csv,
+    prioritizes them, and builds or expands the toxicity bridge.
+    """
+    n_drugs = top_n if top_n is not None else top_n_faers
+    signals_df = pd.read_csv(faers_signals_path)
+
+    # Normalize expected column names if necessary
+    col_map = {}
+    if 'drugname' not in signals_df.columns:
+        for candidate in ['drug_name', 'drug', 'name']:
+            if candidate in signals_df.columns:
+                col_map[candidate] = 'drugname'
+                break
+    if 'toxicity_score' not in signals_df.columns:
+        for candidate in ['score', 'severe_outcome_ratio', 'signal_score']:
+            if candidate in signals_df.columns:
+                col_map[candidate] = 'toxicity_score'
+                break
+    if 'n_reports' not in signals_df.columns:
+        for candidate in ['reports', 'report_count', 'n_cases', 'num_reports']:
+            if candidate in signals_df.columns:
+                col_map[candidate] = 'n_reports'
+                break
+    if col_map:
+        signals_df = signals_df.rename(columns=col_map)
+
+    resolved_targets: set[str] = set()
+    if master_nodes_path and Path(master_nodes_path).is_file():
+        nodes_df = pd.read_csv(master_nodes_path)
+        for col in ['synonyms_json', 'synonyms', 'drug_name', 'name']:
+            if col in nodes_df.columns:
+                for val in nodes_df[col].dropna():
+                    try:
+                        parsed = json.loads(val) if isinstance(val, str) and val.startswith('[') else [val]
+                        for item in parsed:
+                            resolved_targets.add(str(item).strip().upper())
+                    except Exception:
+                        resolved_targets.add(str(val).strip().upper())
+
+    # Determine bridge output path and lookup cache path
+    if output_path is None:
+        if cache_path is not None and str(cache_path).endswith('.csv'):
+            target_output = Path(cache_path)
+            lookup_cache = None
+        else:
+            target_output = Path(faers_signals_path).parent / 'faers_bridge.csv'
+            lookup_cache = cache_path
+    else:
+        target_output = Path(output_path)
+        lookup_cache = cache_path if (cache_path and str(cache_path).endswith('.json')) else None
+
+    return build_name_to_smiles_bridge(
+        tox_labels_df=signals_df,
+        cache_path=target_output,
+        top_n=n_drugs,
+        delay=delay,
+        lookup_cache_path=lookup_cache,
+        target_names=resolved_targets if resolved_targets else None,
+        force_rebuild=force_rebuild,
+    )
+
+

@@ -47,3 +47,40 @@ def test_resolve_toxicity_bridge_excludes_conflicting_scores():
     assert len(conflicts) == 1
     assert conflicts.iloc[0]['canonical_smiles'] == 'CCO'
     assert conflicts.iloc[0]['unique_scores'] == 2
+
+
+def test_build_faers_bridge_import_and_execution(tmp_path, monkeypatch):
+    """Verify build_faers_bridge executes properly with signals and master nodes."""
+    from src.data_prep.pubchem_bridge import build_faers_bridge, PubChemLookupResult
+
+    # Mock lookup so no internet call is needed
+    monkeypatch.setattr(
+        'src.data_prep.pubchem_bridge.lookup_pubchem_smiles',
+        lambda drug_name, **kwargs: PubChemLookupResult('CCO', 'matched', 1, 'http://test'),
+    )
+
+    signals_csv = tmp_path / 'signals.csv'
+    pd.DataFrame({
+        'drugname': ['ASPIRIN', 'WARFARIN'],
+        'toxicity_score': [0.2, 0.8],
+        'n_reports': [100, 50],
+    }).to_csv(signals_csv, index=False)
+
+    nodes_csv = tmp_path / 'nodes.csv'
+    pd.DataFrame({
+        'drug_name': ['Aspirin', 'Warfarin'],
+        'canonical_smiles': ['CC(=O)Oc1ccccc1C(=O)O', 'CC(=O)CC(c1ccccc1)c1c(O)c2ccccc2oc1=O'],
+    }).to_csv(nodes_csv, index=False)
+
+    out_csv = tmp_path / 'faers_bridge.csv'
+    df = build_faers_bridge(
+        faers_signals_path=signals_csv,
+        master_nodes_path=nodes_csv,
+        output_path=out_csv,
+        top_n_faers=10,
+        delay=0.0,
+    )
+    assert len(df) == 2
+    assert out_csv.exists()
+    assert 'canonical_smiles' in df.columns
+
