@@ -127,6 +127,8 @@ def parse_bindingdb_directory(
     - Tier 5: Normalized drug name and synonyms
     """
     bdir = Path(bindingdb_dir)
+    if bdir.is_file():
+        bdir = bdir.parent
     if not bdir.is_dir():
         raise FileNotFoundError(f'BindingDB directory not found: {bdir}')
 
@@ -323,18 +325,33 @@ def parse_bindingdb_directory(
 
 
 def update_master_nodes_with_bindingdb(
-    master_nodes_path: str | Path,
-    bindingdb_dir_or_profiles: str | Path | pd.DataFrame,
+    master_nodes_path: str | Path | None = None,
+    bindingdb_dir_or_profiles: str | Path | pd.DataFrame | None = None,
     output_path: str | Path | None = None,
     top_k_targets: int = DEFAULT_TOP_TARGETS,
     impute_by_tanimoto: bool = True,
     tanimoto_threshold: float = 0.15,
+    **kwargs: Any,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Update master_drug_nodes.csv with BindingDB target vectors with multi-tier matching and structural imputation.
 
     Sets `is_bindingdb_active = True` for profiled nodes and enriches them
     with `bindingdb_targets_json` and `bindingdb_target_vector`.
+    Supports keyword aliases: master_nodes_csv, bindingdb_tsv_path, output_csv.
     """
+    if master_nodes_path is None:
+        master_nodes_path = kwargs.get('master_nodes_csv')
+    if master_nodes_path is None:
+        raise ValueError('master_nodes_path (or master_nodes_csv) must be provided')
+
+    if bindingdb_dir_or_profiles is None:
+        bindingdb_dir_or_profiles = kwargs.get('bindingdb_tsv_path') or kwargs.get('bindingdb_dir')
+    if bindingdb_dir_or_profiles is None:
+        raise ValueError('bindingdb_dir_or_profiles (or bindingdb_tsv_path / bindingdb_dir) must be provided')
+
+    if output_path is None:
+        output_path = kwargs.get('output_csv')
+
     nodes_p = Path(master_nodes_path)
     if not nodes_p.is_file():
         raise FileNotFoundError(f'Master nodes file not found: {nodes_p}')
@@ -350,7 +367,15 @@ def update_master_nodes_with_bindingdb(
             top_k_targets=top_k_targets,
         )
     elif Path(bindingdb_dir_or_profiles).is_file():
-        df_profiles = pd.read_csv(bindingdb_dir_or_profiles)
+        p = Path(bindingdb_dir_or_profiles)
+        if (p.parent / 'bindingdb_drugs.csv').is_file() or p.suffix in ['.tsv', '.txt']:
+            df_profiles, _ = parse_bindingdb_directory(
+                p.parent,
+                master_nodes_path=nodes_p,
+                top_k_targets=top_k_targets,
+            )
+        else:
+            df_profiles = pd.read_csv(p)
     else:
         raise ValueError(f'Invalid bindingdb source: {bindingdb_dir_or_profiles}')
 

@@ -162,3 +162,27 @@ def test_molecular_cache_with_bindingdb_targets(tmp_path):
     count = fresh_cache.populate_from_master_nodes(nodes_csv)
     assert count == 1
     assert fresh_cache.target_masks[smi_a].item() == 1.0
+
+
+def test_update_master_nodes_keyword_aliases(mock_bindingdb_dir, tmp_path):
+    nodes_csv = tmp_path / "master_nodes.csv"
+    out_csv = tmp_path / "out_nodes.csv"
+    df = pd.DataFrame({
+        "drug_id": ["CC(=O)Oc1ccccc1C(=O)O"],
+        "canonical_smiles": ["CC(=O)Oc1ccccc1C(=O)O"],
+    })
+    df.to_csv(nodes_csv, index=False)
+
+    tsv_file = mock_bindingdb_dir / "BindingDB_All.tsv"
+    tsv_file.write_text("dummy tsv content")
+
+    # Call with Colab keyword argument aliases
+    updated_df, summary = update_master_nodes_with_bindingdb(
+        master_nodes_csv=nodes_csv,
+        bindingdb_tsv_path=tsv_file,
+        output_csv=out_csv,
+        tanimoto_threshold=0.15,
+    )
+    assert out_csv.is_file()
+    assert summary["nodes_with_bindingdb_targets"] >= 1
+

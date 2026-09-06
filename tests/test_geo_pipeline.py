@@ -113,3 +113,25 @@ def test_master_graph_catalog_geo_status():
     assert summary["nodes_with_geo_signatures"] == 1
     assert summary["geo_module_status"] == "active"
     assert summary["geo_coverage_pct"] == 100.0
+
+
+def test_update_master_nodes_geo_keyword_aliases(mock_geo_dir, tmp_path):
+    nodes_csv = tmp_path / "master_nodes.csv"
+    out_csv = tmp_path / "out_nodes.csv"
+    df_master = pd.DataFrame({
+        "drug_id": ["CC(=O)Oc1ccccc1C(=O)O"],
+        "canonical_smiles": ["CC(=O)Oc1ccccc1C(=O)O"],
+        "gene_symbols_json": [json.dumps(["PTGS1"])],
+    })
+    df_master.to_csv(nodes_csv, index=False)
+
+    updated_df, summary = update_master_nodes_with_geo(
+        master_nodes_csv=nodes_csv,
+        geo_dir=mock_geo_dir,
+        output_csv=out_csv,
+        tanimoto_threshold=0.15,
+        max_genes=5000,
+    )
+    assert out_csv.is_file()
+    assert summary["nodes_with_geo_signatures"] >= 1
+

@@ -203,18 +203,36 @@ def parse_geo_directory(
 
 
 def update_master_nodes_with_geo(
-    master_nodes_path: str | Path,
-    geo_dir_or_signatures: str | Path | dict[str, dict[str, float]],
+    master_nodes_path: str | Path | None = None,
+    geo_dir_or_signatures: str | Path | dict[str, dict[str, float]] | None = None,
     output_path: str | Path | None = None,
     impute_by_tanimoto: bool = True,
     tanimoto_threshold: float = 0.15,
+    max_genes: int = 5000,
+    **kwargs: Any,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Enrich master_drug_nodes.csv with GEO disease transcriptomic signatures.
 
     Scores each drug against disease signatures using its PharmGKB genes and
     BindingDB targets. For unprofiled drugs, imputes disease context via Morgan
     ECFP chemical similarity. Sets `is_geo_active = True` for profiled nodes.
+    Supports keyword aliases: master_nodes_csv, geo_dir, output_csv, max_genes.
     """
+    if master_nodes_path is None:
+        master_nodes_path = kwargs.get('master_nodes_csv')
+    if master_nodes_path is None:
+        raise ValueError('master_nodes_path (or master_nodes_csv) must be provided')
+
+    if geo_dir_or_signatures is None:
+        geo_dir_or_signatures = kwargs.get('geo_dir')
+    if geo_dir_or_signatures is None:
+        raise ValueError('geo_dir_or_signatures (or geo_dir) must be provided')
+
+    if output_path is None:
+        output_path = kwargs.get('output_csv')
+
+    max_genes = kwargs.get('max_genes', max_genes)
+
     nodes_p = Path(master_nodes_path)
     if not nodes_p.is_file():
         raise FileNotFoundError(f'Master nodes file not found: {nodes_p}')
@@ -224,7 +242,7 @@ def update_master_nodes_with_geo(
     if isinstance(geo_dir_or_signatures, dict):
         disease_signatures = geo_dir_or_signatures
     elif Path(geo_dir_or_signatures).is_dir():
-        disease_signatures = parse_geo_directory(geo_dir_or_signatures)
+        disease_signatures = parse_geo_directory(geo_dir_or_signatures, max_genes_per_disease=max_genes)
     else:
         raise ValueError(f'Invalid GEO source: {geo_dir_or_signatures}')
 
