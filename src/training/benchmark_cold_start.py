@@ -93,7 +93,7 @@ def evaluate_loader(
         'auroc': float(roc_auc_score(targets, scores)),
         'auprc': float(average_precision_score(targets, scores)),
         'f1': float(f1_score(targets, preds, zero_division=0)),
-        'mcc': float(matthews_corrcoef(targets, preds)),
+        'mcc': matthews_corrcoef(targets, preds),
         'brier': float(brier_score_loss(targets, scores)),
     }
 
@@ -185,7 +185,7 @@ def train_benchmark_model(
         print(f"  Epoch {epoch}/{epochs} ({ep_duration:.2f}s) - Loss: {total_loss/max(n_batches,1):.4f} - Val AUROC: {val_metrics['auroc']:.4f}")
 
     total_training_time = time.perf_counter() - start_time
-    peak_memory_mb = float(torch.cuda.max_memory_allocated(device) / (1024 * 1024)) if device.type == 'cuda' else 0.0
+    peak_memory_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024) if device.type == 'cuda' else 0.0
 
     # Evaluate across all test splits
     results = {
