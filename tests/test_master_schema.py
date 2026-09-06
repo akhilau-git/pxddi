@@ -1,5 +1,6 @@
 import tempfile
 from pathlib import Path
+import pandas as pd
 import pytest
 
 from src.data_prep.master_schema import (
@@ -175,4 +176,50 @@ def test_build_unified_graph_pipeline(tmp_path):
     assert (out_dir / "master_drug_nodes.csv").is_file()
     assert (out_dir / "master_ddi_edges.csv").is_file()
     assert (out_dir / "gene_vocabulary.json").is_file()
+
+
+def test_expanded_pharmgkb_bridge(tmp_path):
+    from src.data_prep.expanded_pharmgkb_bridge import build_expanded_pharmgkb_profiles
+
+    smi_a = "CC(=O)Oc1ccccc1C(=O)O"  # Aspirin
+    smi_b = "Cn1c(=O)c2c(ncn2C)n(C)c1=O"  # Caffeine
+
+    edges_csv = tmp_path / "twosides_edges.csv"
+    pd.DataFrame({"source": [smi_a], "target": [smi_b]}).to_csv(edges_csv, index=False)
+
+    chem_tsv = tmp_path / "chemicals.tsv"
+    pd.DataFrame({
+        "PharmGKB Accession Id": ["PA448443", "PA448444"],
+        "Name": ["Aspirin", "Caffeine"],
+        "Generic Names": ["acetylsalicylic acid", "caffeine"],
+        "Trade Names": ["Bayer", "No-Doz"],
+        "Brand Mixtures": ["", ""],
+        "SMILES": [smi_a, smi_b],
+    }).to_csv(chem_tsv, sep="\t", index=False)
+
+    rel_tsv = tmp_path / "relationships.tsv"
+    pd.DataFrame({
+        "Entity1_id": ["PA448443", "PA448444"],
+        "Entity1_name": ["Aspirin", "Caffeine"],
+        "Entity1_type": ["Chemical", "Chemical"],
+        "Entity2_id": ["GENE1", "GENE2"],
+        "Entity2_name": ["CYP2C9", "CYP1A2"],
+        "Entity2_type": ["Gene", "Gene"],
+    }).to_csv(rel_tsv, sep="\t", index=False)
+
+    out_csv = tmp_path / "expanded_profiles.csv"
+    df_prof, summary = build_expanded_pharmgkb_profiles(
+        twosides_edges_path=edges_csv,
+        pharmgkb_chemicals_path=chem_tsv,
+        pharmgkb_relationships_path=rel_tsv,
+        output_profiles_path=out_csv,
+    )
+
+    assert summary["total_twosides_drugs"] == 2
+    assert summary["drugs_with_gene_profiles"] == 2
+    assert summary["coverage_pct"] == 100.0
+    assert "CYP2C9" in summary["top_10_genes"]
+    assert "CYP1A2" in summary["top_10_genes"]
+    assert out_csv.is_file()
+
 
