@@ -274,6 +274,13 @@ class PxDDIModel(nn.Module):
         gene_mask_b=None,
         clinical_tox_a=None,
         clinical_tox_b=None,
+        clinical_tox_mask_a=None,
+        clinical_tox_mask_b=None,
+        target_a=None,
+        target_b=None,
+        target_mask_a=None,
+        target_mask_b=None,
+        **kwargs,
     ):
         cross_a: torch.Tensor | None = None
         cross_b: torch.Tensor | None = None

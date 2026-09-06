@@ -21,6 +21,12 @@ from rdkit import Chem, rdBase
 
 from .master_schema import DDIEdge, DrugNode, MasterGraphCatalog, canonicalize_smiles, smiles_to_inchikey
 from .pharmgkb_pipeline import normalise_drug_name
+from .bindingdb_pipeline import (
+    parse_bindingdb_directory,
+    extract_top_target_vocabulary,
+    encode_multihot_target_vector,
+    update_master_nodes_with_bindingdb,
+)
 
 DEFAULT_TOP_GENES = 50
 
@@ -56,8 +62,11 @@ def build_unified_graph(
     twosides_edges_path: str | Path,
     pharmgkb_profiles_path: str | Path | None = None,
     faers_bridge_path: str | Path | None = None,
+    bindingdb_profiles_path: str | Path | None = None,
+    bindingdb_dir: str | Path | None = None,
     output_dir: str | Path | None = None,
     top_k_genes: int = DEFAULT_TOP_GENES,
+    top_k_targets: int = 50,
 ) -> tuple[MasterGraphCatalog, dict[str, Any]]:
     """Construct and strictly validate the unified heterogeneous graph."""
     edges_source = Path(twosides_edges_path)
@@ -112,6 +121,30 @@ def build_unified_graph(
                 n_rep = int(row['n_reports']) if pd.notna(row.get('n_reports')) else 0
                 faers_lookup[can] = (score, n_rep)
 
+    # 3.5 Load BindingDB Profiles if available
+    bindingdb_lookup: dict[str, tuple[dict[str, float], list[int]]] = {}
+    target_vocab: list[str] = []
+
+    if bindingdb_dir and Path(bindingdb_dir).is_dir():
+        print(f'Parsing BindingDB from directory: {bindingdb_dir}')
+        df_bdb, bdb_summary = parse_bindingdb_directory(bindingdb_dir, top_k_targets=top_k_targets)
+        for _, row in df_bdb.iterrows():
+            can = canonicalize_smiles(str(row.get('canonical_smiles')))
+            if can:
+                tdict = json.loads(row['targets_dict']) if isinstance(row.get('targets_dict'), str) else {}
+                tvec = json.loads(row['target_vector_multihot']) if isinstance(row.get('target_vector_multihot'), str) else []
+                bindingdb_lookup[can] = (tdict, tvec)
+        target_vocab = bdb_summary.get('top_10_targets', [])
+    elif bindingdb_profiles_path and Path(bindingdb_profiles_path).is_file():
+        print(f'Loading BindingDB profiles from: {bindingdb_profiles_path}')
+        df_bdb = pd.read_csv(bindingdb_profiles_path)
+        for _, row in df_bdb.iterrows():
+            can = canonicalize_smiles(str(row.get('canonical_smiles')))
+            if can:
+                tdict = json.loads(row['targets_dict']) if isinstance(row.get('targets_dict'), str) else {}
+                tvec = json.loads(row['target_vector_multihot']) if isinstance(row.get('target_vector_multihot'), str) else []
+                bindingdb_lookup[can] = (tdict, tvec)
+
     # 4. Construct Master Nodes
     catalog = MasterGraphCatalog()
     unique_canonical_drugs = set(smiles_map.values())
@@ -123,6 +156,10 @@ def build_unified_graph(
         tox_score = faers_data[0] if faers_data else None
         n_reports = faers_data[1] if faers_data else None
 
+        bdb_data = bindingdb_lookup.get(can_smi)
+        bdb_targets = bdb_data[0] if bdb_data else {}
+        is_bdb_active = bool(bdb_data is not None)
+
         node = DrugNode(
             drug_id=can_smi,
             inchikey=ikey,
@@ -130,7 +167,8 @@ def build_unified_graph(
             gene_vector_multihot=gene_vec,
             toxicity_score=tox_score,
             n_faers_reports=n_reports,
-            is_bindingdb_active=False,
+            bindingdb_targets=bdb_targets,
+            is_bindingdb_active=is_bdb_active,
             is_geo_active=False,
         )
         catalog.add_node(node)
@@ -172,6 +210,8 @@ def build_unified_graph(
     print(f'Graph Build Complete: {summary["total_nodes"]} nodes, {summary["total_edges"]} edges.')
     print(f'PharmGKB Gene Coverage: {summary["nodes_with_pharmgkb_genes"]} / {summary["total_nodes"]} ({summary["pharmgkb_coverage_pct"]:.1f}%)')
     print(f'FAERS Toxicity Coverage: {summary["nodes_with_faers_toxicity"]} / {summary["total_nodes"]} ({summary["faers_coverage_pct"]:.1f}%)')
+    if summary.get('nodes_with_bindingdb_targets', 0) > 0:
+        print(f'BindingDB Target Coverage: {summary["nodes_with_bindingdb_targets"]} / {summary["total_nodes"]} ({summary["bindingdb_coverage_pct"]:.1f}%)')
 
     if output_dir:
         nodes_p, edges_p = catalog.export_tables(output_dir)
@@ -180,6 +220,10 @@ def build_unified_graph(
         vocab_path = Path(output_dir) / 'gene_vocabulary.json'
         vocab_path.write_text(json.dumps(gene_vocab, indent=2), encoding='utf-8')
         summary['exported_gene_vocab_path'] = str(vocab_path)
+        if target_vocab:
+            target_vocab_path = Path(output_dir) / 'target_vocabulary.json'
+            target_vocab_path.write_text(json.dumps(target_vocab, indent=2), encoding='utf-8')
+            summary['exported_target_vocab_path'] = str(target_vocab_path)
 
     return catalog, summary
 

@@ -32,20 +32,24 @@ _MORGAN_GEN = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024, i
 class MolecularCache:
     """In-memory cache for all unique drugs in the master graph."""
 
-    def __init__(self, gene_dim: int = 50) -> None:
+    def __init__(self, gene_dim: int = 50, target_dim: int = 50) -> None:
         self.gene_dim = gene_dim
+        self.target_dim = target_dim
         self.graphs: dict[str, Data] = {}
         self.fingerprints: dict[str, torch.Tensor] = {}
         self.gene_vectors: dict[str, torch.Tensor] = {}
         self.gene_masks: dict[str, torch.Tensor] = {}
         self.toxicity_scalars: dict[str, torch.Tensor] = {}
         self.toxicity_masks: dict[str, torch.Tensor] = {}
+        self.target_vectors: dict[str, torch.Tensor] = {}
+        self.target_masks: dict[str, torch.Tensor] = {}
 
     def register_drug(
         self,
         smiles: str,
         gene_vector: list[int] | list[float] | None = None,
         toxicity_score: float | None = None,
+        target_vector: list[int] | list[float] | None = None,
     ) -> bool:
         """Parse and cache a single drug's multi-modal representations."""
         if smiles in self.graphs:
@@ -87,6 +91,14 @@ class MolecularCache:
             self.toxicity_scalars[smiles] = torch.tensor(0.0, dtype=torch.float32)
             self.toxicity_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
 
+        # BindingDB Target Vector (Multi-Hot / Affinity)
+        if target_vector and len(target_vector) == self.target_dim:
+            self.target_vectors[smiles] = torch.tensor(target_vector, dtype=torch.float32)
+            self.target_masks[smiles] = torch.tensor(1.0, dtype=torch.float32)
+        else:
+            self.target_vectors[smiles] = torch.zeros(self.target_dim, dtype=torch.float32)
+            self.target_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
+
         return True
 
     def populate_from_master_nodes(self, master_nodes_path: str | Path) -> int:
@@ -110,9 +122,20 @@ class MolecularCache:
             tox = row.get('toxicity_score', None)
             tox_score = float(tox) if (pd.notna(tox) and tox is not None) else None
 
-            if self.register_drug(smi, gene_vector=gene_vec, toxicity_score=tox_score):
+            # Extract BindingDB target vector if serialized
+            target_vec = None
+            for col_cand in ['bindingdb_target_vector', 'target_vector_multihot', 'target_vector']:
+                if col_cand in row and pd.notna(row[col_cand]):
+                    val = row[col_cand]
+                    try:
+                        target_vec = json.loads(val) if isinstance(val, str) else list(val)
+                        break
+                    except Exception:
+                        pass
+
+            if self.register_drug(smi, gene_vector=gene_vec, toxicity_score=tox_score, target_vector=target_vec):
                 count += 1
-        print(f'MolecularCache populated: {count} drugs cached with graphs, ECFP, genes, and toxicity.')
+        print(f'MolecularCache populated: {count} drugs cached with graphs, ECFP, genes, toxicity, and targets.')
         return count
 
 
@@ -171,6 +194,10 @@ class CachedDDIPairDataset(Dataset):
             'tox_b': self.cache.toxicity_scalars[sb],
             'tox_mask_a': self.cache.toxicity_masks[sa],
             'tox_mask_b': self.cache.toxicity_masks[sb],
+            'target_a': self.cache.target_vectors.get(sa, torch.zeros(self.cache.target_dim, dtype=torch.float32)),
+            'target_b': self.cache.target_vectors.get(sb, torch.zeros(self.cache.target_dim, dtype=torch.float32)),
+            'target_mask_a': self.cache.target_masks.get(sa, torch.tensor(0.0, dtype=torch.float32)),
+            'target_mask_b': self.cache.target_masks.get(sb, torch.tensor(0.0, dtype=torch.float32)),
             'label': torch.tensor(lbl, dtype=torch.float32),
         }
 
@@ -193,6 +220,10 @@ def multimodal_collate_fn(batch_items: list[dict[str, Any]]) -> dict[str, Any]:
         'tox_b': torch.stack([item['tox_b'] for item in batch_items]),
         'tox_mask_a': torch.stack([item['tox_mask_a'] for item in batch_items]),
         'tox_mask_b': torch.stack([item['tox_mask_b'] for item in batch_items]),
+        'target_a': torch.stack([item['target_a'] for item in batch_items]),
+        'target_b': torch.stack([item['target_b'] for item in batch_items]),
+        'target_mask_a': torch.stack([item['target_mask_a'] for item in batch_items]),
+        'target_mask_b': torch.stack([item['target_mask_b'] for item in batch_items]),
         'labels': torch.stack([item['label'] for item in batch_items]),
     }
 

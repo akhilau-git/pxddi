@@ -95,6 +95,7 @@ class DrugNode:
         res['source_ids_json'] = json.dumps(self.source_ids)
         res['gene_symbols_json'] = json.dumps(self.gene_symbols)
         res['gene_vector_json'] = json.dumps(self.gene_vector_multihot)
+        res['bindingdb_targets_json'] = json.dumps(self.bindingdb_targets)
         return res
 
 
@@ -152,13 +153,14 @@ class MasterGraphCatalog:
         if edge.drug_b_id not in self.nodes:
             raise KeyError(f'drug_b_id {edge.drug_b_id} not registered in graph nodes.')
         self.edges.append(edge)
-
     def summary(self) -> dict[str, Any]:
         """Return diagnostic metrics of the catalog."""
         n_nodes = len(self.nodes)
         n_edges = len(self.edges)
         nodes_with_genes = sum(1 for n in self.nodes.values() if n.gene_symbols)
         nodes_with_tox = sum(1 for n in self.nodes.values() if n.toxicity_score is not None)
+        nodes_with_bindingdb = sum(1 for n in self.nodes.values() if (n.is_bindingdb_active or n.bindingdb_targets))
+        bindingdb_status = 'active' if nodes_with_bindingdb > 0 else 'inactive_expansion_module'
         return {
             'total_nodes': n_nodes,
             'total_edges': n_edges,
@@ -166,7 +168,9 @@ class MasterGraphCatalog:
             'pharmgkb_coverage_pct': (nodes_with_genes / n_nodes * 100.0) if n_nodes else 0.0,
             'nodes_with_faers_toxicity': nodes_with_tox,
             'faers_coverage_pct': (nodes_with_tox / n_nodes * 100.0) if n_nodes else 0.0,
-            'bindingdb_module_status': 'inactive_expansion_module',
+            'nodes_with_bindingdb_targets': nodes_with_bindingdb,
+            'bindingdb_coverage_pct': (nodes_with_bindingdb / n_nodes * 100.0) if n_nodes else 0.0,
+            'bindingdb_module_status': bindingdb_status,
             'geo_module_status': 'inactive_expansion_module',
         }
 
