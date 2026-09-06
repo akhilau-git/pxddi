@@ -340,7 +340,7 @@ def _sample_partition_negatives(
                 'Cannot draw negatives for a non-empty split with fewer than two eligible drugs.'
             )
     else:
-        if len(eligible_drugs) < 1 or len(eligible_drugs_b) < 1:
+        if eligible_drugs_b is None or len(eligible_drugs) < 1 or len(eligible_drugs_b) < 1:
             raise ValueError(
                 'Cannot draw bipartite negatives with empty drug candidate set.'
             )
@@ -504,9 +504,9 @@ def create_split_aware_binary_splits(
         )
         splits[name] = combined.sample(frac=1, random_state=seed + position + 1).reset_index(drop=True)
         per_split[name] = {
-            'reported_positive_pairs': int(len(positive_split)),
+            'reported_positive_pairs': len(positive_split),
             **negative_audit,
-            'total_rows': int(len(splits[name])),
+            'total_rows': len(splits[name]),
         }
     audit: dict[str, Any] = {
         'protocol': 'split_aware_unreported_sampling_v1',
@@ -514,13 +514,13 @@ def create_split_aware_binary_splits(
         'negative_sampling_strategy': negative_sampling_strategy,
         'negative_ratio': neg_ratio,
         'split_seed': seed,
-        'known_reported_positive_pairs_forbidden': int(len(known_keys)),
-        'selected_reported_positive_pairs': int(len(selected_keys)),
-        'unique_sampled_negative_pairs': int(len(used_negative_keys)),
+        'known_reported_positive_pairs_forbidden': len(known_keys),
+        'selected_reported_positive_pairs': len(selected_keys),
+        'unique_sampled_negative_pairs': len(used_negative_keys),
         'identity_groups': {
-            'seen_drugs': int(len(groups['seen'])),
-            's1_dev_holdout_drugs': int(len(groups['s1_dev'])),
-            's1_test_holdout_drugs': int(len(groups['s1_test'])),
+            'seen_drugs': len(groups['seen']),
+            's1_dev_holdout_drugs': len(groups['s1_dev']),
+            's1_test_holdout_drugs': len(groups['s1_test']),
             'seen_drugs_sha256': _stable_string_set_hash(groups['seen']),
             's1_dev_holdout_drugs_sha256': _stable_string_set_hash(groups['s1_dev']),
             's1_test_holdout_drugs_sha256': _stable_string_set_hash(groups['s1_test']),

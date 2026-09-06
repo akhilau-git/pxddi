@@ -124,15 +124,17 @@ def build_expanded_pharmgkb_profiles(
 
         # Scenario 1: Entity 1 is Chemical, Entity 2 is Gene
         if e1_type == 'Chemical' and e2_type == 'Gene':
-            matched_can = accession_to_twosides.get(e1_id) or name_to_twosides.get(normalise_drug_name(e1_name))
+            norm1 = normalise_drug_name(e1_name)
+            matched_can = accession_to_twosides.get(e1_id) or (name_to_twosides.get(norm1) if norm1 is not None else None)
             gene_name = e2_name
         # Scenario 2: Entity 2 is Chemical, Entity 1 is Gene
         elif e2_type == 'Chemical' and e1_type == 'Gene':
-            matched_can = accession_to_twosides.get(e2_id) or name_to_twosides.get(normalise_drug_name(e2_name))
+            norm2 = normalise_drug_name(e2_name)
+            matched_can = accession_to_twosides.get(e2_id) or (name_to_twosides.get(norm2) if norm2 is not None else None)
             gene_name = e1_name
 
         if matched_can and gene_name and pd.notna(gene_name):
-            clean_gene = str(gene_name).strip().upper()
+            clean_gene = gene_name.strip().upper()
             if clean_gene and clean_gene not in {'', 'NAN', 'NONE', 'NULL'}:
                 drug_genes[matched_can].add(clean_gene)
                 evidence_count[matched_can] += 1
