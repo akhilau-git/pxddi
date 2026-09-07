@@ -371,7 +371,7 @@ def train_extended_multimodal(
             # Multi-Dataset Biological Contrastive Alignment Loss (PharmGKB, BindingDB, GEO, FAERS)
             if is_multimodal and hasattr(model, 'encoder'):
                 try:
-                    bio_sims = []
+                    batch_size_cur = da.num_graphs if hasattr(da, 'num_graphs') else da.x.size(0)
 
                     # 1. PharmGKB CYP Enzymes & Transporters
                     if 'gene_a' in batch and 'gene_b' in batch:
@@ -408,6 +408,14 @@ def train_extended_multimodal(
                         if toxmask.any():
                             tox_sim = (1.0 - torch.abs(toxa - toxb).clamp(0.0, 1.0))
                             bio_sims.append((tox_sim, toxmask, 0.5))
+
+                    # 5. PubChem ECFP Morgan Structural Proximity
+                    if 'fp_a' in batch and 'fp_b' in batch:
+                        fpa = batch['fp_a'].to(device).float()
+                        fpb = batch['fp_b'].to(device).float()
+                        fp_sim = F.cosine_similarity(fpa, fpb, dim=-1).clamp(0.0, 1.0)
+                        fp_mask = torch.ones(batch_size_cur, dtype=torch.bool, device=device)
+                        bio_sims.append((fp_sim, fp_mask, 0.4))
 
                     if bio_sims:
                         batch_size_cur = da.num_graphs if hasattr(da, 'num_graphs') else da.x.size(0)
