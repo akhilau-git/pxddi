@@ -269,7 +269,7 @@ def train_extended_multimodal(
     in_channels = sample_batch['drug_a'].x.size(1)
     edge_dim = sample_batch['drug_a'].edge_attr.size(1)
 
-    hidden_dim = 64
+    hidden_dim = 128
     if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
         try:
             bundle_meta = torch.load(chembl_pretrained_path, map_location='cpu', weights_only=False)
