@@ -183,9 +183,10 @@ def build_expanded_pharmgkb_profiles(
 
 
 def update_master_nodes_with_pharmgkb_faers_analogs(
-    master_nodes_csv: str | Path,
+    master_nodes_csv: str | Path | None = None,
     output_path: str | Path | None = None,
     similarity_threshold: float = 0.70,
+    **kwargs: Any,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Ensure 100% PharmGKB and FAERS feature coverage via chemical analog imputation.
 
@@ -193,6 +194,14 @@ def update_master_nodes_with_pharmgkb_faers_analogs(
     the nearest profiled chemical analog via Morgan ECFP fingerprints and Tanimoto similarity,
     transferring its pharmacogenomic and clinical toxicity profiles.
     """
+    if master_nodes_csv is None:
+        master_nodes_csv = kwargs.get('master_nodes_path')
+    if master_nodes_csv is None:
+        raise ValueError('master_nodes_csv (or master_nodes_path) must be provided')
+
+    if output_path is None:
+        output_path = kwargs.get('output_csv')
+
     nodes_p = Path(master_nodes_csv)
     if not nodes_p.is_file():
         raise FileNotFoundError(f"Master nodes CSV not found: {nodes_p}")
