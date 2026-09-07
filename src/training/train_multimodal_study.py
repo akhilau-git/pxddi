@@ -417,6 +417,15 @@ def train_extended_multimodal(
                         fp_mask = torch.ones(batch_size_cur, dtype=torch.bool, device=device)
                         bio_sims.append((fp_sim, fp_mask, 0.4))
 
+                    # 6. PDB 3D Macromolecular Co-Crystal & Target Proximity
+                    if 'pdb_a' in batch and 'pdb_b' in batch:
+                        pdba = batch['pdb_a'].to(device).float()
+                        pdbb = batch['pdb_b'].to(device).float()
+                        pdbmask = (batch['pdb_mask_a'].to(device) > 0.5) & (batch['pdb_mask_b'].to(device) > 0.5)
+                        if pdbmask.any():
+                            pdb_sim = F.cosine_similarity(pdba, pdbb, dim=-1).clamp(0.0, 1.0)
+                            bio_sims.append((pdb_sim, pdbmask, 0.7))
+
                     if bio_sims:
                         batch_size_cur = da.num_graphs if hasattr(da, 'num_graphs') else da.x.size(0)
                         composite_bio = torch.zeros(batch_size_cur, device=device)
@@ -954,6 +963,29 @@ def run_full_multimodal_study(
     print(f"Splits Dir   : {splits_p}")
     print(f"Output Dir   : {out_p}")
     print("=" * 80)
+
+    # Auto-enrich master nodes with PDB, BindingDB, and GEO if raw folders exist
+    for mod_name, dir_key, col_names, enrich_fn in [
+        ('BindingDB', 'bindingdb_dir', ['bindingdb_target_vector', 'target_vector_multihot'], 'src.data_prep.bindingdb_pipeline.update_master_nodes_with_bindingdb'),
+        ('GEO', 'geo_dir', ['geo_signature_vector', 'geo_vector'], 'src.data_prep.geo_pipeline.update_master_nodes_with_geo'),
+        ('PDB', 'pdb_dir', ['pdb_vector_multihot', 'pdb_vector'], 'src.data_prep.pdb_pipeline.update_master_nodes_with_pdb'),
+    ]:
+        cand_dir = (
+            kwargs.pop(dir_key, None)
+            or (Path(master_nodes_path).resolve().parent.parent / mod_name.lower())
+            or (Path(master_nodes_path).resolve().parent / mod_name.lower())
+        )
+        if cand_dir and Path(cand_dir).is_dir():
+            try:
+                sample_df = pd.read_csv(master_nodes_path, nrows=2)
+                if not any(c in sample_df.columns for c in col_names):
+                    mod_path, fn_name = enrich_fn.rsplit('.', 1)
+                    module = __import__(mod_path, fromlist=[fn_name])
+                    fn = getattr(module, fn_name)
+                    print(f"Auto-enriching master nodes with {mod_name} from: {cand_dir}")
+                    fn(master_nodes_path, cand_dir)
+            except Exception as enrich_err:
+                print(f"{mod_name} auto-enrichment notice: {enrich_err}")
 
     # 1. Populate Cache
     cache = MolecularCache(gene_dim=50)

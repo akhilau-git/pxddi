@@ -32,10 +32,11 @@ _MORGAN_GEN = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024, i
 class MolecularCache:
     """In-memory cache for all unique drugs in the master graph."""
 
-    def __init__(self, gene_dim: int = 50, target_dim: int = 50, geo_dim: int = 2) -> None:
+    def __init__(self, gene_dim: int = 50, target_dim: int = 50, geo_dim: int = 2, pdb_dim: int = 50) -> None:
         self.gene_dim = gene_dim
         self.target_dim = target_dim
         self.geo_dim = geo_dim
+        self.pdb_dim = pdb_dim
         self.graphs: dict[str, Data] = {}
         self.fingerprints: dict[str, torch.Tensor] = {}
         self.gene_vectors: dict[str, torch.Tensor] = {}
@@ -46,6 +47,8 @@ class MolecularCache:
         self.target_masks: dict[str, torch.Tensor] = {}
         self.geo_vectors: dict[str, torch.Tensor] = {}
         self.geo_masks: dict[str, torch.Tensor] = {}
+        self.pdb_vectors: dict[str, torch.Tensor] = {}
+        self.pdb_masks: dict[str, torch.Tensor] = {}
 
     def register_drug(
         self,
@@ -54,6 +57,7 @@ class MolecularCache:
         toxicity_score: float | None = None,
         target_vector: list[int] | list[float] | None = None,
         geo_vector: list[float] | None = None,
+        pdb_vector: list[int] | list[float] | None = None,
     ) -> bool:
         """Parse and cache a single drug's multi-modal representations."""
         if smiles in self.graphs:
@@ -129,6 +133,20 @@ class MolecularCache:
             self.geo_vectors[smiles] = torch.zeros(self.geo_dim, dtype=torch.float32)
             self.geo_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
 
+        # PDB 3D Macromolecular Target Vector
+        if pdb_vector and len(pdb_vector) > 0:
+            pdbv = np.array(pdb_vector, dtype=np.float32)
+            if len(pdbv) != self.pdb_dim:
+                padded = np.zeros(self.pdb_dim, dtype=np.float32)
+                l = min(len(pdbv), self.pdb_dim)
+                padded[:l] = pdbv[:l]
+                pdbv = padded
+            self.pdb_vectors[smiles] = torch.tensor(pdbv, dtype=torch.float32)
+            self.pdb_masks[smiles] = torch.tensor(1.0 if np.any(pdbv > 0) else 0.0, dtype=torch.float32)
+        else:
+            self.pdb_vectors[smiles] = torch.zeros(self.pdb_dim, dtype=torch.float32)
+            self.pdb_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
+
         return True
 
     def populate_from_master_nodes(self, master_nodes_path: str | Path) -> int:
@@ -141,6 +159,7 @@ class MolecularCache:
         gene_col_cands = ['gene_vector_multihot', 'gene_vector', 'genes_multihot', 'pharmgkb_gene_vector']
         target_col_cands = ['bindingdb_target_vector', 'target_vector_multihot', 'target_vector', 'bindingdb_vector']
         geo_col_cands = ['geo_signature_vector', 'geo_vector', 'disease_signature_vector', 'geo_signatures_vector']
+        pdb_col_cands = ['pdb_vector_multihot', 'pdb_vector', 'pdb_signature_vector', 'pdb_targets_vector']
         tox_col_cands = ['toxicity_score', 'clinical_toxicity', 'faers_toxicity_score', 'tox_score', 'faers_score']
 
         for c in gene_col_cands:
@@ -177,6 +196,19 @@ class MolecularCache:
                         parsed = json.loads(val) if isinstance(val, str) else list(val)
                         if parsed and len(parsed) > 0:
                             self.geo_dim = len(parsed)
+                            break
+                    except Exception:
+                        pass
+                break
+
+        for c in pdb_col_cands:
+            if c in df_nodes.columns:
+                non_nulls = df_nodes[c].dropna()
+                for val in non_nulls:
+                    try:
+                        parsed = json.loads(val) if isinstance(val, str) else list(val)
+                        if parsed and len(parsed) > 0:
+                            self.pdb_dim = len(parsed)
                             break
                     except Exception:
                         pass
@@ -228,12 +260,24 @@ class MolecularCache:
                     except Exception:
                         pass
 
+            # Extract PDB macromolecular target vector
+            pdb_vec = None
+            for c in pdb_col_cands:
+                if c in row and pd.notna(row[c]):
+                    val = row[c]
+                    try:
+                        pdb_vec = json.loads(val) if isinstance(val, str) else list(val)
+                        break
+                    except Exception:
+                        pass
+
             if self.register_drug(
                 smi,
                 gene_vector=gene_vec,
                 toxicity_score=tox_score,
                 target_vector=target_vec,
                 geo_vector=geo_vec,
+                pdb_vector=pdb_vec,
             ):
                 count += 1
 
@@ -241,12 +285,14 @@ class MolecularCache:
         n_tox = sum(1 for m in self.toxicity_masks.values() if m.item() > 0)
         n_targets = sum(1 for m in self.target_masks.values() if m.item() > 0)
         n_geo = sum(1 for m in self.geo_masks.values() if m.item() > 0)
+        n_pdb = sum(1 for m in self.pdb_masks.values() if m.item() > 0)
 
         print(
             f"MolecularCache populated: {count} drugs cached "
             f"[Graphs: {len(self.graphs)}, ECFP: {len(self.fingerprints)}, "
             f"PharmGKB: {n_genes} (dim={self.gene_dim}), FAERS: {n_tox}, "
-            f"BindingDB: {n_targets} (dim={self.target_dim}), GEO: {n_geo} (dim={self.geo_dim})]"
+            f"BindingDB: {n_targets} (dim={self.target_dim}), GEO: {n_geo} (dim={self.geo_dim}), "
+            f"PDB: {n_pdb} (dim={self.pdb_dim})]"
         )
         return count
 
@@ -326,6 +372,10 @@ class CachedDDIPairDataset(Dataset):
             'geo_b': self.cache.geo_vectors.get(sb, torch.zeros(self.cache.geo_dim, dtype=torch.float32)),
             'geo_mask_a': self.cache.geo_masks.get(sa, torch.tensor(0.0, dtype=torch.float32)),
             'geo_mask_b': self.cache.geo_masks.get(sb, torch.tensor(0.0, dtype=torch.float32)),
+            'pdb_a': self.cache.pdb_vectors.get(sa, torch.zeros(self.cache.pdb_dim, dtype=torch.float32)),
+            'pdb_b': self.cache.pdb_vectors.get(sb, torch.zeros(self.cache.pdb_dim, dtype=torch.float32)),
+            'pdb_mask_a': self.cache.pdb_masks.get(sa, torch.tensor(0.0, dtype=torch.float32)),
+            'pdb_mask_b': self.cache.pdb_masks.get(sb, torch.tensor(0.0, dtype=torch.float32)),
             'label': torch.tensor(lbl, dtype=torch.float32),
         }
         if self.memory_features and index < len(self.memory_features):
@@ -361,6 +411,10 @@ def multimodal_collate_fn(batch_items: list[dict[str, Any]]) -> dict[str, Any]:
         'geo_b': torch.stack([item['geo_b'] for item in batch_items]),
         'geo_mask_a': torch.stack([item['geo_mask_a'] for item in batch_items]),
         'geo_mask_b': torch.stack([item['geo_mask_b'] for item in batch_items]),
+        'pdb_a': torch.stack([item['pdb_a'] for item in batch_items]),
+        'pdb_b': torch.stack([item['pdb_b'] for item in batch_items]),
+        'pdb_mask_a': torch.stack([item['pdb_mask_a'] for item in batch_items]),
+        'pdb_mask_b': torch.stack([item['pdb_mask_b'] for item in batch_items]),
         'labels': torch.stack([item['label'] for item in batch_items]),
     }
     if 'memory_features' in batch_items[0]:
