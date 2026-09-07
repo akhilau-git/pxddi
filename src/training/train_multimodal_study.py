@@ -195,8 +195,8 @@ def train_extended_multimodal(
     use_target_encoder: bool = False,
     use_neighbor_memory: bool = False,
     select_best_by: str = 's1',
-    pos_weight: float = 2.0,
-    use_ssl: bool = True,
+    pos_weight: float = 1.0,
+    use_ssl: bool = False,
     ssl_weight: float = 0.2,
     ssl_pairs_count: int = 5000,
 ) -> tuple[PxDDIModel, pd.DataFrame, dict[str, Any]]:
@@ -539,8 +539,8 @@ def run_modality_ablation_study(
     chembl_pretrained_path: str | Path | None = None,
     use_neighbor_memory: bool = True,
     select_best_by: str = 's1',
-    pos_weight: float = 2.0,
-    use_ssl: bool = True,
+    pos_weight: float = 1.0,
+    use_ssl: bool = False,
 ) -> pd.DataFrame:
     """Systematically run all 4 modality ablation variants and report deltas."""
     if device is None:
@@ -831,8 +831,8 @@ def run_full_multimodal_study(
     run_ablation: bool = kwargs.pop('run_ablation', True)
     run_error_analysis: bool = kwargs.pop('run_error_analysis', True)
     calibrate: bool = kwargs.pop('calibrate', True)
-    pos_weight: float = float(kwargs.pop('pos_weight', 2.0))
-    use_ssl: bool = bool(kwargs.pop('use_ssl', True))
+    pos_weight: float = float(kwargs.pop('pos_weight', 1.0))
+    use_ssl: bool = bool(kwargs.pop('use_ssl', False))
     ssl_weight: float = float(kwargs.pop('ssl_weight', 0.2))
 
     if output_dir is None:
@@ -855,19 +855,7 @@ def run_full_multimodal_study(
     print(f"Output Dir   : {out_p}")
     print("=" * 80)
 
-    # 1. Ensure 100% PharmGKB and FAERS coverage via chemical analog imputation
-    try:
-        from src.data_prep.expanded_pharmgkb_bridge import update_master_nodes_with_pharmgkb_faers_analogs
-        df_check = pd.read_csv(master_nodes_path)
-        needs_genes = ('gene_vector_multihot' not in df_check.columns) or df_check['gene_vector_multihot'].isna().any()
-        needs_tox = ('toxicity_score' not in df_check.columns) or df_check['toxicity_score'].isna().any()
-        if needs_genes or needs_tox:
-            print("Synchronizing missing PharmGKB/FAERS features via chemical analog imputation...")
-            update_master_nodes_with_pharmgkb_faers_analogs(master_nodes_path, output_path=master_nodes_path)
-    except Exception as e:
-        print(f"Notice: Auto-imputation check: {e}")
-
-    # 2. Populate Cache
+    # 1. Populate Cache
     cache = MolecularCache(gene_dim=50)
     cache.populate_from_master_nodes(master_nodes_path)
 

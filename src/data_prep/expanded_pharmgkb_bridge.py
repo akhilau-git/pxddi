@@ -284,7 +284,7 @@ def update_master_nodes_with_pharmgkb_faers_analogs(
     print(f"Initial PharmGKB Coverage: {initial_genes_count} / {len(df_nodes)} ({initial_genes_count/len(df_nodes)*100:.1f}%)")
     print(f"Initial FAERS Toxicity Coverage: {initial_tox_count} / {len(df_nodes)} ({initial_tox_count/len(df_nodes)*100:.1f}%)")
 
-    # 2. Impute missing PharmGKB genes
+    # 2. Impute missing PharmGKB genes ONLY for true chemical analogs
     imputed_genes_count = 0
     for idx in unprofiled_gene_indices:
         smi = canonicalize_smiles(str(df_nodes.at[idx, node_id_col]))
@@ -293,18 +293,20 @@ def update_master_nodes_with_pharmgkb_faers_analogs(
             fp = _MORGAN_GEN.GetFingerprint(mol)
             sims = DataStructs.BulkTanimotoSimilarity(fp, profiled_gene_fps)
             max_idx = int(np.argmax(sims))
-            inherited_genes = profiled_gene_symbols[max_idx]
-            inherited_vec = profiled_gene_vecs[max_idx]
-            df_nodes.at[idx, 'gene_symbols'] = str(inherited_genes)
-            if 'gene_symbols_json' in df_nodes.columns:
-                df_nodes.at[idx, 'gene_symbols_json'] = json.dumps(inherited_genes)
-            if inherited_vec:
-                df_nodes.at[idx, 'gene_vector_multihot'] = json.dumps(inherited_vec)
-                if 'gene_vector_json' in df_nodes.columns:
-                    df_nodes.at[idx, 'gene_vector_json'] = json.dumps(inherited_vec)
-            imputed_genes_count += 1
+            max_sim = float(sims[max_idx])
+            if max_sim >= similarity_threshold:
+                inherited_genes = profiled_gene_symbols[max_idx]
+                inherited_vec = profiled_gene_vecs[max_idx]
+                df_nodes.at[idx, 'gene_symbols'] = str(inherited_genes)
+                if 'gene_symbols_json' in df_nodes.columns:
+                    df_nodes.at[idx, 'gene_symbols_json'] = json.dumps(inherited_genes)
+                if inherited_vec:
+                    df_nodes.at[idx, 'gene_vector_multihot'] = json.dumps(inherited_vec)
+                    if 'gene_vector_json' in df_nodes.columns:
+                        df_nodes.at[idx, 'gene_vector_json'] = json.dumps(inherited_vec)
+                imputed_genes_count += 1
 
-    # 3. Impute missing FAERS toxicity
+    # 3. Impute missing FAERS toxicity ONLY for true chemical analogs
     imputed_tox_count = 0
     for idx in unprofiled_tox_indices:
         smi = canonicalize_smiles(str(df_nodes.at[idx, node_id_col]))
@@ -314,17 +316,18 @@ def update_master_nodes_with_pharmgkb_faers_analogs(
             sims = DataStructs.BulkTanimotoSimilarity(fp, profiled_tox_fps)
             top_k_indices = np.argsort(sims)[::-1][:3]
             top_sims = [float(sims[i]) for i in top_k_indices]
-            weights = np.array(top_sims)
-            if weights.sum() > 0:
-                weights = weights / weights.sum()
-                imputed_tox = float(np.sum(weights * np.array([profiled_tox_scores[i] for i in top_k_indices])))
-            else:
-                imputed_tox = float(profiled_tox_scores[top_k_indices[0]])
-            imputed_rep = int(np.mean([profiled_tox_reports[i] for i in top_k_indices]))
+            if top_sims[0] >= similarity_threshold:
+                weights = np.array(top_sims)
+                if weights.sum() > 0:
+                    weights = weights / weights.sum()
+                    imputed_tox = float(np.sum(weights * np.array([profiled_tox_scores[i] for i in top_k_indices])))
+                else:
+                    imputed_tox = float(profiled_tox_scores[top_k_indices[0]])
+                imputed_rep = int(np.mean([profiled_tox_reports[i] for i in top_k_indices]))
 
-            df_nodes.at[idx, 'toxicity_score'] = round(imputed_tox, 4)
-            df_nodes.at[idx, 'n_faers_reports'] = imputed_rep
-            imputed_tox_count += 1
+                df_nodes.at[idx, 'toxicity_score'] = round(imputed_tox, 4)
+                df_nodes.at[idx, 'n_faers_reports'] = imputed_rep
+                imputed_tox_count += 1
 
     target_out = Path(output_path) if output_path else nodes_p
     target_out.parent.mkdir(parents=True, exist_ok=True)
