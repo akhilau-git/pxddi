@@ -78,8 +78,16 @@ def build_toxicity_labels(
     """
     from pathlib import Path
     base = Path(faers_base_path)
-    drug_files = sorted(list(base.glob('*[Dd][Rr][Uu][Gg]*.txt')) + list(base.glob('*[Dd][Rr][Uu][Gg]*.TXT')))
-    outc_files = sorted(list(base.glob('*[Oo][Uu][Tt][Cc]*.txt')) + list(base.glob('*[Oo][Uu][Tt][Cc]*.TXT')))
+    drug_files = sorted(
+        [f for f in (list(base.glob('**/*[Dd][Rr][Uu][Gg]*.txt')) + list(base.glob('**/*[Dd][Rr][Uu][Gg]*.TXT'))) if f.is_file() and f.suffix.lower() == '.txt']
+    )
+    outc_files = sorted(
+        [f for f in (list(base.glob('**/*[Oo][Uu][Tt][Cc]*.txt')) + list(base.glob('**/*[Oo][Uu][Tt][Cc]*.TXT'))) if f.is_file() and f.suffix.lower() == '.txt']
+    )
+    if not drug_files and (base / 'ASCII').is_dir():
+        drug_files = sorted([f for f in (base / 'ASCII').glob('*.txt') if 'drug' in f.name.lower()])
+    if not outc_files and (base / 'ASCII').is_dir():
+        outc_files = sorted([f for f in (base / 'ASCII').glob('*.txt') if 'outc' in f.name.lower()])
     drug_path = drug_files[0] if drug_files else base / 'DRUG23Q4.txt'
     outc_path = outc_files[0] if outc_files else base / 'OUTC23Q4.txt'
 

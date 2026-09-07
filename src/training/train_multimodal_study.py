@@ -914,6 +914,55 @@ def evaluate_multimodal_calibration(
     return calibration_report
 
 
+def resolve_existing_dir(candidates: list[Path | str | None]) -> Path | None:
+    """Return the first candidate path that exists as a directory, case-insensitively."""
+    for c in candidates:
+        if c is None:
+            continue
+        p = Path(c)
+        if p.is_dir():
+            return p
+    # Case-insensitive search
+    for c in candidates:
+        if c is None:
+            continue
+        p = Path(c)
+        parent = p.parent
+        target_name = p.name.lower()
+        if parent.is_dir():
+            try:
+                for child in parent.iterdir():
+                    if child.is_dir() and child.name.lower() == target_name:
+                        return child
+            except Exception:
+                pass
+    return None
+
+
+def resolve_existing_path(candidates: list[Path | str | None]) -> Path | None:
+    """Return the first candidate path that exists (file or dir), case-insensitively."""
+    for c in candidates:
+        if c is None:
+            continue
+        p = Path(c)
+        if p.exists():
+            return p
+    for c in candidates:
+        if c is None:
+            continue
+        p = Path(c)
+        parent = p.parent
+        target_name = p.name.lower()
+        if parent.is_dir():
+            try:
+                for child in parent.iterdir():
+                    if child.name.lower() == target_name:
+                        return child
+            except Exception:
+                pass
+    return None
+
+
 def run_full_multimodal_study(
     master_nodes_path: str | Path | None = None,
     splits_dir: str | Path | None = None,
@@ -958,13 +1007,6 @@ def run_full_multimodal_study(
         **kwargs,
     )
 
-    print("=" * 80)
-    print("STARTING AUDITDDI MULTIMODAL COMPREHENSIVE STUDY")
-    print(f"Master Nodes : {master_nodes_path}")
-    print(f"Splits Dir   : {splits_p}")
-    print(f"Output Dir   : {out_p}")
-    print("=" * 80)
-
     # Resolve candidate dataset roots
     resolved_nodes = Path(master_nodes_path).resolve()
     candidate_data_roots = [
@@ -989,19 +1031,20 @@ def run_full_multimodal_study(
     print(f"Output Dir   : {out_p}")
     print("=" * 80)
 
-    # Auto-enrich master nodes with PDB, BindingDB, GEO, FAERS, and PharmGKB if raw/bridge folders exist
+    # 1. Auto-enrich master nodes with BindingDB, GEO, and PDB using case-insensitive path resolution
     for mod_name, dir_key, col_names, enrich_fn in [
         ('BindingDB', 'bindingdb_dir', ['bindingdb_target_vector', 'target_vector_multihot'], 'src.data_prep.bindingdb_pipeline.update_master_nodes_with_bindingdb'),
         ('GEO', 'geo_dir', ['geo_signature_vector', 'geo_vector'], 'src.data_prep.geo_pipeline.update_master_nodes_with_geo'),
         ('PDB', 'pdb_dir', ['pdb_vector_multihot', 'pdb_vector'], 'src.data_prep.pdb_pipeline.update_master_nodes_with_pdb'),
     ]:
-        cand_dir = (
-            kwargs.pop(dir_key, None)
-            or (data_root / mod_name.lower())
-            or (data_root / mod_name)
-            or (resolved_nodes.parent / mod_name.lower())
-        )
-        if cand_dir and Path(cand_dir).is_dir():
+        cand_dir = resolve_existing_dir([
+            kwargs.pop(dir_key, None),
+            data_root / mod_name,
+            data_root / mod_name.lower(),
+            resolved_nodes.parent / mod_name,
+            resolved_nodes.parent / mod_name.lower(),
+        ])
+        if cand_dir:
             try:
                 sample_df = pd.read_csv(master_nodes_path, nrows=2)
                 if not any(c in sample_df.columns for c in col_names):
@@ -1013,25 +1056,44 @@ def run_full_multimodal_study(
             except Exception as enrich_err:
                 print(f"{mod_name} auto-enrichment notice: {enrich_err}")
 
-    # Auto-synchronize FAERS toxicity bridge if available
-    cand_faers = (
-        kwargs.pop('faers_dir', None)
-        or kwargs.pop('faers_bridge_path', None)
-        or (data_root / 'faers' / 'faers_bridge.csv')
-        or (data_root / 'faers')
-        or (resolved_nodes.parent / 'faers_bridge.csv')
-    )
-    if cand_faers and Path(cand_faers).exists():
+    # 2. Auto-enrich master nodes with FAERS clinical toxicity
+    cand_faers = resolve_existing_path([
+        kwargs.pop('faers_dir', None),
+        kwargs.pop('faers_bridge_path', None),
+        data_root / 'faers' / 'faers_bridge.csv',
+        data_root / 'faers',
+        data_root / 'FAERS',
+        resolved_nodes.parent / 'faers_bridge.csv',
+        resolved_nodes.parent / 'faers',
+    ])
+    if cand_faers:
         try:
             sample_df = pd.read_csv(master_nodes_path, nrows=10)
             if 'toxicity_score' not in sample_df.columns or sample_df['toxicity_score'].dropna().empty:
                 from src.data_prep.build_unified_graph import update_master_nodes_with_faers
-                f_path = cand_faers if Path(cand_faers).is_file() else (Path(cand_faers) / 'faers_bridge.csv')
-                if Path(f_path).is_file():
-                    print(f"Auto-enriching master nodes with FAERS from: {f_path}")
-                    update_master_nodes_with_faers(master_nodes_path, f_path)
+                print(f"Auto-enriching master nodes with FAERS from: {cand_faers}")
+                update_master_nodes_with_faers(master_nodes_path, cand_faers)
         except Exception as faers_err:
             print(f"FAERS auto-enrichment notice: {faers_err}")
+
+    # 3. Auto-enrich master nodes with PharmGKB pharmacogenomic pathways
+    cand_pharmgkb = resolve_existing_dir([
+        kwargs.pop('pharmgkb_dir', None),
+        data_root / 'pharmgkb',
+        data_root / 'PharmGKB',
+        resolved_nodes.parent / 'pharmgkb',
+    ])
+    if cand_pharmgkb:
+        try:
+            sample_df = pd.read_csv(master_nodes_path, nrows=10)
+            if 'gene_vector_multihot' not in sample_df.columns or sample_df['gene_vector_multihot'].dropna().empty:
+                from src.data_prep.pharmgkb_pipeline import update_master_nodes_with_pharmgkb_pathways
+                from src.data_prep.expanded_pharmgkb_bridge import update_master_nodes_with_pharmgkb_faers_analogs
+                print(f"Auto-enriching master nodes with PharmGKB pathways from: {cand_pharmgkb}")
+                update_master_nodes_with_pharmgkb_pathways(master_nodes_path, cand_pharmgkb)
+                update_master_nodes_with_pharmgkb_faers_analogs(master_nodes_path)
+        except Exception as pgkb_err:
+            print(f"PharmGKB auto-enrichment notice: {pgkb_err}")
 
     # 1. Populate Cache
     cache = MolecularCache(gene_dim=50)
@@ -1058,13 +1120,18 @@ def run_full_multimodal_study(
     # Infallible auto-discovery if path not explicitly given or unverified
     if chembl_pretrained_path is None or not Path(chembl_pretrained_path).is_file():
         candidate_dirs = [
+            data_root / 'checkpoints',
+            data_root / 'checkpoints' / 'candidates',
             data_root / 'chembl',
+            data_root / 'pxddi' / 'checkpoints',
+            data_root / 'pxddi' / 'backend' / 'checkpoints',
             data_root / 'pretraining',
             data_root,
             resolved_nodes.parent,
             resolved_nodes.parent.parent,
             Path('/content/drive/MyDrive/pxddi-results/pretraining'),
             Path('/content/drive/MyDrive/pxddi-data/chembl'),
+            Path('/content/drive/MyDrive/pxddi-data/checkpoints'),
             Path('/content/drive/MyDrive/pxddi-data'),
             Path('/content/drive/MyDrive'),
         ]
@@ -1074,6 +1141,8 @@ def run_full_multimodal_study(
                     found = list(cd.glob('**/chembl_pretrained_encoder.pt'))
                     if not found:
                         found = list(cd.glob('**/*chembl*.pt'))
+                    if not found:
+                        found = list(cd.glob('**/*encoder*.pt'))
                     if found:
                         chembl_pretrained_path = found[0]
                         print(f"✅ Auto-discovered ChEMBL Pretrained Checkpoint: {chembl_pretrained_path}")
@@ -1232,4 +1301,3 @@ def run_full_multimodal_study(
 
 # Convenience alias matching external call conventions
 run_full_study = run_full_multimodal_study
-

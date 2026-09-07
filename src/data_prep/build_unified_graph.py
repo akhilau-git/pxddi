@@ -247,25 +247,41 @@ def update_master_nodes_with_faers(
         raise FileNotFoundError(f'Master nodes file not found: {nodes_p}')
 
     bridge_p = Path(faers_bridge_path)
-    if not bridge_p.is_file():
-        raise FileNotFoundError(f'FAERS bridge file not found: {bridge_p}')
-
     df_nodes = pd.read_csv(nodes_p)
-    df_bridge = pd.read_csv(bridge_p)
-
     target_out = Path(output_path) if output_path else nodes_p
 
     # Build lookup map: canonical_smiles -> (toxicity_score, n_reports)
     faers_lookup: dict[str, tuple[float, int]] = {}
-    for _, row in df_bridge.iterrows():
-        raw_smi = row.get('canonical_smiles')
-        if pd.isna(raw_smi):
-            raw_smi = row.get('raw_smiles')
-        can = canonicalize_smiles(str(raw_smi)) if pd.notna(raw_smi) else None
-        if can and pd.notna(row.get('toxicity_score')):
-            score = float(row['toxicity_score'])
+    faers_name_lookup: dict[str, tuple[float, int]] = {}
+
+    if bridge_p.is_file():
+        df_bridge = pd.read_csv(bridge_p)
+        for _, row in df_bridge.iterrows():
+            raw_smi = row.get('canonical_smiles')
+            if pd.isna(raw_smi):
+                raw_smi = row.get('raw_smiles')
+            can = canonicalize_smiles(str(raw_smi)) if pd.notna(raw_smi) else None
+            score = float(row['toxicity_score']) if pd.notna(row.get('toxicity_score')) else None
             n_rep = int(row['n_reports']) if pd.notna(row.get('n_reports')) else 0
-            faers_lookup[can] = (score, n_rep)
+            if can and score is not None:
+                faers_lookup[can] = (score, n_rep)
+            dname = row.get('drugname') or row.get('drug_name')
+            if pd.notna(dname) and score is not None:
+                faers_name_lookup[normalise_drug_name(str(dname)) or str(dname).strip().upper()] = (score, n_rep)
+    elif bridge_p.is_dir():
+        from .faers_pipeline import build_toxicity_labels
+        print(f"Aggregating FAERS toxicity scores directly from directory: {bridge_p}")
+        try:
+            df_tox = build_toxicity_labels(str(bridge_p))
+            for _, row in df_tox.iterrows():
+                nm = normalise_drug_name(str(row['drugname'])) or str(row['drugname']).strip().upper()
+                sc = float(row['toxicity_score'])
+                nr = int(row['n_reports'])
+                faers_name_lookup[nm] = (sc, nr)
+        except Exception as exc:
+            print(f"Notice: could not parse raw FAERS ASCII files ({exc}); skipping live toxicity aggregation.")
+    else:
+        raise FileNotFoundError(f'FAERS path not found: {bridge_p}')
 
     initial_coverage = int((df_nodes['toxicity_score'].notna() & (df_nodes['toxicity_score'] > 0)).sum()) if 'toxicity_score' in df_nodes.columns else 0
 
@@ -277,8 +293,16 @@ def update_master_nodes_with_faers(
 
     for _, row in df_nodes.iterrows():
         can = canonicalize_smiles(str(row[node_id_col]))
+        dname = normalise_drug_name(str(row.get('display_name', ''))) or str(row.get('display_name', '')).strip().upper()
+        
+        found = None
         if can and can in faers_lookup:
-            score, n_rep = faers_lookup[can]
+            found = faers_lookup[can]
+        elif dname and dname in faers_name_lookup:
+            found = faers_name_lookup[dname]
+            
+        if found is not None:
+            score, n_rep = found
             updated_scores.append(score)
             updated_reports.append(n_rep)
         else:

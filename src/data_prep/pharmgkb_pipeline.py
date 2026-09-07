@@ -127,27 +127,67 @@ def load_pathway_chemical_gene_evidence(path: str | Path) -> pd.DataFrame:
             frame = _read_tsv(source)
         except (UnicodeDecodeError, pd.errors.ParserError):
             continue
-        if not {'Drugs', 'Genes'}.issubset(frame.columns):
-            continue
-        for row in frame.to_dict(orient='records'):
-            drugs = _split_multi_value(row.get('Drugs', ''))
-            genes = _split_multi_value(row.get('Genes', ''))
-            for drug_name in drugs:
-                if not normalise_drug_name(drug_name):
-                    continue
-                for gene_symbol in genes:
-                    if not gene_symbol.strip():
+        has_drugs_genes = {'Drugs', 'Genes'}.issubset(frame.columns)
+        if has_drugs_genes:
+            for row in frame.to_dict(orient='records'):
+                drugs = _split_multi_value(row.get('Drugs', ''))
+                genes = _split_multi_value(row.get('Genes', ''))
+                for drug_name in drugs:
+                    if not normalise_drug_name(drug_name):
                         continue
+                    for gene_symbol in genes:
+                        if not gene_symbol.strip():
+                            continue
+                        records.append({
+                            'drug_name': drug_name,
+                            'gene_symbol': gene_symbol.strip(),
+                            'evidence_source': 'pathway_drug_gene',
+                            'source_file': str(source),
+                            'association': '',
+                            'evidence': '',
+                            'pk': '',
+                            'pd': '',
+                            'pmids': str(row.get('PMIDs', '')).strip(),
+                        })
+        else:
+            # Resilient extraction: deduce drug name from pathway filename
+            # e.g. PA166271521-In_Progress_Pyrazinamide_Pathway_Pharmacokinetics.tsv -> Pyrazinamide
+            stem = source.stem
+            clean = re.sub(r'^PA\d+-', '', stem)
+            clean = re.sub(r'^(In_Progress_|In_progress_)', '', clean)
+            clean = re.sub(r'_Pathway_.*$', '', clean, flags=re.IGNORECASE)
+            clean = re.sub(r'_Pathway$', '', clean, flags=re.IGNORECASE)
+            file_drug = clean.replace('_', ' ').strip()
+
+            if file_drug and normalise_drug_name(file_drug):
+                # Search frame for gene symbol columns or cell values
+                gene_cols = [
+                    c for c in frame.columns
+                    if any(k in c.lower() for k in ('gene', 'protein', 'target', 'symbol', 'enzyme', 'from', 'to', 'component'))
+                ]
+                cols_to_check = gene_cols if gene_cols else frame.columns.tolist()
+                found_genes: set[str] = set()
+                gene_pattern = re.compile(r'^[A-Z][A-Z0-9]{1,9}$')
+
+                for col in cols_to_check:
+                    for val in frame[col].dropna():
+                        items = _split_multi_value(str(val))
+                        for item in items:
+                            item_clean = item.strip().upper()
+                            if gene_pattern.match(item_clean) and not item_clean.isdigit():
+                                found_genes.add(item_clean)
+
+                for g in found_genes:
                     records.append({
-                        'drug_name': drug_name,
-                        'gene_symbol': gene_symbol.strip(),
-                        'evidence_source': 'pathway_drug_gene',
+                        'drug_name': file_drug,
+                        'gene_symbol': g,
+                        'evidence_source': 'pathway_filename_gene',
                         'source_file': str(source),
                         'association': '',
                         'evidence': '',
                         'pk': '',
                         'pd': '',
-                        'pmids': str(row.get('PMIDs', '')).strip(),
+                        'pmids': '',
                     })
     return pd.DataFrame(records, columns=EVIDENCE_COLUMNS).drop_duplicates().reset_index(drop=True)
 
@@ -498,3 +538,101 @@ def resolve_pharmgkb_evidence_to_twosides(
         'mapping_policy': 'exact_normalised_name_only_no_fuzzy_matching',
     }
     return resolved, summary
+
+
+def update_master_nodes_with_pharmgkb_pathways(
+    master_nodes_path: str | Path,
+    pharmgkb_dir: str | Path,
+    output_path: str | Path | None = None,
+    top_k_genes: int = 50,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Parse PharmGKB pathway TSVs and enrich master_drug_nodes.csv with CYP/transporter genes."""
+    nodes_p = Path(master_nodes_path)
+    if not nodes_p.is_file():
+        raise FileNotFoundError(f"Master nodes file not found: {nodes_p}")
+    pdir = Path(pharmgkb_dir)
+    if not pdir.is_dir():
+        raise FileNotFoundError(f"PharmGKB directory not found: {pdir}")
+
+    df_evidence = load_pathway_chemical_gene_evidence(pdir)
+    print(f"Extracted {len(df_evidence)} pathway drug-gene evidence rows from {pdir}")
+
+    df_nodes = pd.read_csv(nodes_p)
+    node_id_col = 'canonical_smiles' if 'canonical_smiles' in df_nodes.columns else ('drug_id' if 'drug_id' in df_nodes.columns else df_nodes.columns[0])
+
+    # Build drug name -> genes mapping
+    name_to_genes: dict[str, set[str]] = defaultdict(set)
+    for _, row in df_evidence.iterrows():
+        nm = normalise_drug_name(str(row['drug_name']))
+        gn = str(row['gene_symbol']).strip().upper()
+        if nm and gn:
+            name_to_genes[nm].add(gn)
+
+    # Determine top gene vocabulary
+    gene_counts: Counter[str] = Counter()
+    for genes in name_to_genes.values():
+        for g in genes:
+            gene_counts[g] += 1
+    top_genes = [g for g, _ in gene_counts.most_common(top_k_genes)]
+    if not top_genes:
+        top_genes = [f"GENE_{i}" for i in range(top_k_genes)]
+
+    matched = 0
+    updated_gene_symbols: list[str] = []
+    updated_gene_vectors: list[str] = []
+
+    for _, row in df_nodes.iterrows():
+        dname = str(row.get('display_name', '')).strip()
+        norm_name = normalise_drug_name(dname)
+        existing_vec = row.get('gene_vector_multihot')
+
+        genes: set[str] = set()
+        if norm_name and norm_name in name_to_genes:
+            genes.update(name_to_genes[norm_name])
+
+        # Check synonyms
+        if 'synonyms_json' in row and pd.notna(row['synonyms_json']):
+            try:
+                syns = json.loads(str(row['synonyms_json']))
+                for syn in syns:
+                    nsyn = normalise_drug_name(str(syn))
+                    if nsyn and nsyn in name_to_genes:
+                        genes.update(name_to_genes[nsyn])
+            except Exception:
+                pass
+
+        if genes:
+            matched += 1
+            sorted_genes = sorted(list(genes))
+            vec = [1 if g in genes else 0 for g in top_genes]
+            updated_gene_symbols.append(json.dumps(sorted_genes))
+            updated_gene_vectors.append(json.dumps(vec))
+        else:
+            # Preserve existing if present
+            if pd.notna(existing_vec) and str(existing_vec).startswith('['):
+                updated_gene_symbols.append(str(row.get('gene_symbols', '[]')))
+                updated_gene_vectors.append(str(existing_vec))
+            else:
+                updated_gene_symbols.append('[]')
+                updated_gene_vectors.append(json.dumps([0] * len(top_genes)))
+
+    df_nodes['gene_symbols'] = updated_gene_symbols
+    df_nodes['gene_vector_multihot'] = updated_gene_vectors
+    if 'gene_symbols_json' in df_nodes.columns:
+        df_nodes['gene_symbols_json'] = updated_gene_symbols
+    if 'gene_vector_json' in df_nodes.columns:
+        df_nodes['gene_vector_json'] = updated_gene_vectors
+
+    target_out = Path(output_path) if output_path else nodes_p
+    target_out.parent.mkdir(parents=True, exist_ok=True)
+    df_nodes.to_csv(target_out, index=False)
+
+    summary = {
+        'total_nodes': len(df_nodes),
+        'nodes_with_pathway_genes': matched,
+        'top_gene_vocabulary': top_genes,
+        'coverage_pct': round((matched / max(len(df_nodes), 1)) * 100, 2),
+    }
+    print(f"PharmGKB pathway enrichment complete: {matched}/{len(df_nodes)} nodes annotated with pathway genes.")
+    return df_nodes, summary
+
