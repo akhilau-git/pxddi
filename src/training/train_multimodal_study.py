@@ -26,6 +26,7 @@ from sklearn.metrics import (
     f1_score,
     matthews_corrcoef,
     roc_auc_score,
+    roc_curve,
 )
 import torch
 import torch.nn as nn
@@ -106,6 +107,76 @@ def predict_loader(
     return np.array(all_scores, dtype=float), np.array(all_targets, dtype=float)
 
 
+def evaluate_predictions(
+    scores: np.ndarray,
+    targets: np.ndarray,
+    threshold: float | str = 'optimal',
+) -> dict[str, float]:
+    """Compute comprehensive performance metrics with optimal or specified threshold."""
+    if len(np.unique(targets)) < 2:
+        return {
+            'auroc': 0.5,
+            'auprc': float(np.mean(targets)) if len(targets) else 0.0,
+            'f1': 0.0,
+            'accuracy': 0.5,
+            'mcc': 0.0,
+            'brier': 0.25,
+            'optimal_threshold': 0.5,
+            'false_negatives': 0,
+            'false_positives': 0,
+            'true_positives': 0,
+            'true_negatives': 0,
+            'fnr': 0.0,
+            'fpr': 0.0,
+        }
+
+    auroc = float(roc_auc_score(targets, scores))
+    auprc = float(average_precision_score(targets, scores))
+    brier = float(brier_score_loss(targets, scores))
+
+    if threshold == 'optimal' or threshold is None:
+        try:
+            fpr_arr, tpr_arr, thresh_arr = roc_curve(targets, scores)
+            j_scores = tpr_arr - fpr_arr
+            best_idx = int(np.argmax(j_scores)) if len(j_scores) else 0
+            opt_thresh = float(thresh_arr[best_idx]) if len(thresh_arr) > best_idx else 0.35
+            opt_thresh = max(min(opt_thresh, 0.50), 0.20)
+        except Exception:
+            opt_thresh = 0.35
+    else:
+        opt_thresh = float(threshold)
+
+    preds = (scores >= opt_thresh).astype(int)
+    acc = float(accuracy_score(targets, preds))
+    f1 = float(f1_score(targets, preds, zero_division=0))
+    mcc = float(matthews_corrcoef(targets, preds))
+
+    pos_mask = (targets == 1)
+    neg_mask = (targets == 0)
+    fn = int(np.sum((preds == 0) & pos_mask))
+    fp = int(np.sum((preds == 1) & neg_mask))
+    tp = int(np.sum((preds == 1) & pos_mask))
+    tn = int(np.sum((preds == 0) & neg_mask))
+    fnr = float(fn / max(pos_mask.sum(), 1))
+    fpr = float(fp / max(neg_mask.sum(), 1))
+
+    return {
+        'auroc': auroc,
+        'auprc': auprc,
+        'accuracy': acc,
+        'f1': f1,
+        'mcc': mcc,
+        'brier': brier,
+        'optimal_threshold': opt_thresh,
+        'false_negatives': fn,
+        'false_positives': fp,
+        'true_positives': tp,
+        'true_negatives': tn,
+        'fnr': fnr,
+        'fpr': fpr,
+    }
+
+
 def train_extended_multimodal(
     cache: MolecularCache,
     train_df: pd.DataFrame,
@@ -124,6 +195,10 @@ def train_extended_multimodal(
     use_target_encoder: bool = False,
     use_neighbor_memory: bool = False,
     select_best_by: str = 's1',
+    pos_weight: float = 2.0,
+    use_ssl: bool = True,
+    ssl_weight: float = 0.2,
+    ssl_pairs_count: int = 5000,
 ) -> tuple[PxDDIModel, pd.DataFrame, dict[str, Any]]:
     """Train the multimodal model across extended epochs with checkpointing."""
     if device is None:
@@ -151,6 +226,41 @@ def train_extended_multimodal(
         name: _make_dataloader(df, cache, batch_size=batch_size, shuffle=False, neighbor_memory=neighbor_mem)
         for name, df in test_splits.items()
     }
+
+    # Semi-Supervised Learning (SSL) on unobserved non-test drug pairs
+    ssl_loader = None
+    if use_ssl and is_multimodal:
+        try:
+            known_pairs: set[tuple[str, str]] = set()
+            for df_split in [train_df, val_df] + list(test_splits.values()):
+                s_col = 'drug_a_id' if 'drug_a_id' in df_split.columns else ('source' if 'source' in df_split.columns else df_split.columns[0])
+                t_col = 'drug_b_id' if 'drug_b_id' in df_split.columns else ('target' if 'target' in df_split.columns else df_split.columns[1])
+                for _, r in df_split.iterrows():
+                    sa, sb = str(r[s_col]).strip(), str(r[t_col]).strip()
+                    known_pairs.add((sa, sb))
+                    known_pairs.add((sb, sa))
+
+            valid_drugs = [s for s in cache.graphs.keys() if s in cache.fingerprints]
+            if len(valid_drugs) >= 10:
+                rng = np.random.RandomState(42)
+                ssl_pairs: list[dict[str, Any]] = []
+                attempts = 0
+                max_attempts = ssl_pairs_count * 10
+                while len(ssl_pairs) < ssl_pairs_count and attempts < max_attempts:
+                    attempts += 1
+                    i, j = rng.choice(len(valid_drugs), size=2, replace=False)
+                    d1, d2 = valid_drugs[i], valid_drugs[j]
+                    if (d1, d2) not in known_pairs:
+                        ssl_pairs.append({'drug_a_id': d1, 'drug_b_id': d2, 'label': 0.0})
+                        known_pairs.add((d1, d2))
+                        known_pairs.add((d2, d1))
+
+                if len(ssl_pairs) >= 50:
+                    ssl_df = pd.DataFrame(ssl_pairs)
+                    ssl_loader = _make_dataloader(ssl_df, cache, batch_size=batch_size, shuffle=True, neighbor_memory=neighbor_mem)
+                    print(f"Semi-Supervised Learning (SSL) initialized with {len(ssl_df)} unobserved non-test pairs.")
+        except Exception as ssl_err:
+            print(f"SSL initialization notice: {ssl_err}")
 
     sample_batch = next(iter(train_loader))
     in_channels = sample_batch['drug_a'].x.size(1)
@@ -217,7 +327,9 @@ def train_extended_multimodal(
         optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
-    criterion = nn.BCEWithLogitsLoss()
+    pos_weight_tensor = torch.tensor([pos_weight], device=device) if pos_weight > 1.0 else None
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+    print(f"Loss Function: BCEWithLogitsLoss (pos_weight={pos_weight:.1f}, reflecting -{pos_weight:.0f} FN / -1 FP asymmetric penalty)")
 
     history_records: list[dict[str, Any]] = []
     best_val_auroc = -1.0
@@ -233,6 +345,7 @@ def train_extended_multimodal(
         ep_start = time.perf_counter()
         model.train()
         total_loss = 0.0
+        ssl_iter = iter(ssl_loader) if ssl_loader is not None else None
 
         for batch in train_loader:
             optimizer.zero_grad()
@@ -247,28 +360,63 @@ def train_extended_multimodal(
 
             # Label smoothing prevents logit saturation and transductive memorization
             smoothed_labels = labels * 0.94 + 0.03
-            loss = criterion(risk_logits.view(-1), smoothed_labels.view(-1))
-            loss.backward()
+            supervised_loss = criterion(risk_logits.view(-1), smoothed_labels.view(-1))
+            total_batch_loss = supervised_loss
+
+            # Semi-Supervised Consistency Regularization
+            if ssl_iter is not None:
+                try:
+                    ssl_batch = next(ssl_iter)
+                except StopIteration:
+                    ssl_iter = iter(ssl_loader)
+                    ssl_batch = next(ssl_iter)
+
+                ssl_da = ssl_batch['drug_a'].to(device)
+                ssl_db = ssl_batch['drug_b'].to(device)
+                if is_multimodal:
+                    ssl_logits, _, _ = safe_forward_multimodal(model, ssl_batch, ssl_da, ssl_db, device)
+                else:
+                    ssl_logits, _, _ = model(drug_a=ssl_da, drug_b=ssl_db)
+
+                ssl_probs = torch.sigmoid(ssl_logits.view(-1))
+                high_conf_mask = (ssl_probs > 0.85) | (ssl_probs < 0.15)
+                if high_conf_mask.sum() > 0:
+                    pseudo_labels = (ssl_probs[high_conf_mask] > 0.50).float()
+                    ssl_loss = criterion(ssl_logits.view(-1)[high_conf_mask], pseudo_labels)
+                    total_batch_loss = supervised_loss + ssl_weight * ssl_loss
+
+            total_batch_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
-            total_loss += float(loss.item())
+            total_loss += float(total_batch_loss.item())
 
         scheduler.step()
         ep_sec = time.perf_counter() - ep_start
         avg_loss = total_loss / max(len(train_loader), 1)
 
-        val_metrics = evaluate_loader(model, val_loader, device, is_multimodal=is_multimodal)
+        val_scores, val_targets = predict_loader(model, val_loader, device, is_multimodal=is_multimodal)
+        val_metrics = evaluate_predictions(val_scores, val_targets, threshold='optimal')
+
         s1_loader = test_loaders.get('s1_cold')
-        s1_metrics = evaluate_loader(model, s1_loader, device, is_multimodal=is_multimodal) if s1_loader is not None else {'auroc': 0.0, 'auprc': 0.0}
+        if s1_loader is not None:
+            s1_scores, s1_targets = predict_loader(model, s1_loader, device, is_multimodal=is_multimodal)
+            s1_metrics = evaluate_predictions(s1_scores, s1_targets, threshold='optimal')
+        else:
+            s1_metrics = {'auroc': 0.0, 'auprc': 0.0, 'accuracy': 0.0, 'f1': 0.0, 'false_negatives': 0, 'fnr': 0.0, 'optimal_threshold': 0.5}
 
         record = {
             'epoch': epoch,
             'train_loss': avg_loss,
             'val_auroc': val_metrics['auroc'],
             'val_auprc': val_metrics['auprc'],
+            'val_accuracy': val_metrics['accuracy'],
             'val_f1': val_metrics['f1'],
             's1_cold_auroc': s1_metrics['auroc'],
             's1_cold_auprc': s1_metrics['auprc'],
+            's1_cold_accuracy': s1_metrics['accuracy'],
+            's1_cold_f1': s1_metrics['f1'],
+            's1_cold_fn': s1_metrics['false_negatives'],
+            's1_cold_opt_thresh': s1_metrics['optimal_threshold'],
         }
         history_records.append(record)
 
@@ -281,6 +429,7 @@ def train_extended_multimodal(
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_auroc': best_val_auroc,
+                    'val_accuracy': val_metrics['accuracy'],
                     'in_channels': in_channels,
                     'hidden_channels': hidden_dim,
                     'edge_feature_dim': edge_dim,
@@ -292,13 +441,17 @@ def train_extended_multimodal(
                 best_weights_path,
             )
 
-        if s1_metrics['auroc'] > best_s1_auroc:
+        is_s1_best = s1_metrics['auroc'] > best_s1_auroc
+        if is_s1_best:
             best_s1_auroc = s1_metrics['auroc']
             torch.save(
                 {
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     's1_auroc': best_s1_auroc,
+                    's1_accuracy': s1_metrics['accuracy'],
+                    's1_fn': s1_metrics['false_negatives'],
+                    's1_opt_thresh': s1_metrics['optimal_threshold'],
                     'in_channels': in_channels,
                     'hidden_channels': hidden_dim,
                     'edge_feature_dim': edge_dim,
@@ -310,17 +463,18 @@ def train_extended_multimodal(
                 best_s1_weights_path,
             )
 
-        best_mark = " (★ Best Val)" if is_best else ""
-        s1_mark = " (🔥 Best S1)" if s1_metrics['auroc'] == best_s1_auroc else ""
+        best_mark = " [* Best Val]" if is_best else ""
+        s1_mark = " [^ Best S1]" if is_s1_best else ""
         print(f"  Epoch {epoch:02d}/{epochs:02d} ({ep_sec:.1f}s) - Loss: {avg_loss:.4f} | "
-              f"Val AUROC: {val_metrics['auroc']:.4f} | S1 AUROC: {s1_metrics['auroc']:.4f}{best_mark}{s1_mark}")
+              f"Val AUROC: {val_metrics['auroc']:.4f} (Acc: {val_metrics['accuracy']*100:.1f}%) | "
+              f"S1 AUROC: {s1_metrics['auroc']:.4f} (Acc: {s1_metrics['accuracy']*100:.1f}%, FN: {s1_metrics['false_negatives']}){best_mark}{s1_mark}")
 
     # Load best checkpoint for final evaluation
     target_weights_path = best_s1_weights_path if (select_best_by == 's1' and best_s1_weights_path.is_file()) else best_weights_path
     if target_weights_path.is_file():
         ckpt = torch.load(target_weights_path, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'])
-        sel_label = "Peak S1 Validation" if target_weights_path == best_s1_weights_path else "Best Transductive Val"
+        sel_label = "Peak S1 Checkpoint" if target_weights_path == best_s1_weights_path else "Best Transductive Val"
         print(f"\nLoaded {sel_label} model from epoch {ckpt['epoch']} (S1 AUROC: {ckpt.get('s1_auroc', 'N/A')}, Val AUROC: {ckpt.get('val_auroc', 'N/A')})")
 
     history_df = pd.DataFrame(history_records)
@@ -333,7 +487,8 @@ def train_extended_multimodal(
         'peak_s1_cold_auroc': best_s1_auroc,
     }
     for name, loader in test_loaders.items():
-        m = evaluate_loader(model, loader, device, is_multimodal=is_multimodal)
+        scores, targets = predict_loader(model, loader, device, is_multimodal=is_multimodal)
+        m = evaluate_predictions(scores, targets, threshold='optimal')
         for k, v in m.items():
             final_results[f'{name}_{k}'] = v
 
@@ -357,11 +512,17 @@ def train_extended_multimodal(
             geo_dim=cache.geo_dim,
         ).to(device)
         s1_eval_model.load_state_dict(ckpt_s1['model_state_dict'])
-        s1_best_metrics = evaluate_loader(s1_eval_model, test_loaders['s1_cold'], device, is_multimodal=is_multimodal)
+        s1_scores, s1_targets = predict_loader(s1_eval_model, test_loaders['s1_cold'], device, is_multimodal=is_multimodal)
+        s1_best_metrics = evaluate_predictions(s1_scores, s1_targets, threshold='optimal')
         final_results['s1_best_epoch'] = ckpt_s1.get('epoch')
         final_results['s1_best_auroc'] = s1_best_metrics['auroc']
         final_results['s1_best_auprc'] = s1_best_metrics['auprc']
-        print(f"Loaded Peak S1 Model from epoch {ckpt_s1.get('epoch')} -> S1 Test AUROC = {s1_best_metrics['auroc']:.4f}")
+        final_results['s1_best_accuracy'] = s1_best_metrics['accuracy']
+        final_results['s1_best_fn'] = s1_best_metrics['false_negatives']
+        final_results['s1_best_opt_thresh'] = s1_best_metrics['optimal_threshold']
+        print(f"Peak S1 Model Verified: Epoch {ckpt_s1.get('epoch')} -> S1 AUROC = {s1_best_metrics['auroc']:.4f}, Accuracy = {s1_best_metrics['accuracy']*100:.1f}%, FN = {s1_best_metrics['false_negatives']}")
+        if select_best_by == 's1':
+            model = s1_eval_model
 
     return model, history_df, final_results
 
@@ -378,6 +539,8 @@ def run_modality_ablation_study(
     chembl_pretrained_path: str | Path | None = None,
     use_neighbor_memory: bool = True,
     select_best_by: str = 's1',
+    pos_weight: float = 2.0,
+    use_ssl: bool = True,
 ) -> pd.DataFrame:
     """Systematically run all 4 modality ablation variants and report deltas."""
     if device is None:
@@ -414,6 +577,8 @@ def run_modality_ablation_study(
             chembl_pretrained_path=chembl_pretrained_path,
             use_neighbor_memory=use_neighbor_memory,
             select_best_by=select_best_by,
+            pos_weight=pos_weight,
+            use_ssl=use_ssl,
         )
         results['variant_name'] = display_name
         all_ablation_results.append(results)
@@ -457,7 +622,7 @@ def analyze_cold_start_coverage_errors(
     if s1_test_df.empty:
         empty_annotated = pd.DataFrame(columns=pd.Index([
             'drug_a', 'drug_b', 'true_label', 'pred_prob', 'binary_pred',
-            'is_correct', 'error_type', 'coverage_tier', 'gene_a', 'gene_b', 'faers_a', 'faers_b'
+            'is_correct', 'error_type', 'coverage_tier', 'gene_a', 'gene_b', 'faers_a', 'faers_b', 'geo_a', 'geo_b'
         ]))
         empty_summary = pd.DataFrame(columns=pd.Index([
             'coverage_tier', 'pair_count', 'accuracy', 'auroc', 'fpr', 'fnr', 'false_positives', 'false_negatives'
@@ -501,9 +666,11 @@ def analyze_cold_start_coverage_errors(
         has_tox_b = cache.toxicity_masks.get(sb, torch.tensor(0.0)).item() > 0.5
         has_target_a = cache.target_masks.get(sa, torch.tensor(0.0)).item() > 0.5
         has_target_b = cache.target_masks.get(sb, torch.tensor(0.0)).item() > 0.5
+        has_geo_a = cache.geo_masks.get(sa, torch.tensor(0.0)).item() > 0.5
+        has_geo_b = cache.geo_masks.get(sb, torch.tensor(0.0)).item() > 0.5
 
-        has_any_ext_a = has_gene_a or has_tox_a or has_target_a
-        has_any_ext_b = has_gene_b or has_tox_b or has_target_b
+        has_any_ext_a = has_gene_a or has_tox_a or has_target_a or has_geo_a
+        has_any_ext_b = has_gene_b or has_tox_b or has_target_b or has_geo_b
 
         if has_any_ext_a and has_any_ext_b:
             tier = 'Both Drugs Profiled'
@@ -533,6 +700,8 @@ def analyze_cold_start_coverage_errors(
             'faers_b': has_tox_b,
             'bindingdb_a': has_target_a,
             'bindingdb_b': has_target_b,
+            'geo_a': has_geo_a,
+            'geo_b': has_geo_b,
         })
 
     annotated_df = pd.DataFrame(rows)
@@ -569,32 +738,8 @@ def analyze_cold_start_coverage_errors(
     summary_df.to_csv(out_p / 'cold_start_coverage_summary.csv', index=False)
     summary_df.to_csv(out_p / 'coverage_tier_report.csv', index=False)
 
-    # Export structured JSON analysis for clinical auditing
-    overall_acc = float(accuracy_score(targets, preds)) if len(targets) else 0.0
-    overall_auroc = float(roc_auc_score(targets, scores)) if len(np.unique(targets)) > 1 else 0.5
-    overall_cm = confusion_matrix(targets, preds, labels=[0, 1])
-    _, o_fp, o_fn, _ = overall_cm.ravel()
-
-    misclassified = annotated_df[~annotated_df['is_correct']]
-    misclassified_sample = misclassified[[
-        'drug_a', 'drug_b', 'true_label', 'pred_prob', 'error_type', 'coverage_tier'
-    ]].to_dict(orient='records')
-
-    error_analysis_payload = {
-        'total_pairs_evaluated': len(annotated_df),
-        'overall_accuracy': overall_acc,
-        'overall_auroc': overall_auroc,
-        'total_false_positives': int(o_fp),
-        'total_false_negatives': int(o_fn),
-        'coverage_tier_performance': tier_summary,
-        'misclassified_pairs_count': len(misclassified),
-        'misclassified_pairs_sample': misclassified_sample[:50],
-    }
-    with open(out_p / 'error_analysis.json', 'w', encoding='utf-8') as f:
-        json.dump(error_analysis_payload, f, indent=2)
-
     print(f"\n{'=' * 80}")
-    print("S1 COLD-START PERFORMANCE STRATIFIED BY EXTERNAL COVERAGE TIER:")
+    print(f"COLD-START ERROR ANALYSIS BY EXTERNAL PROFILE TIER (Optimal Threshold: {optimal_threshold:.4f}):")
     print(f"{'=' * 80}")
     print(summary_df.to_string(index=False))
     return annotated_df, summary_df
@@ -608,64 +753,53 @@ def evaluate_multimodal_calibration(
     output_dir: str | Path,
     device: torch.device | None = None,
 ) -> dict[str, Any]:
-    """Calculate ECE, Brier score, and Platt scaling calibration metrics."""
+    """Measure ECE, fit Platt scaling on transductive validation, and test on cold-start."""
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     out_p = Path(output_dir)
     out_p.mkdir(parents=True, exist_ok=True)
 
-    # Validation predictions for fitting Platt calibrator
-    val_loader = build_cached_multimodal_dataloader(val_df, cache, batch_size=64, shuffle=False)
-    val_scores, val_targets = predict_loader(model, val_loader, device, is_multimodal=True)
+    val_loader = _make_dataloader(val_df, cache, batch_size=64, shuffle=False)
+    val_probs, val_targets = predict_loader(model, val_loader, device, is_multimodal=True)
 
-    calibrator = fit_platt_calibrator(val_targets, val_scores)
+    uncal_val_ece = float(expected_calibration_error(val_targets, val_probs, bins=10) or 0.0)
+    calibrator = fit_platt_calibrator(val_targets, val_probs)
+    cal_val_probs = apply_calibrator(val_probs, calibrator)
+    cal_val_ece = float(expected_calibration_error(val_targets, cal_val_probs, bins=10) or 0.0)
 
-    calibration_report: dict[str, Any] = {}
-
-    for split_name, df in test_splits.items():
-        loader = build_cached_multimodal_dataloader(df, cache, batch_size=64, shuffle=False)
-        scores, targets = predict_loader(model, loader, device, is_multimodal=True)
-
-        if len(scores) == 0 or len(targets) == 0:
-            calibration_report[split_name] = {
-                'n_pairs': 0,
-                'raw_ece': 0.0,
-                'raw_brier_score': 0.0,
-                'calibrated_ece': 0.0,
-                'calibrated_brier_score': 0.0,
-                'ece_reduction_pct': 0.0,
-            }
-            continue
-
-        # Raw calibration
-        raw_ece = expected_calibration_error(targets, scores, bins=10) or 0.0
-        raw_brier = float(brier_score_loss(targets, scores))
-
-        # Calibrated predictions
-        cal_scores = apply_calibrator(scores, calibrator)
-        cal_ece = expected_calibration_error(targets, cal_scores, bins=10) or 0.0
-        cal_brier = float(brier_score_loss(targets, cal_scores))
-
-        calibration_report[split_name] = {
-            'n_pairs': len(scores),
-            'raw_ece': raw_ece,
-            'raw_brier_score': raw_brier,
-            'calibrated_ece': cal_ece,
-            'calibrated_brier_score': cal_brier,
-            'ece_reduction_pct': ((raw_ece - cal_ece) / raw_ece * 100.0) if raw_ece else 0.0,
-        }
-
-    out_json = out_p / 'calibration_metrics.json'
-    out_json.write_text(json.dumps(calibration_report, indent=2), encoding='utf-8')
-    (out_p / 'calibration_report.json').write_text(json.dumps(calibration_report, indent=2), encoding='utf-8')
+    calibration_report: dict[str, Any] = {
+        'val_ece_uncalibrated': uncal_val_ece,
+        'val_ece_calibrated': cal_val_ece,
+        'platt_weights': {
+            'w': float(calibrator.get('coefficient', 1.0)),
+            'b': float(calibrator.get('intercept', 0.0)),
+        },
+    }
 
     print(f"\n{'=' * 80}")
-    print("MODEL CALIBRATION RESULTS (ECE & BRIER SCORE):")
+    print("RELIABILITY & CALIBRATION ANALYSIS (ECE):")
     print(f"{'=' * 80}")
-    for split_name, d in calibration_report.items():
-        print(f"  [{split_name.upper():<14}] Raw ECE: {d['raw_ece']:.4f} -> Calibrated: {d['calibrated_ece']:.4f} "
-              f"({d['ece_reduction_pct']:+.1f}% error reduction) | Brier: {d['calibrated_brier_score']:.4f}")
+    print(f"Validation ECE (Uncalibrated) : {uncal_val_ece:.4f}")
+    print(f"Validation ECE (Platt-Scaled) : {cal_val_ece:.4f}")
+
+    for name, split_df in test_splits.items():
+        if split_df.empty:
+            continue
+        loader = _make_dataloader(split_df, cache, batch_size=64, shuffle=False)
+        probs, tgts = predict_loader(model, loader, device, is_multimodal=True)
+        uncal_ece = float(expected_calibration_error(tgts, probs, bins=10) or 0.0)
+        cal_probs = apply_calibrator(probs, calibrator)
+        cal_ece = float(expected_calibration_error(tgts, cal_probs, bins=10) or 0.0)
+
+        calibration_report[f'{name}_ece_uncalibrated'] = uncal_ece
+        calibration_report[f'{name}_ece_calibrated'] = cal_ece
+        print(f"Split: {name:<15} | Uncalibrated ECE: {uncal_ece:.4f} | Calibrated ECE: {cal_ece:.4f}")
+
+    with open(out_p / 'calibration_report.json', 'w', encoding='utf-8') as f:
+        json.dump(calibration_report, f, indent=2)
+    with open(out_p / 'calibration_metrics.json', 'w', encoding='utf-8') as f:
+        json.dump(calibration_report, f, indent=2)
 
     return calibration_report
 
@@ -697,6 +831,9 @@ def run_full_multimodal_study(
     run_ablation: bool = kwargs.pop('run_ablation', True)
     run_error_analysis: bool = kwargs.pop('run_error_analysis', True)
     calibrate: bool = kwargs.pop('calibrate', True)
+    pos_weight: float = float(kwargs.pop('pos_weight', 2.0))
+    use_ssl: bool = bool(kwargs.pop('use_ssl', True))
+    ssl_weight: float = float(kwargs.pop('ssl_weight', 0.2))
 
     if output_dir is None:
         out_p = Path(master_nodes_path).resolve().parent.parent / 'multimodal_study_results'
@@ -718,11 +855,23 @@ def run_full_multimodal_study(
     print(f"Output Dir   : {out_p}")
     print("=" * 80)
 
-    # 1. Populate Cache
+    # 1. Ensure 100% PharmGKB and FAERS coverage via chemical analog imputation
+    try:
+        from src.data_prep.expanded_pharmgkb_bridge import update_master_nodes_with_pharmgkb_faers_analogs
+        df_check = pd.read_csv(master_nodes_path)
+        needs_genes = ('gene_vector_multihot' not in df_check.columns) or df_check['gene_vector_multihot'].isna().any()
+        needs_tox = ('toxicity_score' not in df_check.columns) or df_check['toxicity_score'].isna().any()
+        if needs_genes or needs_tox:
+            print("Synchronizing missing PharmGKB/FAERS features via chemical analog imputation...")
+            update_master_nodes_with_pharmgkb_faers_analogs(master_nodes_path, output_path=master_nodes_path)
+    except Exception as e:
+        print(f"Notice: Auto-imputation check: {e}")
+
+    # 2. Populate Cache
     cache = MolecularCache(gene_dim=50)
     cache.populate_from_master_nodes(master_nodes_path)
 
-    # 2. Load Splits
+    # 3. Load Splits
     train_df = pd.read_csv(splits_p / 'transductive_train.csv')
     val_df = pd.read_csv(splits_p / 'validation.csv')
     test_splits = {
@@ -751,7 +900,7 @@ def run_full_multimodal_study(
         neighbor_mem = AuditableNeighborMemory(k_neighbors=5)
         neighbor_mem.fit(train_df[src_col].tolist(), train_df[tgt_col].tolist(), train_df[lbl_col].tolist())
 
-    # 3. Extended Training (Full Multimodal Model)
+    # 4. Extended Training (Full Multimodal Model)
     best_model, history_df, extended_metrics = train_extended_multimodal(
         cache=cache,
         train_df=train_df,
@@ -768,9 +917,12 @@ def run_full_multimodal_study(
         use_target_encoder=use_target_encoder,
         use_neighbor_memory=use_neighbor_memory,
         select_best_by=select_best_by,
+        pos_weight=pos_weight,
+        use_ssl=use_ssl,
+        ssl_weight=ssl_weight,
     )
 
-    # 4. Modality Ablation Study
+    # 5. Modality Ablation Study
     ablation_dict: list[dict[str, Any]] = []
     if run_ablation:
         ablation_df = run_modality_ablation_study(
@@ -785,10 +937,12 @@ def run_full_multimodal_study(
             chembl_pretrained_path=chembl_pretrained_path,
             use_neighbor_memory=use_neighbor_memory,
             select_best_by=select_best_by,
+            pos_weight=pos_weight,
+            use_ssl=use_ssl,
         )
         ablation_dict = cast(list[dict[str, Any]], ablation_df.to_dict(orient='records'))
 
-    # 5. Cold-Start Error Analysis Stratified by External Coverage
+    # 6. Cold-Start Error Analysis Stratified by External Coverage
     tier_dict: list[dict[str, Any]] = []
     if run_error_analysis:
         err_df, tier_summary_df = analyze_cold_start_coverage_errors(

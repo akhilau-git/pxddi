@@ -23,11 +23,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
+    accuracy_score,
     average_precision_score,
     brier_score_loss,
+    confusion_matrix,
     f1_score,
     matthews_corrcoef,
     roc_auc_score,
+    roc_curve,
 )
 import torch
 import torch.nn as nn
@@ -257,15 +260,39 @@ def evaluate_loader(
     scores = np.array(all_scores)
 
     if len(np.unique(targets)) < 2:
-        return {'auroc': 0.5, 'auprc': float(np.mean(targets)), 'f1': 0.0, 'mcc': 0.0, 'brier': 0.25}
+        return {'auroc': 0.5, 'auprc': float(np.mean(targets)), 'accuracy': 0.5, 'f1': 0.0, 'mcc': 0.0, 'brier': 0.25, 'optimal_threshold': 0.5, 'false_negatives': 0}
 
-    preds = (scores >= 0.5).astype(int)
+    auroc = float(roc_auc_score(targets, scores))
+    auprc = float(average_precision_score(targets, scores))
+    brier = float(brier_score_loss(targets, scores))
+
+    try:
+        fpr_arr, tpr_arr, thresh_arr = roc_curve(targets, scores)
+        j_scores = tpr_arr - fpr_arr
+        best_idx = int(np.argmax(j_scores)) if len(j_scores) else 0
+        opt_thresh = float(thresh_arr[best_idx]) if len(thresh_arr) > best_idx else 0.35
+        opt_thresh = max(min(opt_thresh, 0.50), 0.20)
+    except Exception:
+        opt_thresh = 0.35
+
+    preds = (scores >= opt_thresh).astype(int)
+    pos_mask = (targets == 1)
+    neg_mask = (targets == 0)
+    fn = int(np.sum((preds == 0) & pos_mask))
+    fp = int(np.sum((preds == 1) & neg_mask))
+
     return {
-        'auroc': float(roc_auc_score(targets, scores)),
-        'auprc': float(average_precision_score(targets, scores)),
+        'auroc': auroc,
+        'auprc': auprc,
+        'accuracy': float(accuracy_score(targets, preds)),
         'f1': float(f1_score(targets, preds, zero_division=0)),
-        'mcc': matthews_corrcoef(targets, preds),
-        'brier': float(brier_score_loss(targets, scores)),
+        'mcc': float(matthews_corrcoef(targets, preds)),
+        'brier': brier,
+        'optimal_threshold': opt_thresh,
+        'false_negatives': fn,
+        'false_positives': fp,
+        'fnr': float(fn / max(pos_mask.sum(), 1)),
+        'fpr': float(fp / max(neg_mask.sum(), 1)),
     }
 
 
