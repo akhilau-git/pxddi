@@ -515,7 +515,7 @@ def compute_ecfp_tensor(smiles: str, radius: int = 2, n_bits: int = 1024) -> tor
     DataStructs.ConvertToNumpyArray(fp, arr)
     return torch.from_numpy(arr).unsqueeze(0)
 
-DECISION_THRESHOLD = float(checkpoint.get('threshold', 0.5))
+DECISION_THRESHOLD = float(checkpoint.get('optimal_threshold', checkpoint.get('s1_opt_thresh', checkpoint.get('threshold', 0.5))))
 CALIBRATION = checkpoint.get('calibration')
 CHECKPOINT_SHA256 = file_sha256(CHECKPOINT_PATH)
 EXPLANATION_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_EXPLANATIONS)

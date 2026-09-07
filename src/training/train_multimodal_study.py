@@ -30,6 +30,7 @@ from sklearn.metrics import (
 )
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -199,6 +200,8 @@ def train_extended_multimodal(
     use_ssl: bool = False,
     ssl_weight: float = 0.2,
     ssl_pairs_count: int = 5000,
+    memory_dropout: float = 0.50,
+    embedding_noise_std: float = 0.02,
 ) -> tuple[PxDDIModel, pd.DataFrame, dict[str, Any]]:
     """Train the multimodal model across extended epochs with checkpointing."""
     if device is None:
@@ -291,6 +294,8 @@ def train_extended_multimodal(
         use_neighbor_memory=use_neighbor_memory,
         use_geo_features=is_multimodal,
         geo_dim=cache.geo_dim,
+        memory_dropout=memory_dropout,
+        embedding_noise_std=embedding_noise_std,
     )
 
     if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
@@ -363,6 +368,24 @@ def train_extended_multimodal(
             supervised_loss = criterion(risk_logits.view(-1), smoothed_labels.view(-1))
             total_batch_loss = supervised_loss
 
+            # Biological Contrastive Alignment Loss (aligns molecular graph embeddings with CYP enzyme profiles)
+            if is_multimodal and 'gene_a' in batch and 'gene_b' in batch:
+                try:
+                    ga = batch['gene_a'].to(device)
+                    gb = batch['gene_b'].to(device)
+                    gmask_a = batch['gene_mask_a'].to(device)
+                    gmask_b = batch['gene_mask_b'].to(device)
+                    valid_bio = (gmask_a > 0.5) & (gmask_b > 0.5)
+                    if valid_bio.sum() > 1 and hasattr(model, 'encoder'):
+                        gene_sim = F.cosine_similarity(ga[valid_bio], gb[valid_bio], dim=-1).clamp(0.0, 1.0)
+                        ma = model.encoder(da.x, da.edge_index, da.edge_attr, da.batch)[valid_bio]
+                        mb = model.encoder(db.x, db.edge_index, db.edge_attr, db.batch)[valid_bio]
+                        mol_sim = F.cosine_similarity(ma, mb, dim=-1).clamp(0.0, 1.0)
+                        bio_loss = F.mse_loss(mol_sim, gene_sim)
+                        total_batch_loss = total_batch_loss + 0.05 * bio_loss
+                except Exception:
+                    pass
+
             # Semi-Supervised Consistency Regularization
             if ssl_iter is not None:
                 try:
@@ -430,6 +453,7 @@ def train_extended_multimodal(
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_auroc': best_val_auroc,
                     'val_accuracy': val_metrics['accuracy'],
+                    'optimal_threshold': val_metrics.get('optimal_threshold', 0.35),
                     'in_channels': in_channels,
                     'hidden_channels': hidden_dim,
                     'edge_feature_dim': edge_dim,
@@ -455,6 +479,7 @@ def train_extended_multimodal(
                     's1_accuracy': s1_metrics['accuracy'],
                     's1_fn': s1_metrics['false_negatives'],
                     's1_opt_thresh': s1_metrics['optimal_threshold'],
+                    'optimal_threshold': s1_metrics.get('optimal_threshold', 0.35),
                     'in_channels': in_channels,
                     'hidden_channels': hidden_dim,
                     'edge_feature_dim': edge_dim,

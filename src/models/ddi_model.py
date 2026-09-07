@@ -65,7 +65,20 @@ def architecture_requires_multimodal_features(architecture_version: str) -> bool
 
 
 def model_from_checkpoint(checkpoint):
-    """Construct either versioned GNN safely from checkpoint metadata."""
+    """Construct either versioned GNN safely from checkpoint metadata with dimension auto-detection."""
+    state_dict = checkpoint.get('model_state_dict', checkpoint)
+    classifier_w = state_dict.get('risk_classifier.0.weight')
+    use_neighbor_mem = bool(checkpoint.get('use_neighbor_memory', False))
+    use_geo = bool(checkpoint.get('use_geo_features', False))
+    if classifier_w is not None and isinstance(classifier_w, torch.Tensor):
+        h_dim = int(checkpoint.get('hidden_channels', 64))
+        base_dim = (h_dim + 128 + 64) * 3 + 4
+        diff = classifier_w.shape[1] - base_dim
+        if diff in [3, 7, 11]:
+            use_neighbor_mem = True
+        if diff in [4, 7, 11]:
+            use_geo = True
+
     return PxDDIModel(
         in_channels=checkpoint['in_channels'],
         hidden_channels=checkpoint['hidden_channels'],
@@ -77,7 +90,7 @@ def model_from_checkpoint(checkpoint):
         use_toxicity_pair_features=checkpoint.get('use_toxicity_pair_features', True),
         motif_feature_dim=checkpoint.get('motif_feature_dim'),
         motif_hidden_channels=checkpoint.get('motif_hidden_channels'),
-        use_neighbor_memory=checkpoint.get('use_neighbor_memory', False),
+        use_neighbor_memory=use_neighbor_mem,
         gene_feature_dim=checkpoint.get('gene_feature_dim', 50),
         gene_hidden_channels=checkpoint.get('gene_hidden_channels', 64),
         use_clinical_toxicity=checkpoint.get('use_clinical_toxicity', False),
@@ -87,6 +100,9 @@ def model_from_checkpoint(checkpoint):
         use_target_encoder=checkpoint.get('use_target_encoder', False),
         target_feature_dim=checkpoint.get('target_feature_dim', 50),
         target_hidden_channels=checkpoint.get('target_hidden_channels', 64),
+        use_geo_features=use_geo,
+        geo_dim=checkpoint.get('geo_dim', 2),
+        memory_dropout=float(checkpoint.get('memory_dropout', 0.50)),
     )
 
 
@@ -145,6 +161,8 @@ class PxDDIModel(nn.Module):
         self.use_toxicity_pair_features = use_toxicity_pair_features
         self.gene_feature_dim = gene_feature_dim
         self.gene_hidden_channels = gene_hidden_channels
+        self.memory_dropout = float(kwargs.get('memory_dropout', 0.50))
+        self.embedding_noise_std = float(kwargs.get('embedding_noise_std', 0.0))
         self.use_clinical_toxicity = use_clinical_toxicity or (
             architecture_version in {MODEL_ARCHITECTURE_MULTIMODAL, MODEL_ARCHITECTURE_ABLATION_FAERS}
         )
@@ -448,11 +466,19 @@ class PxDDIModel(nn.Module):
                 features.append(torch.stack([clinical_tox_a.float().view(-1), clinical_tox_b.float().view(-1)], dim=1))
             else:
                 features.append(torch.zeros((ea.size(0), 2), device=ea.device, dtype=ea.dtype))
+        if self.training and self.embedding_noise_std > 0.0:
+            ea = ea + torch.randn_like(ea) * self.embedding_noise_std
+            eb = eb + torch.randn_like(eb) * self.embedding_noise_std
+
         if self.use_neighbor_memory:
             if memory_features is None:
                 memory_features = torch.zeros(
                     (ea.size(0), 3), device=ea.device, dtype=ea.dtype
                 )
+            elif self.training and self.memory_dropout > 0.0:
+                # Stochastic memory dropout prevents topological shortcut memorization
+                mask = (torch.rand((memory_features.size(0), 1), device=memory_features.device) >= self.memory_dropout).float()
+                memory_features = memory_features * mask
             features.append(memory_features)
         if self.use_geo_features:
             if geo_a is not None and geo_b is not None:
@@ -476,6 +502,28 @@ class PxDDIModel(nn.Module):
             toxicity_a_logits,
             toxicity_b_logits,
         )
+
+    def get_drug_representations(
+        self,
+        drug,
+        fp=None,
+        gene=None,
+        gene_mask=None,
+    ) -> torch.Tensor:
+        """Extract multi-modal drug embedding for diagnostic and contrastive analysis."""
+        device = next(self.parameters()).device
+        b = drug.batch if hasattr(drug, 'batch') and drug.batch is not None else torch.zeros(drug.x.size(0), dtype=torch.long, device=drug.x.device)
+        e = self.encoder(drug.x.to(device), drug.edge_index.to(device), drug.edge_attr.to(device), b.to(device))
+        reps = [e]
+        if self.fp_encoder is not None and fp is not None:
+            reps.append(self.fp_encoder(fp.float().view(-1, 1024).to(device)))
+        if self.gene_encoder is not None and gene is not None:
+            g = self.gene_encoder(gene.float().to(device))
+            g_gate = self.gene_gate(g)
+            if gene_mask is not None:
+                g_gate = g_gate * gene_mask.view(-1, 1).to(device)
+            reps.append(g_gate * g)
+        return torch.cat(reps, dim=1)
 
     def cross_drug_attention_maps(self, drug_a, drug_b):
         """Return pair-isolated attention maps for an offline candidate audit.

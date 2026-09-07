@@ -106,3 +106,31 @@ def test_run_full_study_keyword_aliases():
     assert "pretrained_encoder_path" in sig.parameters
 
 
+def test_memory_dropout_and_noise():
+    from src.models.ddi_model import PxDDIModel, MODEL_ARCHITECTURE_MULTIMODAL
+    from src.data_prep.prepare_twosides import smiles_to_graph, FEATURE_SCHEMA_RICH
+
+    g = smiles_to_graph("CCO", feature_schema=FEATURE_SCHEMA_RICH, include_fingerprint_features=True)
+    assert g is not None
+
+    model = PxDDIModel(
+        in_channels=g.x.size(1),
+        hidden_channels=32,
+        edge_feature_dim=g.edge_attr.size(1),
+        architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+        use_neighbor_memory=True,
+        memory_dropout=0.50,
+        embedding_noise_std=0.05,
+    )
+
+    mem_feat = torch.ones((1, 3))
+    model.train()
+    out_train, _, _ = model(drug_a=g, drug_b=g, memory_features=mem_feat)
+    assert out_train is not None
+
+    model.eval()
+    out_eval, _, _ = model(drug_a=g, drug_b=g, memory_features=mem_feat)
+    assert out_eval is not None
+    assert torch.is_tensor(out_eval)
+
+
