@@ -746,8 +746,8 @@ def build_drug_batches(req: DDIRequest):
         )
 
     for name, graph in (('drug A', graph_a), ('drug B', graph_b)):
-        atom_count = int(graph.num_nodes)
-        bond_count = int(graph.edge_index.size(1) // 2)
+        atom_count = int(graph.num_nodes) if graph.num_nodes is not None else 0
+        bond_count = int(graph.edge_index.size(1) // 2) if graph.edge_index is not None else 0
         if atom_count > MAX_MOLECULE_ATOMS:
             raise HTTPException(
                 status_code=422,

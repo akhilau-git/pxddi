@@ -112,6 +112,8 @@ def test_memory_dropout_and_noise():
 
     g = smiles_to_graph("CCO", feature_schema=FEATURE_SCHEMA_RICH, include_fingerprint_features=True)
     assert g is not None
+    assert g.x is not None
+    assert g.edge_attr is not None
 
     model = PxDDIModel(
         in_channels=g.x.size(1),
