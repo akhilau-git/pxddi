@@ -483,8 +483,9 @@ class PxDDIModel(nn.Module):
                 )
             elif self.training and self.memory_dropout > 0.0:
                 # Stochastic memory dropout prevents topological shortcut memorization
-                mask = (torch.rand((memory_features.size(0), 1), device=memory_features.device) >= self.memory_dropout).float()
-                memory_features = memory_features * mask
+                keep_prob = max(1.0 - self.memory_dropout, 1e-4)
+                mask = (torch.rand((memory_features.size(0), 1), device=memory_features.device) < keep_prob).float()
+                memory_features = (memory_features * mask) / keep_prob
             features.append(memory_features)
         if self.use_geo_features:
             if geo_a is not None and geo_b is not None:

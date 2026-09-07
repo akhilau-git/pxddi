@@ -113,12 +113,46 @@ def encode_multihot_pdb_vector(
     return [1 if vocab_target in target_set else 0 for vocab_target in vocabulary]
 
 
+PDB_LIGAND_TO_DRUG: dict[str, str] = {
+    'STI': 'Imatinib',
+    'GNA': 'Gefitinib',
+    'IRE': 'Iressa',
+    'AQ4': 'Erlotinib',
+    'STU': 'Staurosporine',
+    'ASP': 'Aspirin',
+    'CAF': 'Caffeine',
+    'TYL': 'Acetaminophen',
+    'IBP': 'Ibuprofen',
+    'SDF': 'Sildenafil',
+    'VRN': 'Varenicline',
+    'WAF': 'Warfarin',
+    'MTX': 'Methotrexate',
+    'DOX': 'Doxorubicin',
+    'TXO': 'Paclitaxel',
+    'CP6': 'Ciprofloxacin',
+    'DIZ': 'Diazepam',
+    'CLO': 'Clonazepam',
+    'FLU': 'Fluoxetine',
+    'MET': 'Metformin',
+    'ATP': 'Adenosine',
+    'ADN': 'Adenosine',
+    'RIT': 'Ritonavir',
+    'IDV': 'Indinavir',
+    'NFV': 'Nelfinavir',
+    'AMP': 'Amprenavir',
+    'LPV': 'Lopinavir',
+    'DRV': 'Darunavir',
+    'ATV': 'Atazanavir',
+}
+
+
 def parse_raw_pdb_header(filepath: Path) -> dict[str, Any]:
     """Extract metadata (PDB ID, resolution, ligands, macromolecules) from a raw .pdb file."""
     meta: dict[str, Any] = {
         'pdb_id': filepath.stem.upper(),
         'resolution': 2.5,
         'ligands': [],
+        'ligand_names': {},
         'targets': [],
     }
     try:
@@ -132,13 +166,20 @@ def parse_raw_pdb_header(filepath: Path) -> dict[str, Any]:
                     match = re.search(r'([0-9]+\.[0-9]+)\s+ANGSTROMS', line)
                     if match:
                         meta['resolution'] = float(match.group(1))
-                elif line.startswith('HET   ') or line.startswith('HETNAM'):
+                elif line.startswith('HET   '):
                     parts = line.split()
                     if len(parts) >= 2:
                         lig_id = parts[1].strip().upper()
                         if lig_id not in {'HOH', 'WAT', 'DOD', 'SO4', 'PO4', 'CL', 'NA', 'MG'}:
                             if lig_id not in meta['ligands']:
                                 meta['ligands'].append(lig_id)
+                elif line.startswith('HETNAM'):
+                    parts = line[6:].strip().split(maxsplit=1)
+                    if len(parts) >= 2:
+                        lid, ldesc = parts[0].strip().upper(), parts[1].strip()
+                        meta['ligand_names'][lid] = ldesc
+                        if lid not in meta['ligands'] and lid not in {'HOH', 'WAT', 'SO4', 'CL', 'NA'}:
+                            meta['ligands'].append(lid)
                 elif line.startswith('COMPND   2 MOLECULE:'):
                     mol_desc = line[21:].strip().rstrip(';')
                     if mol_desc and mol_desc not in meta['targets']:
@@ -159,6 +200,29 @@ def parse_pdb_directory(
         pdir = pdir.parent
     if not pdir.is_dir():
         raise FileNotFoundError(f'PDB directory not found: {pdir}')
+
+    # Load master node names to SMILES lookup if master_nodes_path exists
+    name_to_smiles: dict[str, str] = {}
+    if master_nodes_path and Path(master_nodes_path).is_file():
+        try:
+            m_df = pd.read_csv(master_nodes_path)
+            s_col = 'canonical_smiles' if 'canonical_smiles' in m_df.columns else ('drug_id' if 'drug_id' in m_df.columns else m_df.columns[0])
+            for _, r in m_df.iterrows():
+                cs = str(r[s_col]).strip()
+                dn = str(r.get('display_name', '')).strip()
+                if dn:
+                    name_to_smiles[normalise_drug_name(dn)] = cs
+                if 'synonyms_json' in r and pd.notna(r['synonyms_json']):
+                    try:
+                        syns = json.loads(str(r['synonyms_json']))
+                        for s in syns:
+                            ns = normalise_drug_name(str(s))
+                            if ns:
+                                name_to_smiles[ns] = cs
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     all_csvs = list(pdir.glob('**/*.csv')) + list(pdir.glob('**/*.tsv')) + list(pdir.glob('**/*.csv.gz'))
     all_pdbs = list(pdir.glob('**/*.pdb')) + list(pdir.glob('**/*.ent')) + list(pdir.glob('**/*.cif'))
@@ -201,9 +265,12 @@ def parse_pdb_directory(
     for pfile in all_pdbs[:1000]:
         hmeta = parse_raw_pdb_header(pfile)
         for lig in hmeta['ligands']:
+            resolved_drug = PDB_LIGAND_TO_DRUG.get(lig) or hmeta.get('ligand_names', {}).get(lig) or lig
+            norm_drug = normalise_drug_name(resolved_drug)
+            matched_smi = name_to_smiles.get(norm_drug) if norm_drug else None
             records.append({
-                'raw_smiles': None,
-                'drug_name': lig,
+                'raw_smiles': matched_smi,
+                'drug_name': resolved_drug,
                 'drug_id': lig,
                 'pdb_code': hmeta['pdb_id'],
                 'target_name': hmeta['targets'][0] if hmeta['targets'] else 'PDB_PROTEIN_TARGET',
@@ -293,7 +360,7 @@ def update_master_nodes_with_pdb(
         df_pdb = pdb_dir_or_profiles
         vocab = DEFAULT_TOP_PDB_TARGETS
     else:
-        df_pdb, _ = parse_pdb_directory(pdb_dir_or_profiles, top_k_targets=top_k_targets)
+        df_pdb, _ = parse_pdb_directory(pdb_dir_or_profiles, top_k_targets=top_k_targets, master_nodes_path=nodes_p)
 
     node_id_col = 'drug_id' if 'drug_id' in df_nodes.columns else ('canonical_smiles' if 'canonical_smiles' in df_nodes.columns else df_nodes.columns[0])
 

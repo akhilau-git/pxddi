@@ -186,7 +186,7 @@ def train_extended_multimodal(
     output_dir: str | Path,
     epochs: int = 15,
     batch_size: int = 64,
-    learning_rate: float = 5e-4,
+    learning_rate: float = 3e-4,
     weight_decay: float = 1e-5,
     architecture_version: str = MODEL_ARCHITECTURE_MULTIMODAL,
     device: torch.device | None = None,
@@ -196,12 +196,14 @@ def train_extended_multimodal(
     use_target_encoder: bool = True,
     use_neighbor_memory: bool = False,
     select_best_by: str = 's1',
-    pos_weight: float = 1.5,
+    pos_weight: float = 1.75,
     use_ssl: bool = False,
     ssl_weight: float = 0.2,
     ssl_pairs_count: int = 5000,
-    memory_dropout: float = 0.50,
+    memory_dropout: float = 0.75,
     embedding_noise_std: float = 0.02,
+    bio_align_weight: float = 0.25,
+    patience: int = 5,
 ) -> tuple[PxDDIModel, pd.DataFrame, dict[str, Any]]:
     """Train the multimodal model across extended epochs with checkpointing."""
     if device is None:
@@ -298,6 +300,7 @@ def train_extended_multimodal(
         embedding_noise_std=embedding_noise_std,
     )
 
+    encoder_warmed = False
     if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
         from src.models.encoder import EdgeAwareMolecularEncoder
         from src.models.encoder_pretraining import load_pretrained_edge_aware_encoder
@@ -313,14 +316,56 @@ def train_extended_multimodal(
                     map_location=device,
                 )
                 print("Successfully initialized molecular encoder with ChEMBL representations.")
+                encoder_warmed = True
             else:
                 print("Warning: model encoder is not an EdgeAwareMolecularEncoder; skipping ChEMBL warm start.")
         except Exception as exc:
-            print(f"Warning: could not load ChEMBL weights ({exc}), proceeding with random initialization.")
+            print(f"Warning: could not load ChEMBL weights ({exc}), proceeding with warm-up check.")
+
+    if not encoder_warmed and hasattr(model, 'encoder'):
+        from src.models.encoder import EdgeAwareMolecularEncoder
+        from src.models.encoder_pretraining import (
+            EdgeAwareContrastivePretrainer,
+            augment_edge_aware_batch,
+            bidirectional_nt_xent_loss,
+        )
+        if isinstance(model.encoder, EdgeAwareMolecularEncoder) and len(cache.graphs) >= 4:
+            print("🚀 Running self-supervised molecular graph contrastive warm-up (EdgeAware NT-Xent on cached graphs)...")
+            try:
+                from torch_geometric.data import Batch
+                pretrainer = EdgeAwareContrastivePretrainer(
+                    in_channels=in_channels,
+                    edge_feature_dim=edge_dim,
+                    hidden_channels=hidden_dim,
+                ).to(device)
+                pt_opt = AdamW(pretrainer.parameters(), lr=1e-3, weight_decay=1e-5)
+                graph_list = list(cache.graphs.values())
+                pretrainer.train()
+                for _ in range(5):
+                    perm = torch.randperm(len(graph_list)).tolist()
+                    pt_batch_sz = min(64, len(graph_list))
+                    for i in range(0, len(graph_list), pt_batch_sz):
+                        sub_graphs = [graph_list[idx] for idx in perm[i:i + pt_batch_sz]]
+                        if len(sub_graphs) < 2:
+                            continue
+                        pyg_batch = Batch.from_data_list(sub_graphs).to(device)
+                        v1 = augment_edge_aware_batch(pyg_batch, atom_feature_mask_rate=0.15, bond_feature_mask_rate=0.15)
+                        v2 = augment_edge_aware_batch(pyg_batch, atom_feature_mask_rate=0.15, bond_feature_mask_rate=0.15)
+                        z1 = pretrainer(v1)
+                        z2 = pretrainer(v2)
+                        pt_loss = bidirectional_nt_xent_loss(z1, z2, temperature=0.2)
+                        pt_opt.zero_grad()
+                        pt_loss.backward()
+                        pt_opt.step()
+                model.encoder.load_state_dict(pretrainer.encoder.state_dict())
+                encoder_warmed = True
+                print("✅ Self-supervised molecular encoder warm-up completed successfully (learned graph representations).")
+            except Exception as wu_err:
+                print(f"Self-supervised warm-up notice ({wu_err}); proceeding with random initialization.")
 
     model = model.to(device)
 
-    if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
+    if encoder_warmed:
         encoder_params = list(model.encoder.parameters())
         other_params = [p for n, p in model.named_parameters() if not n.startswith('encoder.')]
         optimizer = AdamW([
@@ -339,6 +384,7 @@ def train_extended_multimodal(
     history_records: list[dict[str, Any]] = []
     best_val_auroc = -1.0
     best_s1_auroc = -1.0
+    epochs_without_s1_improvement = 0
     best_weights_path = out_p / f'{architecture_version}_best.pt'
     best_s1_weights_path = out_p / f'{architecture_version}_best_s1.pt'
 
@@ -444,7 +490,7 @@ def train_extended_multimodal(
                             mb = model.encoder(db.x, db.edge_index, db.edge_attr, db.batch)[valid_pairs]
                             mol_sim = F.cosine_similarity(ma, mb, dim=-1).clamp(0.0, 1.0)
                             bio_loss = F.mse_loss(mol_sim, target_bio_sim)
-                            total_batch_loss = total_batch_loss + 0.10 * bio_loss
+                            total_batch_loss = total_batch_loss + bio_align_weight * bio_loss
                 except Exception:
                     pass
 
@@ -540,6 +586,7 @@ def train_extended_multimodal(
         is_s1_best = s1_metrics['auroc'] > best_s1_auroc
         if is_s1_best:
             best_s1_auroc = s1_metrics['auroc']
+            epochs_without_s1_improvement = 0
             torch.save(
                 {
                     'epoch': epoch,
@@ -569,12 +616,19 @@ def train_extended_multimodal(
                 },
                 best_s1_weights_path,
             )
+        else:
+            epochs_without_s1_improvement += 1
 
         best_mark = " [* Best Val]" if is_best else ""
         s1_mark = " [^ Best S1]" if is_s1_best else ""
         print(f"  Epoch {epoch:02d}/{epochs:02d} ({ep_sec:.1f}s) - Loss: {avg_loss:.4f} | "
               f"Val AUROC: {val_metrics['auroc']:.4f} (Acc: {val_metrics['accuracy']*100:.1f}%) | "
               f"S1 AUROC: {s1_metrics['auroc']:.4f} (Acc: {s1_metrics['accuracy']*100:.1f}%, FN: {s1_metrics['false_negatives']}){best_mark}{s1_mark}")
+
+        # Early Stopping: Prevent transductive overfitting from degrading S1 cold-start generalization
+        if patience > 0 and epochs_without_s1_improvement >= patience and epoch >= 4:
+            print(f"\n⏹️ Early stopping triggered at Epoch {epoch}: S1 AUROC did not improve for {patience} consecutive epochs (Peak S1 AUROC: {best_s1_auroc:.4f}). Restoring peak S1 checkpoint.")
+            break
 
     # Load best checkpoint for final evaluation
     target_weights_path = best_s1_weights_path if (select_best_by == 's1' and best_s1_weights_path.is_file()) else best_weights_path
@@ -617,6 +671,8 @@ def train_extended_multimodal(
             use_neighbor_memory=use_neighbor_memory,
             use_geo_features=is_multimodal,
             geo_dim=cache.geo_dim,
+            memory_dropout=memory_dropout,
+            embedding_noise_std=embedding_noise_std,
         ).to(device)
         s1_eval_model.load_state_dict(ckpt_s1['model_state_dict'])
         s1_scores, s1_targets = predict_loader(s1_eval_model, test_loaders['s1_cold'], device, is_multimodal=is_multimodal)
@@ -646,9 +702,10 @@ def run_modality_ablation_study(
     chembl_pretrained_path: str | Path | None = None,
     use_neighbor_memory: bool = True,
     select_best_by: str = 's1',
-    pos_weight: float = 1.5,
+    pos_weight: float = 1.75,
     use_ssl: bool = False,
     use_target_encoder: bool = True,
+    memory_dropout: float = 0.75,
 ) -> pd.DataFrame:
     """Systematically run all 4 modality ablation variants and report deltas."""
     if device is None:
@@ -689,6 +746,7 @@ def run_modality_ablation_study(
             pos_weight=pos_weight,
             use_ssl=use_ssl,
             use_target_encoder=use_tgt,
+            memory_dropout=memory_dropout,
         )
         results['variant_name'] = display_name
         all_ablation_results.append(results)
@@ -971,7 +1029,7 @@ def run_full_multimodal_study(
     extended_epochs: int = 15,
     ablation_epochs: int = 5,
     batch_size: int = 64,
-    learning_rate: float = 5e-4,
+    learning_rate: float = 3e-4,
     device: torch.device | None = None,
     pretrained_encoder_path: str | Path | None = None,
     **kwargs: Any,
@@ -990,9 +1048,13 @@ def run_full_multimodal_study(
     run_ablation: bool = kwargs.pop('run_ablation', True)
     run_error_analysis: bool = kwargs.pop('run_error_analysis', True)
     calibrate: bool = kwargs.pop('calibrate', True)
-    pos_weight: float = float(kwargs.pop('pos_weight', 1.5))
+    pos_weight: float = float(kwargs.pop('pos_weight', 1.75))
     use_ssl: bool = bool(kwargs.pop('use_ssl', False))
     ssl_weight: float = float(kwargs.pop('ssl_weight', 0.2))
+    memory_dropout: float = float(kwargs.pop('memory_dropout', 0.75))
+    bio_align_weight: float = float(kwargs.pop('bio_align_weight', 0.25))
+    embedding_noise_std: float = float(kwargs.pop('embedding_noise_std', 0.02))
+    patience: int = int(kwargs.pop('patience', 5))
 
     if output_dir is None:
         out_p = Path(master_nodes_path).resolve().parent.parent / 'multimodal_study_results'
@@ -1143,6 +1205,8 @@ def run_full_multimodal_study(
                         found = list(cd.glob('**/*chembl*.pt'))
                     if not found:
                         found = list(cd.glob('**/*encoder*.pt'))
+                    if not found:
+                        found = [f for f in cd.glob('**/*.pt') if any(w in f.name.lower() for w in ['encoder', 'chembl', 'multimodal', 'checkpoint'])]
                     if found:
                         chembl_pretrained_path = found[0]
                         print(f"✅ Auto-discovered ChEMBL Pretrained Checkpoint: {chembl_pretrained_path}")
@@ -1166,7 +1230,7 @@ def run_full_multimodal_study(
     print("AUDITDDI 8-DATASET MULTIMODAL INGESTION SUMMARY:")
     print("=" * 80)
     print(f"[1/8] TWOSIDES : ✅ Ground-truth DDI labels ({len(train_df):,} train, {len(val_df):,} val, {len(test_splits['s1_cold']):,} S1 cold)")
-    chembl_status = f"✅ Loaded ({chembl_pretrained_path})" if (chembl_pretrained_path and Path(chembl_pretrained_path).is_file()) else "⚠️ Random Initialization (Pretrained checkpoint not located)"
+    chembl_status = f"✅ Loaded ({chembl_pretrained_path})" if (chembl_pretrained_path and Path(chembl_pretrained_path).is_file()) else "⚠️ Initialized via Self-Supervised Graph Warm-up (Cached Molecular Topologies)"
     print(f"[2/8] ChEMBL   : {chembl_status}")
     print(f"[3/8] PubChem  : ✅ 1024-bit Morgan ECFP Structural Fingerprints ({len(cache.fingerprints):,} cached)")
     n_genes = sum(1 for m in cache.gene_masks.values() if m.item() > 0)
@@ -1216,6 +1280,10 @@ def run_full_multimodal_study(
         pos_weight=pos_weight,
         use_ssl=use_ssl,
         ssl_weight=ssl_weight,
+        memory_dropout=memory_dropout,
+        embedding_noise_std=embedding_noise_std,
+        bio_align_weight=bio_align_weight,
+        patience=patience,
     )
 
     # 5. Modality Ablation Study
@@ -1236,6 +1304,7 @@ def run_full_multimodal_study(
             pos_weight=pos_weight,
             use_ssl=use_ssl,
             use_target_encoder=use_target_encoder,
+            memory_dropout=memory_dropout,
         )
         ablation_dict = cast(list[dict[str, Any]], ablation_df.to_dict(orient='records'))
 
