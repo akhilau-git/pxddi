@@ -225,6 +225,11 @@ def safe_forward_multimodal(
             kwargs['geo_b'] = batch['geo_b'].to(device)
             kwargs['geo_mask_a'] = batch['geo_mask_a'].to(device)
             kwargs['geo_mask_b'] = batch['geo_mask_b'].to(device)
+        if ('pdb_a' in sig or has_var_kwargs) and 'pdb_a' in batch and batch['pdb_a'] is not None:
+            kwargs['pdb_a'] = batch['pdb_a'].to(device)
+            kwargs['pdb_b'] = batch['pdb_b'].to(device)
+            kwargs['pdb_mask_a'] = batch['pdb_mask_a'].to(device)
+            kwargs['pdb_mask_b'] = batch['pdb_mask_b'].to(device)
     except Exception:
         pass
     return model(**kwargs)

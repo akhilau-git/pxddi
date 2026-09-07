@@ -368,10 +368,11 @@ def train_extended_multimodal(
             supervised_loss = criterion(risk_logits.view(-1), smoothed_labels.view(-1))
             total_batch_loss = supervised_loss
 
-            # Multi-Dataset Biological Contrastive Alignment Loss (PharmGKB, BindingDB, GEO, FAERS)
+            # Multi-Dataset Biological Contrastive Alignment Loss (PharmGKB, BindingDB, GEO, FAERS, PubChem, PDB)
             if is_multimodal and hasattr(model, 'encoder'):
                 try:
                     batch_size_cur = da.num_graphs if hasattr(da, 'num_graphs') else da.x.size(0)
+                    bio_sims: list[tuple[torch.Tensor, torch.Tensor, float]] = []
 
                     # 1. PharmGKB CYP Enzymes & Transporters
                     if 'gene_a' in batch and 'gene_b' in batch:
@@ -964,7 +965,31 @@ def run_full_multimodal_study(
     print(f"Output Dir   : {out_p}")
     print("=" * 80)
 
-    # Auto-enrich master nodes with PDB, BindingDB, and GEO if raw folders exist
+    # Resolve candidate dataset roots
+    resolved_nodes = Path(master_nodes_path).resolve()
+    candidate_data_roots = [
+        resolved_nodes.parent.parent,
+        resolved_nodes.parent,
+        Path('/content/drive/MyDrive/pxddi-data'),
+        Path('/content/drive/.shortcut-targets-by-id/1EK5SEg3iwEAEUBzwrCOsj_Y0huxGZklA/pxddi-data'),
+        Path('/content/pxddi-data'),
+        Path('pxddi-data'),
+        Path('.'),
+    ]
+    if 'data_dir' in kwargs and kwargs['data_dir']:
+        candidate_data_roots.insert(0, Path(kwargs.pop('data_dir')).resolve())
+
+    data_root = next((r for r in candidate_data_roots if r.is_dir()), resolved_nodes.parent.parent)
+
+    print("=" * 80)
+    print("STARTING AUDITDDI MULTIMODAL COMPREHENSIVE STUDY")
+    print(f"Data Root    : {data_root}")
+    print(f"Master Nodes : {master_nodes_path}")
+    print(f"Splits Dir   : {splits_p}")
+    print(f"Output Dir   : {out_p}")
+    print("=" * 80)
+
+    # Auto-enrich master nodes with PDB, BindingDB, GEO, FAERS, and PharmGKB if raw/bridge folders exist
     for mod_name, dir_key, col_names, enrich_fn in [
         ('BindingDB', 'bindingdb_dir', ['bindingdb_target_vector', 'target_vector_multihot'], 'src.data_prep.bindingdb_pipeline.update_master_nodes_with_bindingdb'),
         ('GEO', 'geo_dir', ['geo_signature_vector', 'geo_vector'], 'src.data_prep.geo_pipeline.update_master_nodes_with_geo'),
@@ -972,8 +997,9 @@ def run_full_multimodal_study(
     ]:
         cand_dir = (
             kwargs.pop(dir_key, None)
-            or (Path(master_nodes_path).resolve().parent.parent / mod_name.lower())
-            or (Path(master_nodes_path).resolve().parent / mod_name.lower())
+            or (data_root / mod_name.lower())
+            or (data_root / mod_name)
+            or (resolved_nodes.parent / mod_name.lower())
         )
         if cand_dir and Path(cand_dir).is_dir():
             try:
@@ -986,6 +1012,26 @@ def run_full_multimodal_study(
                     fn(master_nodes_path, cand_dir)
             except Exception as enrich_err:
                 print(f"{mod_name} auto-enrichment notice: {enrich_err}")
+
+    # Auto-synchronize FAERS toxicity bridge if available
+    cand_faers = (
+        kwargs.pop('faers_dir', None)
+        or kwargs.pop('faers_bridge_path', None)
+        or (data_root / 'faers' / 'faers_bridge.csv')
+        or (data_root / 'faers')
+        or (resolved_nodes.parent / 'faers_bridge.csv')
+    )
+    if cand_faers and Path(cand_faers).exists():
+        try:
+            sample_df = pd.read_csv(master_nodes_path, nrows=10)
+            if 'toxicity_score' not in sample_df.columns or sample_df['toxicity_score'].dropna().empty:
+                from src.data_prep.build_unified_graph import update_master_nodes_with_faers
+                f_path = cand_faers if Path(cand_faers).is_file() else (Path(cand_faers) / 'faers_bridge.csv')
+                if Path(f_path).is_file():
+                    print(f"Auto-enriching master nodes with FAERS from: {f_path}")
+                    update_master_nodes_with_faers(master_nodes_path, f_path)
+        except Exception as faers_err:
+            print(f"FAERS auto-enrichment notice: {faers_err}")
 
     # 1. Populate Cache
     cache = MolecularCache(gene_dim=50)
@@ -1012,10 +1058,13 @@ def run_full_multimodal_study(
     # Infallible auto-discovery if path not explicitly given or unverified
     if chembl_pretrained_path is None or not Path(chembl_pretrained_path).is_file():
         candidate_dirs = [
-            Path(master_nodes_path).resolve().parent,
-            Path(master_nodes_path).resolve().parent.parent,
-            Path(master_nodes_path).resolve().parent.parent / 'pretraining',
+            data_root / 'chembl',
+            data_root / 'pretraining',
+            data_root,
+            resolved_nodes.parent,
+            resolved_nodes.parent.parent,
             Path('/content/drive/MyDrive/pxddi-results/pretraining'),
+            Path('/content/drive/MyDrive/pxddi-data/chembl'),
             Path('/content/drive/MyDrive/pxddi-data'),
             Path('/content/drive/MyDrive'),
         ]
@@ -1023,6 +1072,8 @@ def run_full_multimodal_study(
             if cd.is_dir():
                 try:
                     found = list(cd.glob('**/chembl_pretrained_encoder.pt'))
+                    if not found:
+                        found = list(cd.glob('**/*chembl*.pt'))
                     if found:
                         chembl_pretrained_path = found[0]
                         print(f"✅ Auto-discovered ChEMBL Pretrained Checkpoint: {chembl_pretrained_path}")
@@ -1032,13 +1083,34 @@ def run_full_multimodal_study(
         if chembl_pretrained_path is None or not Path(chembl_pretrained_path).is_file():
             try:
                 import subprocess
-                find_res = subprocess.getoutput("find /content -name 'chembl_pretrained_encoder.pt' 2>/dev/null").strip().splitlines()
-                matches = [m.strip() for m in find_res if m.strip().endswith('chembl_pretrained_encoder.pt')]
-                if matches and os.path.isfile(matches[0]):
+                find_res = subprocess.getoutput("find /content -name '*chembl*encoder*.pt' 2>/dev/null").strip().splitlines()
+                if not find_res or not any(os.path.isfile(f.strip()) for f in find_res):
+                    find_res = subprocess.getoutput("find /content -name 'chembl_pretrained_encoder.pt' 2>/dev/null").strip().splitlines()
+                matches = [m.strip() for m in find_res if m.strip().endswith('.pt') and os.path.isfile(m.strip())]
+                if matches:
                     chembl_pretrained_path = matches[0]
                     print(f"✅ Auto-discovered ChEMBL Checkpoint via Linux search: {chembl_pretrained_path}")
             except Exception:
                 pass
+
+    print("\n" + "=" * 80)
+    print("AUDITDDI 8-DATASET MULTIMODAL INGESTION SUMMARY:")
+    print("=" * 80)
+    print(f"[1/8] TWOSIDES : ✅ Ground-truth DDI labels ({len(train_df):,} train, {len(val_df):,} val, {len(test_splits['s1_cold']):,} S1 cold)")
+    chembl_status = f"✅ Loaded ({chembl_pretrained_path})" if (chembl_pretrained_path and Path(chembl_pretrained_path).is_file()) else "⚠️ Random Initialization (Pretrained checkpoint not located)"
+    print(f"[2/8] ChEMBL   : {chembl_status}")
+    print(f"[3/8] PubChem  : ✅ 1024-bit Morgan ECFP Structural Fingerprints ({len(cache.fingerprints):,} cached)")
+    n_genes = sum(1 for m in cache.gene_masks.values() if m.item() > 0)
+    print(f"[4/8] PharmGKB : ✅ Pharmacogenomic CYP Enzymes & Transporters ({n_genes}/{len(cache.graphs)} drugs, dim={cache.gene_dim})")
+    n_targets = sum(1 for m in cache.target_masks.values() if m.item() > 0)
+    print(f"[5/8] BindingDB: ✅ Target Receptor & Kinase Affinities ({n_targets}/{len(cache.graphs)} drugs, dim={cache.target_dim})")
+    n_geo = sum(1 for m in cache.geo_masks.values() if m.item() > 0)
+    print(f"[6/8] GEO      : ✅ Disease Transcriptomic Perturbation Profiles ({n_geo}/{len(cache.graphs)} drugs, dim={cache.geo_dim})")
+    n_tox = sum(1 for m in cache.toxicity_masks.values() if m.item() > 0)
+    print(f"[7/8] FAERS    : ✅ Post-Marketing Clinical Adverse Event Severity ({n_tox}/{len(cache.graphs)} drugs)")
+    n_pdb = sum(1 for m in cache.pdb_masks.values() if m.item() > 0)
+    print(f"[8/8] PDB      : ✅ 3D Macromolecular Co-Crystal Complexes ({n_pdb}/{len(cache.graphs)} drugs, dim={cache.pdb_dim})")
+    print("=" * 80 + "\n")
 
     use_cross_modal_attention: bool = kwargs.pop('use_cross_modal_attention', True)
     use_cross_drug_attention: bool = kwargs.pop('use_cross_drug_attention', False)
