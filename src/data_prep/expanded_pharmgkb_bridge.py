@@ -332,13 +332,18 @@ def update_master_nodes_with_pharmgkb_faers_analogs(
 
     summary = {
         'total_nodes': len(df_nodes),
+        'total_drugs': len(df_nodes),
         'initial_pharmgkb_covered': initial_genes_count,
         'final_pharmgkb_covered': len(df_nodes),
+        'drugs_profiled_genes': len(df_nodes),
         'pharmgkb_coverage_pct': 100.0,
+        'final_gene_coverage_pct': 100.0,
         'imputed_genes_count': imputed_genes_count,
         'initial_faers_covered': initial_tox_count,
         'final_faers_covered': len(df_nodes),
+        'drugs_profiled_faers': len(df_nodes),
         'faers_coverage_pct': 100.0,
+        'final_faers_coverage_pct': 100.0,
         'imputed_faers_count': imputed_tox_count,
         'exported_path': str(target_out),
     }
