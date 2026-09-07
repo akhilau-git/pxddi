@@ -70,22 +70,28 @@ def model_from_checkpoint(checkpoint):
     classifier_w = state_dict.get('risk_classifier.0.weight')
     use_neighbor_mem = bool(checkpoint.get('use_neighbor_memory', False))
     use_geo = bool(checkpoint.get('use_geo_features', False))
+    use_target = bool(checkpoint.get('use_target_encoder', any('target_encoder' in k for k in state_dict)))
+    use_cross_modal = bool(checkpoint.get('use_cross_modal_attention', any('cross_modal_attention' in k for k in state_dict)))
+    use_cross_drug = bool(checkpoint.get('use_cross_drug_attention', any('cross_drug_attention' in k for k in state_dict)))
+
     if classifier_w is not None and isinstance(classifier_w, torch.Tensor):
         h_dim = int(checkpoint.get('hidden_channels', 64))
-        base_dim = (h_dim + 128 + 64) * 3 + 4
+        target_extra = (64 * 3) if use_target else 0
+        base_dim = (h_dim + 128 + 64) * 3 + target_extra + 4
         diff = classifier_w.shape[1] - base_dim
         if diff in [3, 7, 11]:
             use_neighbor_mem = True
         if diff in [4, 7, 11]:
             use_geo = True
 
+    arch = checkpoint.get('architecture_version', MODEL_ARCHITECTURE_LEGACY)
+    use_clin_tox = bool(checkpoint.get('use_clinical_toxicity', arch in {MODEL_ARCHITECTURE_MULTIMODAL, MODEL_ARCHITECTURE_ABLATION_FAERS}))
+
     return PxDDIModel(
         in_channels=checkpoint['in_channels'],
         hidden_channels=checkpoint['hidden_channels'],
         use_chemberta=checkpoint.get('use_chemberta', False),
-        architecture_version=checkpoint.get(
-            'architecture_version', MODEL_ARCHITECTURE_LEGACY
-        ),
+        architecture_version=arch,
         edge_feature_dim=checkpoint.get('edge_feature_dim'),
         use_toxicity_pair_features=checkpoint.get('use_toxicity_pair_features', True),
         motif_feature_dim=checkpoint.get('motif_feature_dim'),
@@ -93,11 +99,11 @@ def model_from_checkpoint(checkpoint):
         use_neighbor_memory=use_neighbor_mem,
         gene_feature_dim=checkpoint.get('gene_feature_dim', 50),
         gene_hidden_channels=checkpoint.get('gene_hidden_channels', 64),
-        use_clinical_toxicity=checkpoint.get('use_clinical_toxicity', False),
+        use_clinical_toxicity=use_clin_tox,
         num_side_effects=checkpoint.get('num_side_effects', 1),
-        use_cross_modal_attention=checkpoint.get('use_cross_modal_attention', False),
-        use_cross_drug_attention=checkpoint.get('use_cross_drug_attention', False),
-        use_target_encoder=checkpoint.get('use_target_encoder', False),
+        use_cross_modal_attention=use_cross_modal,
+        use_cross_drug_attention=use_cross_drug,
+        use_target_encoder=use_target,
         target_feature_dim=checkpoint.get('target_feature_dim', 50),
         target_hidden_channels=checkpoint.get('target_hidden_channels', 64),
         use_geo_features=use_geo,
@@ -428,7 +434,7 @@ class PxDDIModel(nn.Module):
                 t_in_b = target_b.float().view(-1, self.target_feature_dim)
                 ta = self.target_encoder(t_in_a)
                 tb = self.target_encoder(t_in_b)
-                if self.cross_modal_attention is not None:
+                if self.cross_modal_attention is not None and t_in_a.size(-1) == self.cross_modal_attention.gene_proj.in_features:
                     ta = ta + self.cross_modal_attention(ea, t_in_a, target_mask_a)
                     tb = tb + self.cross_modal_attention(eb, t_in_b, target_mask_b)
                 ta_gate = self.target_gate(ta)

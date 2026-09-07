@@ -136,3 +136,47 @@ def test_memory_dropout_and_noise():
     assert torch.is_tensor(out_eval)
 
 
+def test_molecular_cache_dynamic_dimensions_and_resilience():
+    cache = MolecularCache(gene_dim=50, target_dim=50, geo_dim=2)
+    smi = "CCO"
+
+    # Test with non-standard lengths: should pad or truncate cleanly without discarding
+    ok = cache.register_drug(
+        smi,
+        gene_vector=[1.0] * 30,  # shorter than 50 -> padded
+        toxicity_score=0.75,
+        target_vector=[1.0] * 60,  # longer than 50 -> truncated
+        geo_vector=[0.5, 0.8],
+    )
+    assert ok is True
+    assert cache.gene_vectors[smi].shape == (50,)
+    assert cache.gene_masks[smi].item() == 1.0
+    assert cache.toxicity_scalars[smi].item() == 0.75
+    assert cache.toxicity_masks[smi].item() == 1.0
+    assert cache.target_vectors[smi].shape == (50,)
+    assert cache.target_masks[smi].item() == 1.0
+    assert cache.geo_vectors[smi].shape == (2,)
+    assert cache.geo_masks[smi].item() == 1.0
+
+
+def test_model_from_checkpoint_auto_detection():
+    from src.models.ddi_model import model_from_checkpoint, MODEL_ARCHITECTURE_MULTIMODAL
+
+    ckpt = {
+        'in_channels': 30,
+        'hidden_channels': 64,
+        'edge_feature_dim': 11,
+        'architecture_version': MODEL_ARCHITECTURE_MULTIMODAL,
+        'model_state_dict': {
+            'target_encoder.0.weight': torch.randn(64, 50),
+            'cross_modal_attention.mol_proj.weight': torch.randn(64, 64),
+        },
+    }
+
+    model = model_from_checkpoint(ckpt)
+    assert model.target_encoder is not None
+    assert model.cross_modal_attention is not None
+    assert model.use_clinical_toxicity is True
+
+
+

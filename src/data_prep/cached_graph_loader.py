@@ -80,33 +80,51 @@ class MolecularCache:
             self.fingerprints[smiles] = torch.zeros(1024, dtype=torch.float32)
 
         # PharmGKB Gene Vector (Multi-Hot)
-        if gene_vector and len(gene_vector) == self.gene_dim:
-            self.gene_vectors[smiles] = torch.tensor(gene_vector, dtype=torch.float32)
-            self.gene_masks[smiles] = torch.tensor(1.0, dtype=torch.float32)
+        if gene_vector and len(gene_vector) > 0:
+            gv = np.array(gene_vector, dtype=np.float32)
+            if len(gv) != self.gene_dim:
+                padded = np.zeros(self.gene_dim, dtype=np.float32)
+                l = min(len(gv), self.gene_dim)
+                padded[:l] = gv[:l]
+                gv = padded
+            self.gene_vectors[smiles] = torch.tensor(gv, dtype=torch.float32)
+            self.gene_masks[smiles] = torch.tensor(1.0 if np.any(gv > 0) else 0.0, dtype=torch.float32)
         else:
             self.gene_vectors[smiles] = torch.zeros(self.gene_dim, dtype=torch.float32)
             self.gene_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
 
         # FAERS Clinical Toxicity Score
         if toxicity_score is not None and not pd.isna(toxicity_score):
-            self.toxicity_scalars[smiles] = torch.tensor(toxicity_score, dtype=torch.float32)
+            self.toxicity_scalars[smiles] = torch.tensor(float(toxicity_score), dtype=torch.float32)
             self.toxicity_masks[smiles] = torch.tensor(1.0, dtype=torch.float32)
         else:
             self.toxicity_scalars[smiles] = torch.tensor(0.0, dtype=torch.float32)
             self.toxicity_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
 
         # BindingDB Target Vector (Multi-Hot / Affinity)
-        if target_vector and len(target_vector) == self.target_dim:
-            self.target_vectors[smiles] = torch.tensor(target_vector, dtype=torch.float32)
-            self.target_masks[smiles] = torch.tensor(1.0, dtype=torch.float32)
+        if target_vector and len(target_vector) > 0:
+            tv = np.array(target_vector, dtype=np.float32)
+            if len(tv) != self.target_dim:
+                padded = np.zeros(self.target_dim, dtype=np.float32)
+                l = min(len(tv), self.target_dim)
+                padded[:l] = tv[:l]
+                tv = padded
+            self.target_vectors[smiles] = torch.tensor(tv, dtype=torch.float32)
+            self.target_masks[smiles] = torch.tensor(1.0 if np.any(tv > 0) else 0.0, dtype=torch.float32)
         else:
             self.target_vectors[smiles] = torch.zeros(self.target_dim, dtype=torch.float32)
             self.target_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
 
         # GEO Disease Transcriptomic Signature Vector
-        if geo_vector and len(geo_vector) == self.geo_dim:
-            self.geo_vectors[smiles] = torch.tensor(geo_vector, dtype=torch.float32)
-            self.geo_masks[smiles] = torch.tensor(1.0, dtype=torch.float32)
+        if geo_vector and len(geo_vector) > 0:
+            geov = np.array(geo_vector, dtype=np.float32)
+            if len(geov) != self.geo_dim:
+                padded = np.zeros(self.geo_dim, dtype=np.float32)
+                l = min(len(geov), self.geo_dim)
+                padded[:l] = geov[:l]
+                geov = padded
+            self.geo_vectors[smiles] = torch.tensor(geov, dtype=torch.float32)
+            self.geo_masks[smiles] = torch.tensor(1.0 if np.any(geov > 0) else 0.0, dtype=torch.float32)
         else:
             self.geo_vectors[smiles] = torch.zeros(self.geo_dim, dtype=torch.float32)
             self.geo_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
@@ -114,42 +132,96 @@ class MolecularCache:
         return True
 
     def populate_from_master_nodes(self, master_nodes_path: str | Path) -> int:
-        """Pre-populate the entire cache from master_drug_nodes.csv."""
+        """Pre-populate the entire cache from master_drug_nodes.csv with auto-dimension detection."""
         df_nodes = pd.read_csv(master_nodes_path)
         count = 0
         node_id_col = 'drug_id' if 'drug_id' in df_nodes.columns else ('canonical_smiles' if 'canonical_smiles' in df_nodes.columns else df_nodes.columns[0])
 
+        # Auto-detect dimensions from first non-empty serialized vector in dataset
+        gene_col_cands = ['gene_vector_multihot', 'gene_vector', 'genes_multihot', 'pharmgkb_gene_vector']
+        target_col_cands = ['bindingdb_target_vector', 'target_vector_multihot', 'target_vector', 'bindingdb_vector']
+        geo_col_cands = ['geo_signature_vector', 'geo_vector', 'disease_signature_vector', 'geo_signatures_vector']
+        tox_col_cands = ['toxicity_score', 'clinical_toxicity', 'faers_toxicity_score', 'tox_score', 'faers_score']
+
+        for c in gene_col_cands:
+            if c in df_nodes.columns:
+                non_nulls = df_nodes[c].dropna()
+                for val in non_nulls:
+                    try:
+                        parsed = json.loads(val) if isinstance(val, str) else list(val)
+                        if parsed and len(parsed) > 0:
+                            self.gene_dim = len(parsed)
+                            break
+                    except Exception:
+                        pass
+                break
+
+        for c in target_col_cands:
+            if c in df_nodes.columns:
+                non_nulls = df_nodes[c].dropna()
+                for val in non_nulls:
+                    try:
+                        parsed = json.loads(val) if isinstance(val, str) else list(val)
+                        if parsed and len(parsed) > 0:
+                            self.target_dim = len(parsed)
+                            break
+                    except Exception:
+                        pass
+                break
+
+        for c in geo_col_cands:
+            if c in df_nodes.columns:
+                non_nulls = df_nodes[c].dropna()
+                for val in non_nulls:
+                    try:
+                        parsed = json.loads(val) if isinstance(val, str) else list(val)
+                        if parsed and len(parsed) > 0:
+                            self.geo_dim = len(parsed)
+                            break
+                    except Exception:
+                        pass
+                break
+
         for _, row in df_nodes.iterrows():
             smi = str(row[node_id_col]).strip()
-            # Extract gene vector if serialized
+
+            # Extract gene vector
             gene_vec = None
-            if 'gene_vector_multihot' in row and pd.notna(row['gene_vector_multihot']):
-                val = row['gene_vector_multihot']
-                try:
-                    gene_vec = json.loads(val) if isinstance(val, str) else list(val)
-                except Exception:
-                    pass
+            for c in gene_col_cands:
+                if c in row and pd.notna(row[c]):
+                    val = row[c]
+                    try:
+                        gene_vec = json.loads(val) if isinstance(val, str) else list(val)
+                        break
+                    except Exception:
+                        pass
 
             # Extract toxicity score
-            tox = row.get('toxicity_score', None)
-            tox_score = float(tox) if (pd.notna(tox) and tox is not None) else None
+            tox_score = None
+            for c in tox_col_cands:
+                if c in row and pd.notna(row[c]):
+                    try:
+                        tox_score = float(row[c])
+                        break
+                    except Exception:
+                        pass
 
-            # Extract BindingDB target vector if serialized
+            # Extract BindingDB target vector
             target_vec = None
-            for col_cand in ['bindingdb_target_vector', 'target_vector_multihot', 'target_vector']:
-                if col_cand in row and pd.notna(row[col_cand]):
-                    val = row[col_cand]
+            for c in target_col_cands:
+                if c in row and pd.notna(row[c]):
+                    val = row[c]
                     try:
                         target_vec = json.loads(val) if isinstance(val, str) else list(val)
                         break
                     except Exception:
                         pass
 
-            # Extract GEO transcriptomic vector if serialized
+            # Extract GEO transcriptomic vector
             geo_vec = None
-            for col_cand in ['geo_signature_vector', 'geo_vector', 'disease_signature_vector']:
-                if col_cand in row and pd.notna(row[col_cand]):
-                    val = row[col_cand]
+            for c in geo_col_cands:
+                if c in row and pd.notna(row[c]):
+                    val = row[c]
                     try:
                         geo_vec = json.loads(val) if isinstance(val, str) else list(val)
                         break
@@ -164,7 +236,18 @@ class MolecularCache:
                 geo_vector=geo_vec,
             ):
                 count += 1
-        print(f'MolecularCache populated: {count} drugs cached with graphs, ECFP, genes, toxicity, targets, and GEO.')
+
+        n_genes = sum(1 for m in self.gene_masks.values() if m.item() > 0)
+        n_tox = sum(1 for m in self.toxicity_masks.values() if m.item() > 0)
+        n_targets = sum(1 for m in self.target_masks.values() if m.item() > 0)
+        n_geo = sum(1 for m in self.geo_masks.values() if m.item() > 0)
+
+        print(
+            f"MolecularCache populated: {count} drugs cached "
+            f"[Graphs: {len(self.graphs)}, ECFP: {len(self.fingerprints)}, "
+            f"PharmGKB: {n_genes} (dim={self.gene_dim}), FAERS: {n_tox}, "
+            f"BindingDB: {n_targets} (dim={self.target_dim}), GEO: {n_geo} (dim={self.geo_dim})]"
+        )
         return count
 
 

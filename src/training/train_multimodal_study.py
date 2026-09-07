@@ -193,10 +193,10 @@ def train_extended_multimodal(
     chembl_pretrained_path: str | Path | None = None,
     use_cross_modal_attention: bool = True,
     use_cross_drug_attention: bool = False,
-    use_target_encoder: bool = False,
+    use_target_encoder: bool = True,
     use_neighbor_memory: bool = False,
     select_best_by: str = 's1',
-    pos_weight: float = 1.0,
+    pos_weight: float = 1.5,
     use_ssl: bool = False,
     ssl_weight: float = 0.2,
     ssl_pairs_count: int = 5000,
@@ -368,21 +368,65 @@ def train_extended_multimodal(
             supervised_loss = criterion(risk_logits.view(-1), smoothed_labels.view(-1))
             total_batch_loss = supervised_loss
 
-            # Biological Contrastive Alignment Loss (aligns molecular graph embeddings with CYP enzyme profiles)
-            if is_multimodal and 'gene_a' in batch and 'gene_b' in batch:
+            # Multi-Dataset Biological Contrastive Alignment Loss (PharmGKB, BindingDB, GEO, FAERS)
+            if is_multimodal and hasattr(model, 'encoder'):
                 try:
-                    ga = batch['gene_a'].to(device)
-                    gb = batch['gene_b'].to(device)
-                    gmask_a = batch['gene_mask_a'].to(device)
-                    gmask_b = batch['gene_mask_b'].to(device)
-                    valid_bio = (gmask_a > 0.5) & (gmask_b > 0.5)
-                    if valid_bio.sum() > 1 and hasattr(model, 'encoder'):
-                        gene_sim = F.cosine_similarity(ga[valid_bio], gb[valid_bio], dim=-1).clamp(0.0, 1.0)
-                        ma = model.encoder(da.x, da.edge_index, da.edge_attr, da.batch)[valid_bio]
-                        mb = model.encoder(db.x, db.edge_index, db.edge_attr, db.batch)[valid_bio]
-                        mol_sim = F.cosine_similarity(ma, mb, dim=-1).clamp(0.0, 1.0)
-                        bio_loss = F.mse_loss(mol_sim, gene_sim)
-                        total_batch_loss = total_batch_loss + 0.05 * bio_loss
+                    bio_sims = []
+
+                    # 1. PharmGKB CYP Enzymes & Transporters
+                    if 'gene_a' in batch and 'gene_b' in batch:
+                        ga = batch['gene_a'].to(device)
+                        gb = batch['gene_b'].to(device)
+                        gmask = (batch['gene_mask_a'].to(device) > 0.5) & (batch['gene_mask_b'].to(device) > 0.5)
+                        if gmask.any():
+                            gene_sim = F.cosine_similarity(ga, gb, dim=-1).clamp(0.0, 1.0)
+                            bio_sims.append((gene_sim, gmask, 1.0))
+
+                    # 2. BindingDB Target Affinity Vectors
+                    if 'target_a' in batch and 'target_b' in batch:
+                        ta = batch['target_a'].to(device)
+                        tb = batch['target_b'].to(device)
+                        tmask = (batch['target_mask_a'].to(device) > 0.5) & (batch['target_mask_b'].to(device) > 0.5)
+                        if tmask.any():
+                            target_sim = F.cosine_similarity(ta, tb, dim=-1).clamp(0.0, 1.0)
+                            bio_sims.append((target_sim, tmask, 1.0))
+
+                    # 3. GEO Disease Transcriptomics
+                    if 'geo_a' in batch and 'geo_b' in batch:
+                        geoa = batch['geo_a'].to(device)
+                        geob = batch['geo_b'].to(device)
+                        geomask = (batch['geo_mask_a'].to(device) > 0.5) & (batch['geo_mask_b'].to(device) > 0.5)
+                        if geomask.any():
+                            geo_sim = F.cosine_similarity(geoa, geob, dim=-1).clamp(0.0, 1.0)
+                            bio_sims.append((geo_sim, geomask, 0.8))
+
+                    # 4. FAERS Clinical Adverse Event Proximity
+                    if 'tox_a' in batch and 'tox_b' in batch:
+                        toxa = batch['tox_a'].to(device).float()
+                        toxb = batch['tox_b'].to(device).float()
+                        toxmask = (batch['tox_mask_a'].to(device) > 0.5) & (batch['tox_mask_b'].to(device) > 0.5)
+                        if toxmask.any():
+                            tox_sim = (1.0 - torch.abs(toxa - toxb).clamp(0.0, 1.0))
+                            bio_sims.append((tox_sim, toxmask, 0.5))
+
+                    if bio_sims:
+                        batch_size_cur = da.num_graphs if hasattr(da, 'num_graphs') else da.x.size(0)
+                        composite_bio = torch.zeros(batch_size_cur, device=device)
+                        total_weight = torch.zeros(batch_size_cur, device=device)
+
+                        for sim_vec, mask_vec, w in bio_sims:
+                            m_flt = mask_vec.float()
+                            composite_bio = composite_bio + sim_vec * m_flt * w
+                            total_weight = total_weight + m_flt * w
+
+                        valid_pairs = total_weight > 0
+                        if valid_pairs.sum() > 1:
+                            target_bio_sim = composite_bio[valid_pairs] / total_weight[valid_pairs].clamp(min=1e-5)
+                            ma = model.encoder(da.x, da.edge_index, da.edge_attr, da.batch)[valid_pairs]
+                            mb = model.encoder(db.x, db.edge_index, db.edge_attr, db.batch)[valid_pairs]
+                            mol_sim = F.cosine_similarity(ma, mb, dim=-1).clamp(0.0, 1.0)
+                            bio_loss = F.mse_loss(mol_sim, target_bio_sim)
+                            total_batch_loss = total_batch_loss + 0.10 * bio_loss
                 except Exception:
                     pass
 
@@ -462,8 +506,15 @@ def train_extended_multimodal(
                     'gene_hidden_channels': 64,
                     'use_clinical_toxicity': is_multimodal,
                     'use_neighbor_memory': use_neighbor_memory,
+                    'use_target_encoder': use_target_encoder,
+                    'target_feature_dim': cache.target_dim,
+                    'target_hidden_channels': 64,
                     'use_geo_features': is_multimodal,
                     'geo_dim': cache.geo_dim,
+                    'use_cross_modal_attention': use_cross_modal_attention if is_multimodal else False,
+                    'use_cross_drug_attention': use_cross_drug_attention,
+                    'memory_dropout': memory_dropout,
+                    'embedding_noise_std': embedding_noise_std,
                 },
                 best_weights_path,
             )
@@ -488,8 +539,15 @@ def train_extended_multimodal(
                     'gene_hidden_channels': 64,
                     'use_clinical_toxicity': is_multimodal,
                     'use_neighbor_memory': use_neighbor_memory,
+                    'use_target_encoder': use_target_encoder,
+                    'target_feature_dim': cache.target_dim,
+                    'target_hidden_channels': 64,
                     'use_geo_features': is_multimodal,
                     'geo_dim': cache.geo_dim,
+                    'use_cross_modal_attention': use_cross_modal_attention if is_multimodal else False,
+                    'use_cross_drug_attention': use_cross_drug_attention,
+                    'memory_dropout': memory_dropout,
+                    'embedding_noise_std': embedding_noise_std,
                 },
                 best_s1_weights_path,
             )
@@ -570,8 +628,9 @@ def run_modality_ablation_study(
     chembl_pretrained_path: str | Path | None = None,
     use_neighbor_memory: bool = True,
     select_best_by: str = 's1',
-    pos_weight: float = 1.0,
+    pos_weight: float = 1.5,
     use_ssl: bool = False,
+    use_target_encoder: bool = True,
 ) -> pd.DataFrame:
     """Systematically run all 4 modality ablation variants and report deltas."""
     if device is None:
@@ -595,6 +654,7 @@ def run_modality_ablation_study(
 
     for display_name, arch in ablation_variants:
         print(f"\n--> Training Variant: {display_name} ({arch})...")
+        use_tgt = use_target_encoder if arch == MODEL_ARCHITECTURE_MULTIMODAL else False
         _, _, results = train_extended_multimodal(
             cache=cache,
             train_df=train_df,
@@ -610,6 +670,7 @@ def run_modality_ablation_study(
             select_best_by=select_best_by,
             pos_weight=pos_weight,
             use_ssl=use_ssl,
+            use_target_encoder=use_tgt,
         )
         results['variant_name'] = display_name
         all_ablation_results.append(results)
@@ -862,7 +923,7 @@ def run_full_multimodal_study(
     run_ablation: bool = kwargs.pop('run_ablation', True)
     run_error_analysis: bool = kwargs.pop('run_error_analysis', True)
     calibrate: bool = kwargs.pop('calibrate', True)
-    pos_weight: float = float(kwargs.pop('pos_weight', 1.0))
+    pos_weight: float = float(kwargs.pop('pos_weight', 1.5))
     use_ssl: bool = bool(kwargs.pop('use_ssl', False))
     ssl_weight: float = float(kwargs.pop('ssl_weight', 0.2))
 
@@ -902,8 +963,43 @@ def run_full_multimodal_study(
     chembl_pretrained_path: str | Path | None = (
         pretrained_encoder_path
         or kwargs.pop('chembl_pretrained_path', None)
+        or kwargs.pop('chembl_encoder_checkpoint', None)
         or kwargs.pop('pretrained_checkpoint', None)
+        or kwargs.pop('encoder_checkpoint', None)
+        or kwargs.pop('chembl_checkpoint', None)
     )
+
+    # Infallible auto-discovery if path not explicitly given or unverified
+    if chembl_pretrained_path is None or not Path(chembl_pretrained_path).is_file():
+        candidate_dirs = [
+            Path(master_nodes_path).resolve().parent,
+            Path(master_nodes_path).resolve().parent.parent,
+            Path(master_nodes_path).resolve().parent.parent / 'pretraining',
+            Path('/content/drive/MyDrive/pxddi-results/pretraining'),
+            Path('/content/drive/MyDrive/pxddi-data'),
+            Path('/content/drive/MyDrive'),
+        ]
+        for cd in candidate_dirs:
+            if cd.is_dir():
+                try:
+                    found = list(cd.glob('**/chembl_pretrained_encoder.pt'))
+                    if found:
+                        chembl_pretrained_path = found[0]
+                        print(f"✅ Auto-discovered ChEMBL Pretrained Checkpoint: {chembl_pretrained_path}")
+                        break
+                except Exception:
+                    pass
+        if chembl_pretrained_path is None or not Path(chembl_pretrained_path).is_file():
+            try:
+                import subprocess
+                find_res = subprocess.getoutput("find /content -name 'chembl_pretrained_encoder.pt' 2>/dev/null").strip().splitlines()
+                matches = [m.strip() for m in find_res if m.strip().endswith('chembl_pretrained_encoder.pt')]
+                if matches and os.path.isfile(matches[0]):
+                    chembl_pretrained_path = matches[0]
+                    print(f"✅ Auto-discovered ChEMBL Checkpoint via Linux search: {chembl_pretrained_path}")
+            except Exception:
+                pass
+
     use_cross_modal_attention: bool = kwargs.pop('use_cross_modal_attention', True)
     use_cross_drug_attention: bool = kwargs.pop('use_cross_drug_attention', False)
     use_target_encoder: bool = kwargs.pop('use_target_encoder', True)
@@ -958,6 +1054,7 @@ def run_full_multimodal_study(
             select_best_by=select_best_by,
             pos_weight=pos_weight,
             use_ssl=use_ssl,
+            use_target_encoder=use_target_encoder,
         )
         ablation_dict = cast(list[dict[str, Any]], ablation_df.to_dict(orient='records'))
 
