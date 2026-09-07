@@ -437,6 +437,9 @@ def train_extended_multimodal(
                     'gene_feature_dim': cache.gene_dim,
                     'gene_hidden_channels': 64,
                     'use_clinical_toxicity': is_multimodal,
+                    'use_neighbor_memory': use_neighbor_memory,
+                    'use_geo_features': is_multimodal,
+                    'geo_dim': cache.geo_dim,
                 },
                 best_weights_path,
             )
@@ -459,6 +462,9 @@ def train_extended_multimodal(
                     'gene_feature_dim': cache.gene_dim,
                     'gene_hidden_channels': 64,
                     'use_clinical_toxicity': is_multimodal,
+                    'use_neighbor_memory': use_neighbor_memory,
+                    'use_geo_features': is_multimodal,
+                    'geo_dim': cache.geo_dim,
                 },
                 best_s1_weights_path,
             )
