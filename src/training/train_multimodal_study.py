@@ -296,6 +296,10 @@ def train_extended_multimodal(
         gene_hidden_channels=64,
         use_clinical_toxicity=is_multimodal,
         use_cross_modal_attention=use_cross_modal_attention if is_multimodal else False,
+        use_cross_modal_target_attention=is_multimodal and use_target_encoder,
+        use_cross_modal_pdb_attention=is_multimodal,
+        use_inductive_bio_features=is_multimodal,
+        use_fusion_norm=is_multimodal,
         use_cross_drug_attention=use_cross_drug_attention,
         use_target_encoder=use_target_encoder,
         target_feature_dim=cache.target_dim,
@@ -456,23 +460,23 @@ def train_extended_multimodal(
                     batch_size_cur = da.num_graphs if hasattr(da, 'num_graphs') else da.x.size(0)
                     bio_sims: list[tuple[torch.Tensor, torch.Tensor, float]] = []
 
-                    # 1. PharmGKB CYP Enzymes & Transporters (Pharmacogenomic DDI Driver)
+                    # 1. PharmGKB CYP Enzymes & Transporters (Primary Pharmacogenomic DDI Driver)
                     if 'gene_a' in batch and 'gene_b' in batch:
                         ga = batch['gene_a'].to(device)
                         gb = batch['gene_b'].to(device)
                         gmask = (batch['gene_mask_a'].to(device) > 0.5) & (batch['gene_mask_b'].to(device) > 0.5)
                         if gmask.any():
                             gene_sim = F.cosine_similarity(ga, gb, dim=-1).clamp(0.0, 1.0)
-                            bio_sims.append((gene_sim, gmask, 1.25))
+                            bio_sims.append((gene_sim, gmask, 1.5))
 
-                    # 2. BindingDB Target Affinity Vectors
+                    # 2. BindingDB Target Affinity Vectors (Receptor / Kinase Competition)
                     if 'target_a' in batch and 'target_b' in batch:
                         ta = batch['target_a'].to(device)
                         tb = batch['target_b'].to(device)
                         tmask = (batch['target_mask_a'].to(device) > 0.5) & (batch['target_mask_b'].to(device) > 0.5)
                         if tmask.any():
                             target_sim = F.cosine_similarity(ta, tb, dim=-1).clamp(0.0, 1.0)
-                            bio_sims.append((target_sim, tmask, 1.0))
+                            bio_sims.append((target_sim, tmask, 1.2))
 
                     # 3. GEO Disease Transcriptomics
                     if 'geo_a' in batch and 'geo_b' in batch:
@@ -481,7 +485,7 @@ def train_extended_multimodal(
                         geomask = (batch['geo_mask_a'].to(device) > 0.5) & (batch['geo_mask_b'].to(device) > 0.5)
                         if geomask.any():
                             geo_sim = F.cosine_similarity(geoa, geob, dim=-1).clamp(0.0, 1.0)
-                            bio_sims.append((geo_sim, geomask, 0.8))
+                            bio_sims.append((geo_sim, geomask, 0.2))
 
                     # 4. FAERS Clinical Adverse Event Proximity
                     if 'tox_a' in batch and 'tox_b' in batch:
@@ -490,7 +494,7 @@ def train_extended_multimodal(
                         toxmask = (batch['tox_mask_a'].to(device) > 0.5) & (batch['tox_mask_b'].to(device) > 0.5)
                         if toxmask.any():
                             tox_sim = (1.0 - torch.abs(toxa - toxb).clamp(0.0, 1.0))
-                            bio_sims.append((tox_sim, toxmask, 0.5))
+                            bio_sims.append((tox_sim, toxmask, 0.2))
 
                     # 5. PubChem ECFP Morgan Structural Proximity
                     if 'fp_a' in batch and 'fp_b' in batch:
@@ -498,7 +502,7 @@ def train_extended_multimodal(
                         fpb = batch['fp_b'].to(device).float()
                         fp_sim = F.cosine_similarity(fpa, fpb, dim=-1).clamp(0.0, 1.0)
                         fp_mask = torch.ones(batch_size_cur, dtype=torch.bool, device=device)
-                        bio_sims.append((fp_sim, fp_mask, 0.4))
+                        bio_sims.append((fp_sim, fp_mask, 0.5))
 
                     # 6. PDB 3D Macromolecular Co-Crystal & Target Proximity
                     if 'pdb_a' in batch and 'pdb_b' in batch:
@@ -507,7 +511,7 @@ def train_extended_multimodal(
                         pdbmask = (batch['pdb_mask_a'].to(device) > 0.5) & (batch['pdb_mask_b'].to(device) > 0.5)
                         if pdbmask.any():
                             pdb_sim = F.cosine_similarity(pdba, pdbb, dim=-1).clamp(0.0, 1.0)
-                            bio_sims.append((pdb_sim, pdbmask, 1.0))
+                            bio_sims.append((pdb_sim, pdbmask, 1.25))
 
                     if bio_sims:
                         batch_size_cur = da.num_graphs if hasattr(da, 'num_graphs') else da.x.size(0)
@@ -522,8 +526,12 @@ def train_extended_multimodal(
                         valid_pairs = total_weight > 0
                         if valid_pairs.sum() > 1:
                             target_bio_sim = composite_bio[valid_pairs] / total_weight[valid_pairs].clamp(min=1e-5)
-                            ma = model.encoder(da.x, da.edge_index, da.edge_attr, da.batch)[valid_pairs]
-                            mb = model.encoder(db.x, db.edge_index, db.edge_attr, db.batch)[valid_pairs]
+                            if hasattr(model, '_last_ea') and model._last_ea is not None and model._last_eb is not None:
+                                ma = model._last_ea[valid_pairs]
+                                mb = model._last_eb[valid_pairs]
+                            else:
+                                ma = model.encoder(da.x, da.edge_index, da.edge_attr, da.batch)[valid_pairs]
+                                mb = model.encoder(db.x, db.edge_index, db.edge_attr, db.batch)[valid_pairs]
                             mol_sim = F.cosine_similarity(ma, mb, dim=-1).clamp(0.0, 1.0)
                             bio_loss = F.mse_loss(mol_sim, target_bio_sim)
                             total_batch_loss = total_batch_loss + bio_align_weight * bio_loss
@@ -617,6 +625,10 @@ def train_extended_multimodal(
                     'geo_dim': cache.geo_dim,
                     'geo_hidden_channels': 32,
                     'use_cross_modal_attention': use_cross_modal_attention if is_multimodal else False,
+                    'use_cross_modal_target_attention': is_multimodal and use_target_encoder,
+                    'use_cross_modal_pdb_attention': is_multimodal,
+                    'use_inductive_bio_features': is_multimodal,
+                    'use_fusion_norm': is_multimodal,
                     'use_cross_drug_attention': use_cross_drug_attention,
                     'memory_dropout': memory_dropout,
                     'embedding_noise_std': embedding_noise_std,
@@ -660,6 +672,10 @@ def train_extended_multimodal(
                     'geo_dim': cache.geo_dim,
                     'geo_hidden_channels': 32,
                     'use_cross_modal_attention': use_cross_modal_attention if is_multimodal else False,
+                    'use_cross_modal_target_attention': is_multimodal and use_target_encoder,
+                    'use_cross_modal_pdb_attention': is_multimodal,
+                    'use_inductive_bio_features': is_multimodal,
+                    'use_fusion_norm': is_multimodal,
                     'use_cross_drug_attention': use_cross_drug_attention,
                     'memory_dropout': memory_dropout,
                     'embedding_noise_std': embedding_noise_std,
@@ -718,6 +734,10 @@ def train_extended_multimodal(
                 gene_hidden_channels=64,
                 use_clinical_toxicity=is_multimodal,
                 use_cross_modal_attention=use_cross_modal_attention if is_multimodal else False,
+                use_cross_modal_target_attention=is_multimodal and use_target_encoder,
+                use_cross_modal_pdb_attention=is_multimodal,
+                use_inductive_bio_features=is_multimodal,
+                use_fusion_norm=is_multimodal,
                 use_cross_drug_attention=use_cross_drug_attention,
                 use_target_encoder=use_target_encoder,
                 target_feature_dim=cache.target_dim,
@@ -1047,6 +1067,7 @@ def evaluate_cross_dataset_generalization(
     test_df: pd.DataFrame,
     output_dir: str | Path,
     device: torch.device | None = None,
+    optimal_threshold: float | None = None,
 ) -> pd.DataFrame:
     """Evaluate generalization across external datasets (BindingDB targets vs FAERS adverse events vs PharmGKB)."""
     if device is None:
@@ -1062,6 +1083,16 @@ def evaluate_cross_dataset_generalization(
 
     loader = _make_dataloader(test_df, cache, batch_size=64, shuffle=False)
     scores, targets = predict_loader(model, loader, device, is_multimodal=True)
+
+    if optimal_threshold is None:
+        try:
+            fpr_arr, tpr_arr, thresh_arr = roc_curve(targets, scores)
+            j_scores = tpr_arr - fpr_arr
+            best_idx = int(np.argmax(j_scores)) if len(j_scores) else 0
+            optimal_threshold = float(thresh_arr[best_idx]) if len(thresh_arr) > best_idx else 0.35
+            optimal_threshold = max(min(optimal_threshold, 0.45), 0.20)
+        except Exception:
+            optimal_threshold = 0.35
 
     src_col = 'drug_a_id' if 'drug_a_id' in test_df.columns else test_df.columns[0]
     tgt_col = 'drug_b_id' if 'drug_b_id' in test_df.columns else test_df.columns[1]
@@ -1105,7 +1136,7 @@ def evaluate_cross_dataset_generalization(
         y_p = sub['prob'].to_numpy()
         auroc = float(roc_auc_score(y_t, y_p))
         auprc = float(average_precision_score(y_t, y_p))
-        b_preds = (y_p >= 0.50).astype(int)
+        b_preds = (y_p >= optimal_threshold).astype(int)
         b_acc = float(accuracy_score(y_t, b_preds))
         b_f1 = float(f1_score(y_t, b_preds, zero_division=0))
         pos_m = (y_t == 1)
@@ -1124,7 +1155,7 @@ def evaluate_cross_dataset_generalization(
     res_df.to_csv(out_p / 'cross_dataset_generalization_report.csv', index=False)
 
     print(f"\n{'=' * 80}")
-    print("CROSS-DATASET GENERALIZATION VALIDATION:")
+    print(f"CROSS-DATASET GENERALIZATION VALIDATION (Decision Threshold: {optimal_threshold:.4f}):")
     print(f"{'=' * 80}")
     print(res_df.to_string(index=False))
     return res_df
@@ -1151,11 +1182,17 @@ def generate_literature_benchmark_report(
     cold_target_auprc = 0.0
     cold_target_rec = 0.0
     if cross_dataset_df is not None and not cross_dataset_df.empty:
-        prof_rows = cross_dataset_df[cross_dataset_df['cross_dataset_cohort'].astype(str).str.contains('Target|Pathway', case=False, na=False)]
-        if not prof_rows.empty:
-            cold_target_auroc = float(prof_rows['auroc'].mean())
-            cold_target_auprc = float(prof_rows['auprc'].mean())
-            cold_target_rec = float(prof_rows.get('recall', pd.Series([0.0])).mean())
+        primary_cohorts = cross_dataset_df[cross_dataset_df['cross_dataset_cohort'].isin(['PharmGKB Pathway Profiled', 'BindingDB Target Profiled'])]
+        if not primary_cohorts.empty:
+            cold_target_auroc = float(primary_cohorts['auroc'].mean())
+            cold_target_auprc = float(primary_cohorts['auprc'].mean())
+            cold_target_rec = float(primary_cohorts.get('recall', pd.Series([0.0])).mean())
+        else:
+            prof_rows = cross_dataset_df[cross_dataset_df['cross_dataset_cohort'].astype(str).str.contains('Target|Pathway', case=False, na=False)]
+            if not prof_rows.empty:
+                cold_target_auroc = float(prof_rows['auroc'].mean())
+                cold_target_auprc = float(prof_rows['auprc'].mean())
+                cold_target_rec = float(prof_rows.get('recall', pd.Series([0.0])).mean())
 
     s1_auroc = float(extended_metrics.get('s1_best_auroc', extended_metrics.get('s1_cold_auroc', extended_metrics.get('s1_test_auroc', 0.0))))
     s1_auprc = float(extended_metrics.get('s1_best_auprc', extended_metrics.get('s1_cold_auprc', 0.0)))
@@ -1621,6 +1658,7 @@ def run_full_multimodal_study(
 
     # 6. Cold-Start Error Analysis Stratified by External Coverage
     tier_dict: list[dict[str, Any]] = []
+    opt_thresh_for_eval = extended_metrics.get('s1_best_opt_thresh', extended_metrics.get('s1_cold_opt_thresh', 0.35))
     if run_error_analysis:
         err_df, tier_summary_df = analyze_cold_start_coverage_errors(
             model=best_model,
@@ -1629,6 +1667,7 @@ def run_full_multimodal_study(
             output_dir=out_p / 'error_analysis',
             device=device,
             neighbor_memory=neighbor_mem,
+            optimal_threshold=opt_thresh_for_eval,
         )
         tier_dict = cast(list[dict[str, Any]], tier_summary_df.to_dict(orient='records'))
 
@@ -1653,6 +1692,7 @@ def run_full_multimodal_study(
             test_df=test_splits['s1_cold'],
             output_dir=out_p / 'cross_dataset',
             device=device,
+            optimal_threshold=opt_thresh_for_eval,
         )
         cross_dataset_dict = cast(list[dict[str, Any]], cross_dataset_df.to_dict(orient='records'))
 

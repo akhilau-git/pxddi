@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool
 
 from .encoder import CrossDrugAttention, EdgeAwareMolecularEncoder, MolecularEncoder
@@ -75,6 +76,10 @@ def model_from_checkpoint(checkpoint):
     use_geo_enc = bool(checkpoint.get('use_geo_encoder', any('geo_encoder' in k for k in state_dict)))
     use_cross_modal = bool(checkpoint.get('use_cross_modal_attention', any('cross_modal_attention' in k for k in state_dict)))
     use_cross_drug = bool(checkpoint.get('use_cross_drug_attention', any('cross_drug_attention' in k for k in state_dict)))
+    use_tgt_attn = bool(checkpoint.get('use_cross_modal_target_attention', any('cross_modal_target_attention' in k for k in state_dict)))
+    use_pdb_attn = bool(checkpoint.get('use_cross_modal_pdb_attention', any('cross_modal_pdb_attention' in k for k in state_dict)))
+    use_inductive = bool(checkpoint.get('use_inductive_bio_features', False))
+    use_fnorm = bool(checkpoint.get('use_fusion_norm', any('fusion_norm' in k for k in state_dict)))
 
     if classifier_w is not None and isinstance(classifier_w, torch.Tensor):
         h_dim = int(checkpoint.get('hidden_channels', 64))
@@ -82,10 +87,12 @@ def model_from_checkpoint(checkpoint):
         pdb_extra = (64 * 3) if use_pdb else 0
         base_dim = (h_dim + 128 + 64) * 3 + target_extra + pdb_extra + 4
         diff = classifier_w.shape[1] - base_dim
-        if diff in [3, 7, 11, 67, 71]:
+        if diff in [3, 7, 11, 12, 16, 20, 67, 71, 76, 80]:
             use_neighbor_mem = True
-        if diff in [4, 7, 11, 64, 67, 71]:
+        if diff in [4, 7, 11, 13, 16, 20, 64, 67, 71, 73, 76, 80]:
             use_geo = True
+        if diff in [9, 12, 13, 16, 20, 73, 76, 80]:
+            use_inductive = True
 
     arch = checkpoint.get('architecture_version', MODEL_ARCHITECTURE_LEGACY)
     use_clin_tox = bool(checkpoint.get('use_clinical_toxicity', arch in {MODEL_ARCHITECTURE_MULTIMODAL, MODEL_ARCHITECTURE_ABLATION_FAERS}))
@@ -106,6 +113,8 @@ def model_from_checkpoint(checkpoint):
         num_side_effects=checkpoint.get('num_side_effects', 1),
         use_cross_modal_attention=use_cross_modal,
         use_cross_drug_attention=use_cross_drug,
+        use_cross_modal_target_attention=use_tgt_attn,
+        use_cross_modal_pdb_attention=use_pdb_attn,
         use_target_encoder=use_target,
         target_feature_dim=checkpoint.get('target_feature_dim', 50),
         target_hidden_channels=checkpoint.get('target_hidden_channels', 64),
@@ -117,11 +126,13 @@ def model_from_checkpoint(checkpoint):
         geo_dim=checkpoint.get('geo_dim', 2),
         geo_hidden_channels=checkpoint.get('geo_hidden_channels', 32),
         memory_dropout=float(checkpoint.get('memory_dropout', 0.50)),
+        use_inductive_bio_features=use_inductive,
+        use_fusion_norm=use_fnorm,
     )
 
 
 class CrossModalGeneAttention(nn.Module):
-    """Pair-isolated cross-modal attention between molecular graph and pharmacogenomic gene vectors."""
+    """Pair-isolated cross-modal attention between molecular graph and biological vectors (genes, targets, PDB)."""
 
     def __init__(self, mol_dim: int, gene_dim: int, hidden_dim: int = 64, n_heads: int = 2):
         super().__init__()
@@ -145,6 +156,9 @@ class CrossModalGeneAttention(nn.Module):
         if mask is not None:
             gated = gated * mask.view(-1, 1)
         return self.norm(gated)
+
+
+CrossModalBioAttention = CrossModalGeneAttention
 
 
 class PxDDIModel(nn.Module):
@@ -331,6 +345,11 @@ class PxDDIModel(nn.Module):
             self.geo_gate = None
 
         geo_feature_channels = (self.geo_hidden_channels * 2) if (self.geo_encoder is not None) else ((self.geo_dim * 2) if self.use_geo_features else 0)
+        self.use_inductive_bio_features = bool(kwargs.get('use_inductive_bio_features', kwargs.get('use_inductive', False)))
+        inductive_channels = 9 if self.use_inductive_bio_features else 0
+        self.mol_dropout = float(kwargs.get('mol_dropout', 0.15))
+        self.use_fusion_norm = bool(kwargs.get('use_fusion_norm', False))
+
         risk_input_channels = pair_embedding_channels * pair_feature_multiplier + (
             2 if use_toxicity_pair_features else 0
         ) + (
@@ -339,15 +358,44 @@ class PxDDIModel(nn.Module):
             2 if self.use_clinical_toxicity else 0
         ) + (
             geo_feature_channels
+        ) + (
+            inductive_channels
         )
+
+        if self.use_fusion_norm:
+            self.fusion_norm = nn.LayerNorm(risk_input_channels)
+        else:
+            self.fusion_norm = None
+
         if self.use_cross_modal_attention and architecture_requires_multimodal_features(architecture_version):
             self.cross_modal_attention = CrossModalGeneAttention(
                 mol_dim=hidden_channels,
                 gene_dim=gene_feature_dim,
                 hidden_dim=gene_hidden_channels,
             )
+            use_tgt_attn = bool(kwargs.get('use_cross_modal_target_attention', False))
+            use_pdb_attn = bool(kwargs.get('use_cross_modal_pdb_attention', False))
+            if use_tgt_attn and self.use_target_encoder:
+                self.cross_modal_target_attention = CrossModalBioAttention(
+                    mol_dim=hidden_channels,
+                    gene_dim=self.target_feature_dim,
+                    hidden_dim=self.target_hidden_channels,
+                )
+            else:
+                self.cross_modal_target_attention = None
+
+            if use_pdb_attn and self.use_pdb_encoder:
+                self.cross_modal_pdb_attention = CrossModalBioAttention(
+                    mol_dim=hidden_channels,
+                    gene_dim=self.pdb_feature_dim,
+                    hidden_dim=self.pdb_hidden_channels,
+                )
+            else:
+                self.cross_modal_pdb_attention = None
         else:
             self.cross_modal_attention = None
+            self.cross_modal_target_attention = None
+            self.cross_modal_pdb_attention = None
 
         self.risk_classifier = nn.Sequential(
             nn.Linear(risk_input_channels, 64),
@@ -437,6 +485,17 @@ class PxDDIModel(nn.Module):
         if patient is not None:
             g = self.patient_encoder(patient['age_band'], patient['sex'], patient['comorbidities'])
             ea, eb = ea*g, eb*g
+
+        self._last_ea = ea
+        self._last_eb = eb
+
+        # Stochastic molecular feature dropout: prevents transductive GNN shortcutting
+        if self.training and getattr(self, 'mol_dropout', 0.0) > 0.0:
+            keep_prob = max(1.0 - self.mol_dropout, 1e-4)
+            mask_a = (torch.rand((ea.size(0), 1), device=ea.device) < keep_prob).float()
+            mask_b = (torch.rand((eb.size(0), 1), device=eb.device) < keep_prob).float()
+            ea = (ea * mask_a) / keep_prob
+            eb = (eb * mask_b) / keep_prob
             
         if self.motif_encoder is not None:
             if not hasattr(drug_a, 'motif_features') or not hasattr(drug_b, 'motif_features'):
@@ -495,7 +554,10 @@ class PxDDIModel(nn.Module):
                 t_in_b = target_b.float().view(-1, self.target_feature_dim)
                 ta = self.target_encoder(t_in_a)
                 tb = self.target_encoder(t_in_b)
-                if self.cross_modal_attention is not None and t_in_a.size(-1) == self.cross_modal_attention.gene_proj.in_features:
+                if getattr(self, 'cross_modal_target_attention', None) is not None:
+                    ta = ta + self.cross_modal_target_attention(ea, t_in_a, target_mask_a)
+                    tb = tb + self.cross_modal_target_attention(eb, t_in_b, target_mask_b)
+                elif self.cross_modal_attention is not None and t_in_a.size(-1) == self.cross_modal_attention.gene_proj.in_features:
                     ta = ta + self.cross_modal_attention(ea, t_in_a, target_mask_a)
                     tb = tb + self.cross_modal_attention(eb, t_in_b, target_mask_b)
                 ta_gate = self.target_gate(ta)
@@ -518,6 +580,12 @@ class PxDDIModel(nn.Module):
                 p_in_b = pdb_b.float().view(-1, self.pdb_feature_dim)
                 pa = self.pdb_encoder(p_in_a)
                 pb = self.pdb_encoder(p_in_b)
+                if getattr(self, 'cross_modal_pdb_attention', None) is not None:
+                    pa = pa + self.cross_modal_pdb_attention(ea, p_in_a, pdb_mask_a)
+                    pb = pb + self.cross_modal_pdb_attention(eb, p_in_b, pdb_mask_b)
+                elif self.cross_modal_attention is not None and p_in_a.size(-1) == self.cross_modal_attention.gene_proj.in_features:
+                    pa = pa + self.cross_modal_attention(ea, p_in_a, pdb_mask_a)
+                    pb = pb + self.cross_modal_attention(eb, p_in_b, pdb_mask_b)
                 pa_gate = self.pdb_gate(pa)
                 pb_gate = self.pdb_gate(pb)
                 if pdb_mask_a is not None:
@@ -590,7 +658,82 @@ class PxDDIModel(nn.Module):
             else:
                 geo_dim_count = (self.geo_hidden_channels * 2) if self.geo_encoder is not None else (self.geo_dim * 2)
                 features.append(torch.zeros((ea.size(0), geo_dim_count), device=ea.device, dtype=ea.dtype))
+
+        # Explicit Inductive Biological Overlap Signals (strictly generalizable to unseen S1 drugs)
+        if self.use_inductive_bio_features:
+            batch_sz = ea.size(0)
+            inductive_feats: list[torch.Tensor] = []
+
+            # 1. CYP Enzyme Cosine Overlap (PharmGKB)
+            if gene_a is not None and gene_b is not None:
+                g_a_in = gene_a.float().view(batch_sz, -1)
+                g_b_in = gene_b.float().view(batch_sz, -1)
+                cyp_sim = F.cosine_similarity(g_a_in, g_b_in, dim=-1).clamp(0.0, 1.0).unsqueeze(-1)
+                if gene_mask_a is not None and gene_mask_b is not None:
+                    cyp_sim = cyp_sim * (gene_mask_a.view(batch_sz, 1) * gene_mask_b.view(batch_sz, 1))
+                inductive_feats.append(cyp_sim)
+            else:
+                inductive_feats.append(torch.zeros((batch_sz, 1), device=ea.device, dtype=ea.dtype))
+
+            # 2. BindingDB Target Affinity Cosine Overlap
+            if target_a is not None and target_b is not None:
+                t_a_in = target_a.float().view(batch_sz, -1)
+                t_b_in = target_b.float().view(batch_sz, -1)
+                tgt_sim = F.cosine_similarity(t_a_in, t_b_in, dim=-1).clamp(0.0, 1.0).unsqueeze(-1)
+                if target_mask_a is not None and target_mask_b is not None:
+                    tgt_sim = tgt_sim * (target_mask_a.view(batch_sz, 1) * target_mask_b.view(batch_sz, 1))
+                inductive_feats.append(tgt_sim)
+            else:
+                inductive_feats.append(torch.zeros((batch_sz, 1), device=ea.device, dtype=ea.dtype))
+
+            # 3. PDB 3D Macromolecular Co-Crystal Cosine Overlap
+            if pdb_a is not None and pdb_b is not None:
+                p_a_in = pdb_a.float().view(batch_sz, -1)
+                p_b_in = pdb_b.float().view(batch_sz, -1)
+                pdb_sim = F.cosine_similarity(p_a_in, p_b_in, dim=-1).clamp(0.0, 1.0).unsqueeze(-1)
+                if pdb_mask_a is not None and pdb_mask_b is not None:
+                    pdb_sim = pdb_sim * (pdb_mask_a.view(batch_sz, 1) * pdb_mask_b.view(batch_sz, 1))
+                inductive_feats.append(pdb_sim)
+            else:
+                inductive_feats.append(torch.zeros((batch_sz, 1), device=ea.device, dtype=ea.dtype))
+
+            # 4. ECFP Morgan Structural Fingerprint Similarity
+            if fp_a is not None and fp_b is not None:
+                fp_sim = F.cosine_similarity(fp_a.float().view(batch_sz, -1), fp_b.float().view(batch_sz, -1), dim=-1).clamp(0.0, 1.0).unsqueeze(-1)
+                inductive_feats.append(fp_sim)
+            elif hasattr(drug_a, 'fingerprint_features') and hasattr(drug_b, 'fingerprint_features'):
+                fp_sim = F.cosine_similarity(drug_a.fingerprint_features.float().view(batch_sz, -1), drug_b.fingerprint_features.float().view(batch_sz, -1), dim=-1).clamp(0.0, 1.0).unsqueeze(-1)
+                inductive_feats.append(fp_sim)
+            else:
+                inductive_feats.append(torch.zeros((batch_sz, 1), device=ea.device, dtype=ea.dtype))
+
+            # 5. GEO Transcriptomic Perturbation Overlap
+            if geo_a is not None and geo_b is not None:
+                geo_sim = F.cosine_similarity(geo_a.float().view(batch_sz, -1), geo_b.float().view(batch_sz, -1), dim=-1).clamp(-1.0, 1.0).unsqueeze(-1)
+                if geo_mask_a is not None and geo_mask_b is not None:
+                    geo_sim = geo_sim * (geo_mask_a.view(batch_sz, 1) * geo_mask_b.view(batch_sz, 1))
+                inductive_feats.append(geo_sim)
+            else:
+                inductive_feats.append(torch.zeros((batch_sz, 1), device=ea.device, dtype=ea.dtype))
+
+            # 6. FAERS Adverse Event Severity Product
+            if clinical_tox_a is not None and clinical_tox_b is not None:
+                inductive_feats.append(clinical_tox_a.float().view(batch_sz, 1) * clinical_tox_b.float().view(batch_sz, 1))
+            else:
+                inductive_feats.append(torch.zeros((batch_sz, 1), device=ea.device, dtype=ea.dtype))
+
+            # 7-9. Joint Modality Availability Flags
+            g_ind = (gene_mask_a.view(batch_sz, 1) * gene_mask_b.view(batch_sz, 1)) if (gene_mask_a is not None and gene_mask_b is not None) else torch.zeros((batch_sz, 1), device=ea.device, dtype=ea.dtype)
+            t_ind = (target_mask_a.view(batch_sz, 1) * target_mask_b.view(batch_sz, 1)) if (target_mask_a is not None and target_mask_b is not None) else torch.zeros((batch_sz, 1), device=ea.device, dtype=ea.dtype)
+            p_ind = (pdb_mask_a.view(batch_sz, 1) * pdb_mask_b.view(batch_sz, 1)) if (pdb_mask_a is not None and pdb_mask_b is not None) else torch.zeros((batch_sz, 1), device=ea.device, dtype=ea.dtype)
+            inductive_feats.extend([g_ind, t_ind, p_ind])
+
+            features.append(torch.cat(inductive_feats, dim=1))
+
         combined = torch.cat(features, dim=1)
+
+        if self.fusion_norm is not None:
+            combined = self.fusion_norm(combined)
 
         risk_out = self.risk_classifier(combined)
         if self.num_side_effects == 1:

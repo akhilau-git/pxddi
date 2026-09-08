@@ -230,5 +230,121 @@ def test_pdb_and_geo_encoders_forward():
     assert risk_out.shape == (1,)
 
 
+def test_inductive_bio_features_and_cross_modal_attention():
+    from src.models.ddi_model import PxDDIModel, MODEL_ARCHITECTURE_MULTIMODAL
+    from src.data_prep.prepare_twosides import smiles_to_graph, FEATURE_SCHEMA_RICH
+
+    g1 = smiles_to_graph("CC(=O)Oc1ccccc1C(=O)O", feature_schema=FEATURE_SCHEMA_RICH, include_fingerprint_features=True)
+    g2 = smiles_to_graph("CC(C)Cc1ccc(cc1)C(C)C(=O)O", feature_schema=FEATURE_SCHEMA_RICH, include_fingerprint_features=True)
+
+    model = PxDDIModel(
+        in_channels=g1.x.size(1),
+        hidden_channels=64,
+        edge_feature_dim=g1.edge_attr.size(1),
+        architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+        use_clinical_toxicity=True,
+        use_cross_modal_attention=True,
+        use_cross_modal_target_attention=True,
+        use_cross_modal_pdb_attention=True,
+        use_target_encoder=True,
+        target_feature_dim=20,
+        target_hidden_channels=64,
+        use_pdb_encoder=True,
+        pdb_feature_dim=50,
+        pdb_hidden_channels=64,
+        use_geo_features=True,
+        use_geo_encoder=True,
+        geo_dim=2,
+        geo_hidden_channels=32,
+        use_inductive_bio_features=True,
+        use_fusion_norm=True,
+        mol_dropout=0.20,
+    )
+
+    assert model.cross_modal_target_attention is not None
+    assert model.cross_modal_pdb_attention is not None
+    assert model.fusion_norm is not None
+    assert model.use_inductive_bio_features is True
+
+    # Test in training mode (dropout active)
+    model.train()
+    gene_a = torch.ones(1, 50)
+    gene_b = torch.ones(1, 50)
+    g_mask = torch.ones(1)
+    target_a = torch.randn(1, 20)
+    target_b = torch.randn(1, 20)
+    t_mask = torch.ones(1)
+    pdb_a = torch.randn(1, 50)
+    pdb_b = torch.randn(1, 50)
+    p_mask = torch.ones(1)
+    fp_a = torch.randn(1, 1024)
+    fp_b = torch.randn(1, 1024)
+    geo_a = torch.randn(1, 2)
+    geo_b = torch.randn(1, 2)
+    geo_mask = torch.ones(1)
+    tox_a = torch.tensor([[0.8]])
+    tox_b = torch.tensor([[0.5]])
+
+    risk_out, tox_a_l, tox_b_l = model(
+        drug_a=g1,
+        drug_b=g2,
+        gene_a=gene_a,
+        gene_b=gene_b,
+        gene_mask_a=g_mask,
+        gene_mask_b=g_mask,
+        target_a=target_a,
+        target_b=target_b,
+        target_mask_a=t_mask,
+        target_mask_b=t_mask,
+        pdb_a=pdb_a,
+        pdb_b=pdb_b,
+        pdb_mask_a=p_mask,
+        pdb_mask_b=p_mask,
+        fp_a=fp_a,
+        fp_b=fp_b,
+        geo_a=geo_a,
+        geo_b=geo_b,
+        geo_mask_a=geo_mask,
+        geo_mask_b=geo_mask,
+        clinical_tox_a=tox_a,
+        clinical_tox_b=tox_b,
+    )
+
+    assert risk_out is not None
+    assert risk_out.shape == (1,)
+    assert hasattr(model, '_last_ea')
+    assert model._last_ea is not None
+
+    # Test in eval mode (deterministic)
+    model.eval()
+    risk_eval, _, _ = model(
+        drug_a=g1,
+        drug_b=g2,
+        gene_a=gene_a,
+        gene_b=gene_b,
+        gene_mask_a=g_mask,
+        gene_mask_b=g_mask,
+        target_a=target_a,
+        target_b=target_b,
+        target_mask_a=t_mask,
+        target_mask_b=t_mask,
+        pdb_a=pdb_a,
+        pdb_b=pdb_b,
+        pdb_mask_a=p_mask,
+        pdb_mask_b=p_mask,
+        fp_a=fp_a,
+        fp_b=fp_b,
+        geo_a=geo_a,
+        geo_b=geo_b,
+        geo_mask_a=geo_mask,
+        geo_mask_b=geo_mask,
+        clinical_tox_a=tox_a,
+        clinical_tox_b=tox_b,
+    )
+    assert risk_eval is not None
+    assert torch.is_tensor(risk_eval)
+
+
+
 
 
