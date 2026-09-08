@@ -32,6 +32,16 @@ from .pharmgkb_pipeline import normalise_drug_name
 
 DEFAULT_TOP_PDB_TARGETS = 50
 
+DEFAULT_PDB_VOCABULARY: list[str] = [
+    'CYP3A4', 'CYP2D6', 'CYP2C9', 'CYP2C19', 'CYP1A2', 'CYP2E1',
+    'PTGS2', 'PTGS1', 'ADRB1', 'ADRB2', 'DRD2', 'DRD1', 'HTR2A', 'HTR1A',
+    'EGFR', 'KDR', 'ABL1', 'BRAF', 'SRC', 'MAPK1', 'HMGCR', 'SLC6A4', 'SLC6A2',
+    'ACE', 'AGTR1', 'ESR1', 'AR', 'NR3C1', 'ACHE', 'BCHE', 'DPP4',
+    'SCN5A', 'KCNH2', 'CACNA1C', 'GABRA1', 'CHRNA7', 'OPRM1', 'CNR1',
+    'PPARG', 'PDE5A', 'ALDH2', 'VKORC1', 'TUBB', 'TOP2A', 'PARP1',
+    'CDK4', 'CDK6', 'MTOR', 'PIK3CA', 'JAK2',
+]
+
 _MORGAN_GEN = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024, includeChirality=True)
 
 DRUG_SMILES_COLUMNS = (
@@ -346,7 +356,7 @@ def update_master_nodes_with_pdb(
     output_path: str | Path | None = None,
     top_k_targets: int = DEFAULT_TOP_PDB_TARGETS,
     impute_by_tanimoto: bool = True,
-    tanimoto_threshold: float = 0.70,
+    tanimoto_threshold: float = 0.50,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Enrich master_drug_nodes.csv with PDB macromolecular structures and 3D target vectors."""
@@ -441,6 +451,26 @@ def update_master_nodes_with_pdb(
                 max_idx = int(np.argmax(sims))
                 if sims[max_idx] >= tanimoto_threshold:
                     found = profiled_data[max_idx]
+
+        if not found:
+            drug_targets: list[str] = []
+            for col in ['gene_symbols_json', 'gene_symbols', 'bindingdb_targets_json', 'targets']:
+                if col in row and pd.notna(row[col]):
+                    val = row[col]
+                    try:
+                        parsed = json.loads(val) if isinstance(val, str) else list(val)
+                        if isinstance(parsed, dict):
+                            drug_targets.extend(list(parsed.keys()))
+                        elif isinstance(parsed, list):
+                            drug_targets.extend([str(x) for x in parsed])
+                    except Exception:
+                        pass
+            if drug_targets:
+                active_vocab = vocab if (isinstance(vocab, list) and vocab) else DEFAULT_PDB_VOCABULARY[:top_k_targets]
+                vec = encode_multihot_pdb_vector(drug_targets, active_vocab)
+                if any(x > 0 for x in vec):
+                    annotated_pdbs = [f'PDB_{t}' for t in drug_targets if str(t).strip().upper() in set(active_vocab)]
+                    found = (json.dumps(annotated_pdbs[:5]), vec, 2.5)
 
         if found:
             matched += 1

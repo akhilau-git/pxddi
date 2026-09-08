@@ -341,7 +341,8 @@ class CachedDDIPairDataset(Dataset):
             try:
                 da_list = [s[0] for s in self.samples]
                 db_list = [s[1] for s in self.samples]
-                m_arr = neighbor_memory.score_batch(da_list, db_list)
+                exclude_query = bool(kwargs.get('exclude_query_pairs', kwargs.get('is_train', False)))
+                m_arr = neighbor_memory.score_batch(da_list, db_list, exclude_query_pairs=exclude_query)
                 self.memory_features = [torch.from_numpy(v).float() for v in m_arr]
             except Exception:
                 self.memory_features = []
@@ -435,6 +436,8 @@ def build_cached_multimodal_dataloader(
     **kwargs: Any,
 ) -> DataLoader:
     """Build high-throughput DataLoader using RAM-cached molecular and multi-modal features."""
+    is_train = bool(kwargs.pop('is_train', shuffle))
+    exclude_query = bool(kwargs.pop('exclude_query_pairs', is_train))
     dataset = CachedDDIPairDataset(
         edges_df=edges_df,
         molecular_cache=molecular_cache,
@@ -442,6 +445,9 @@ def build_cached_multimodal_dataloader(
         target_col=target_col,
         label_col=label_col,
         neighbor_memory=neighbor_memory,
+        is_train=is_train,
+        exclude_query_pairs=exclude_query,
+        **kwargs,
     )
     return DataLoader(
         dataset,

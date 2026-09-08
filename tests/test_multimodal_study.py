@@ -179,4 +179,53 @@ def test_model_from_checkpoint_auto_detection():
     assert model.use_clinical_toxicity is True
 
 
+def test_pdb_and_geo_encoders_forward():
+    from src.models.ddi_model import PxDDIModel, MODEL_ARCHITECTURE_MULTIMODAL
+    from src.data_prep.prepare_twosides import smiles_to_graph, FEATURE_SCHEMA_RICH
+
+    g1 = smiles_to_graph("CC(=O)Oc1ccccc1C(=O)O", feature_schema=FEATURE_SCHEMA_RICH, include_fingerprint_features=True)
+    g2 = smiles_to_graph("CC(=O)Nc1ccc(O)cc1", feature_schema=FEATURE_SCHEMA_RICH, include_fingerprint_features=True)
+
+    model = PxDDIModel(
+        in_channels=g1.x.size(1),
+        hidden_channels=32,
+        edge_feature_dim=g1.edge_attr.size(1),
+        architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+        use_pdb_encoder=True,
+        pdb_feature_dim=50,
+        pdb_hidden_channels=64,
+        use_geo_features=True,
+        use_geo_encoder=True,
+        geo_dim=2,
+        geo_hidden_channels=32,
+    )
+
+    assert model.pdb_encoder is not None
+    assert model.geo_encoder is not None
+
+    pdb_a = torch.randn(1, 50)
+    pdb_b = torch.randn(1, 50)
+    pdb_mask = torch.ones(1)
+    geo_a = torch.randn(1, 2)
+    geo_b = torch.randn(1, 2)
+    geo_mask = torch.ones(1)
+
+    model.eval()
+    risk_out, tox_a, tox_b = model(
+        drug_a=g1,
+        drug_b=g2,
+        pdb_a=pdb_a,
+        pdb_b=pdb_b,
+        pdb_mask_a=pdb_mask,
+        pdb_mask_b=pdb_mask,
+        geo_a=geo_a,
+        geo_b=geo_b,
+        geo_mask_a=geo_mask,
+        geo_mask_b=geo_mask,
+    )
+    assert risk_out is not None
+    assert risk_out.shape == (1,)
+
+
+
 

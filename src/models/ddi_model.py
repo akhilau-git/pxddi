@@ -71,17 +71,20 @@ def model_from_checkpoint(checkpoint):
     use_neighbor_mem = bool(checkpoint.get('use_neighbor_memory', False))
     use_geo = bool(checkpoint.get('use_geo_features', False))
     use_target = bool(checkpoint.get('use_target_encoder', any('target_encoder' in k for k in state_dict)))
+    use_pdb = bool(checkpoint.get('use_pdb_encoder', any('pdb_encoder' in k for k in state_dict)))
+    use_geo_enc = bool(checkpoint.get('use_geo_encoder', any('geo_encoder' in k for k in state_dict)))
     use_cross_modal = bool(checkpoint.get('use_cross_modal_attention', any('cross_modal_attention' in k for k in state_dict)))
     use_cross_drug = bool(checkpoint.get('use_cross_drug_attention', any('cross_drug_attention' in k for k in state_dict)))
 
     if classifier_w is not None and isinstance(classifier_w, torch.Tensor):
         h_dim = int(checkpoint.get('hidden_channels', 64))
         target_extra = (64 * 3) if use_target else 0
-        base_dim = (h_dim + 128 + 64) * 3 + target_extra + 4
+        pdb_extra = (64 * 3) if use_pdb else 0
+        base_dim = (h_dim + 128 + 64) * 3 + target_extra + pdb_extra + 4
         diff = classifier_w.shape[1] - base_dim
-        if diff in [3, 7, 11]:
+        if diff in [3, 7, 11, 67, 71]:
             use_neighbor_mem = True
-        if diff in [4, 7, 11]:
+        if diff in [4, 7, 11, 64, 67, 71]:
             use_geo = True
 
     arch = checkpoint.get('architecture_version', MODEL_ARCHITECTURE_LEGACY)
@@ -106,8 +109,13 @@ def model_from_checkpoint(checkpoint):
         use_target_encoder=use_target,
         target_feature_dim=checkpoint.get('target_feature_dim', 50),
         target_hidden_channels=checkpoint.get('target_hidden_channels', 64),
+        use_pdb_encoder=use_pdb,
+        pdb_feature_dim=checkpoint.get('pdb_feature_dim', checkpoint.get('pdb_dim', 50)),
+        pdb_hidden_channels=checkpoint.get('pdb_hidden_channels', 64),
         use_geo_features=use_geo,
+        use_geo_encoder=use_geo_enc,
         geo_dim=checkpoint.get('geo_dim', 2),
+        geo_hidden_channels=checkpoint.get('geo_hidden_channels', 32),
         memory_dropout=float(checkpoint.get('memory_dropout', 0.50)),
     )
 
@@ -253,6 +261,28 @@ class PxDDIModel(nn.Module):
             self.target_encoder = None
             self.target_gate = None
 
+        self.use_pdb_encoder = bool(
+            kwargs.get('use_pdb_encoder', False)
+            or (kwargs.get('use_pdb', False) and architecture_requires_multimodal_features(architecture_version))
+            or (architecture_version == MODEL_ARCHITECTURE_MULTIMODAL and kwargs.get('use_pdb', True))
+        )
+        self.pdb_feature_dim = kwargs.get('pdb_feature_dim', kwargs.get('pdb_dim', 50))
+        self.pdb_hidden_channels = kwargs.get('pdb_hidden_channels', 64)
+        if self.use_pdb_encoder and architecture_requires_multimodal_features(architecture_version):
+            self.pdb_encoder = nn.Sequential(
+                nn.Linear(self.pdb_feature_dim, self.pdb_hidden_channels),
+                nn.LayerNorm(self.pdb_hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(0.25),
+            )
+            self.pdb_gate = nn.Sequential(
+                nn.Linear(self.pdb_hidden_channels, 1),
+                nn.Sigmoid(),
+            )
+        else:
+            self.pdb_encoder = None
+            self.pdb_gate = None
+
         self.toxicity_head = ToxicityHead(hidden_channels)
         self.patient_encoder = PatientContextEncoder(n_comorbidities, hidden_channels)
         self.uses_multiplicative_fusion = (
@@ -261,6 +291,7 @@ class PxDDIModel(nn.Module):
         motif_dim = int(motif_hidden_channels) if (self.motif_encoder is not None and motif_hidden_channels is not None) else 0
         gene_dim = int(gene_hidden_channels) if (self.gene_encoder is not None and gene_hidden_channels is not None) else 0
         target_dim = int(self.target_hidden_channels) if (self.target_encoder is not None) else 0
+        pdb_dim = int(self.pdb_hidden_channels) if (self.pdb_encoder is not None) else 0
         pair_feature_multiplier = 3 if self.uses_multiplicative_fusion else 2
         pair_embedding_channels = (
             hidden_channels
@@ -269,6 +300,7 @@ class PxDDIModel(nn.Module):
             + (128 if self.fp_encoder is not None else 0)
             + gene_dim
             + target_dim
+            + pdb_dim
         )
         self.use_neighbor_memory = (
             use_neighbor_memory or architecture_version == MODEL_ARCHITECTURE_AUDITDDI_MEMORY
@@ -278,6 +310,27 @@ class PxDDIModel(nn.Module):
             and architecture_requires_multimodal_features(architecture_version)
         )
         self.geo_dim = kwargs.get('geo_dim', 2)
+        self.use_geo_encoder = bool(
+            kwargs.get('use_geo_encoder', False)
+            or (self.use_geo_features and kwargs.get('use_geo_enc', True))
+        )
+        self.geo_hidden_channels = kwargs.get('geo_hidden_channels', 32)
+        if self.use_geo_features and self.use_geo_encoder and architecture_requires_multimodal_features(architecture_version):
+            self.geo_encoder = nn.Sequential(
+                nn.Linear(self.geo_dim, self.geo_hidden_channels),
+                nn.LayerNorm(self.geo_hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(0.25),
+            )
+            self.geo_gate = nn.Sequential(
+                nn.Linear(self.geo_hidden_channels, 1),
+                nn.Sigmoid(),
+            )
+        else:
+            self.geo_encoder = None
+            self.geo_gate = None
+
+        geo_feature_channels = (self.geo_hidden_channels * 2) if (self.geo_encoder is not None) else ((self.geo_dim * 2) if self.use_geo_features else 0)
         risk_input_channels = pair_embedding_channels * pair_feature_multiplier + (
             2 if use_toxicity_pair_features else 0
         ) + (
@@ -285,7 +338,7 @@ class PxDDIModel(nn.Module):
         ) + (
             2 if self.use_clinical_toxicity else 0
         ) + (
-            (self.geo_dim * 2) if self.use_geo_features else 0
+            geo_feature_channels
         )
         if self.use_cross_modal_attention and architecture_requires_multimodal_features(architecture_version):
             self.cross_modal_attention = CrossModalGeneAttention(
@@ -342,6 +395,10 @@ class PxDDIModel(nn.Module):
         geo_b=None,
         geo_mask_a=None,
         geo_mask_b=None,
+        pdb_a=None,
+        pdb_b=None,
+        pdb_mask_a=None,
+        pdb_mask_b=None,
         **kwargs,
     ):
         cross_a: torch.Tensor | None = None
@@ -451,6 +508,26 @@ class PxDDIModel(nn.Module):
             ea_for_risk = torch.cat((ea_for_risk, ta_rep), dim=1)
             eb_for_risk = torch.cat((eb_for_risk, tb_rep), dim=1)
 
+        if self.pdb_encoder is not None and self.pdb_gate is not None:
+            if pdb_a is not None and pdb_b is not None:
+                p_in_a = pdb_a.float().view(-1, self.pdb_feature_dim)
+                p_in_b = pdb_b.float().view(-1, self.pdb_feature_dim)
+                pa = self.pdb_encoder(p_in_a)
+                pb = self.pdb_encoder(p_in_b)
+                pa_gate = self.pdb_gate(pa)
+                pb_gate = self.pdb_gate(pb)
+                if pdb_mask_a is not None:
+                    pa_gate = pa_gate * pdb_mask_a.view(-1, 1)
+                if pdb_mask_b is not None:
+                    pb_gate = pb_gate * pdb_mask_b.view(-1, 1)
+                pa_rep = pa_gate * pa
+                pb_rep = pb_gate * pb
+            else:
+                pa_rep = torch.zeros((ea.size(0), self.pdb_hidden_channels), device=ea.device, dtype=ea.dtype)
+                pb_rep = torch.zeros((eb.size(0), self.pdb_hidden_channels), device=eb.device, dtype=eb.dtype)
+            ea_for_risk = torch.cat((ea_for_risk, pa_rep), dim=1)
+            eb_for_risk = torch.cat((eb_for_risk, pb_rep), dim=1)
+
         if self.cross_drug_attention is not None and cross_a is not None and cross_b is not None:
             ea_for_risk = torch.cat((ea_for_risk, cross_a), dim=1)
             eb_for_risk = torch.cat((eb_for_risk, cross_b), dim=1)
@@ -495,9 +572,23 @@ class PxDDIModel(nn.Module):
                     g_a = g_a * geo_mask_a.view(-1, 1)
                 if geo_mask_b is not None:
                     g_b = g_b * geo_mask_b.view(-1, 1)
-                features.append(torch.cat([g_a + g_b, torch.abs(g_a - g_b)], dim=1))
+                if self.geo_encoder is not None and self.geo_gate is not None:
+                    g_enc_a = self.geo_encoder(g_a)
+                    g_enc_b = self.geo_encoder(g_b)
+                    ga_g = self.geo_gate(g_enc_a)
+                    gb_g = self.geo_gate(g_enc_b)
+                    if geo_mask_a is not None:
+                        ga_g = ga_g * geo_mask_a.view(-1, 1)
+                    if geo_mask_b is not None:
+                        gb_g = gb_g * geo_mask_b.view(-1, 1)
+                    g_rep_a = ga_g * g_enc_a
+                    g_rep_b = gb_g * g_enc_b
+                    features.append(torch.cat([g_rep_a + g_rep_b, torch.abs(g_rep_a - g_rep_b)], dim=1))
+                else:
+                    features.append(torch.cat([g_a + g_b, torch.abs(g_a - g_b)], dim=1))
             else:
-                features.append(torch.zeros((ea.size(0), self.geo_dim * 2), device=ea.device, dtype=ea.dtype))
+                geo_dim_count = (self.geo_hidden_channels * 2) if self.geo_encoder is not None else (self.geo_dim * 2)
+                features.append(torch.zeros((ea.size(0), geo_dim_count), device=ea.device, dtype=ea.dtype))
         combined = torch.cat(features, dim=1)
 
         risk_out = self.risk_classifier(combined)

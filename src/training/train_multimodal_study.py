@@ -71,6 +71,7 @@ from src.models.ddi_model import (
     MODEL_ARCHITECTURE_EDGE_AWARE,
     MODEL_ARCHITECTURE_MULTIMODAL,
     PxDDIModel,
+    model_from_checkpoint,
 )
 from src.training.benchmark_cold_start import (
     ensure_benchmark_splits,
@@ -196,7 +197,7 @@ def train_extended_multimodal(
     use_target_encoder: bool = True,
     use_neighbor_memory: bool = False,
     select_best_by: str = 's1',
-    pos_weight: float = 1.75,
+    pos_weight: float = 2.2,
     use_ssl: bool = False,
     ssl_weight: float = 0.2,
     ssl_pairs_count: int = 5000,
@@ -293,9 +294,14 @@ def train_extended_multimodal(
         use_target_encoder=use_target_encoder,
         target_feature_dim=cache.target_dim,
         target_hidden_channels=64,
+        use_pdb_encoder=is_multimodal,
+        pdb_feature_dim=cache.pdb_dim,
+        pdb_hidden_channels=64,
         use_neighbor_memory=use_neighbor_memory,
         use_geo_features=is_multimodal,
+        use_geo_encoder=is_multimodal,
         geo_dim=cache.geo_dim,
+        geo_hidden_channels=32,
         memory_dropout=memory_dropout,
         embedding_noise_std=embedding_noise_std,
     )
@@ -424,13 +430,13 @@ def train_extended_multimodal(
             else:
                 risk_logits, _, _ = model(drug_a=da, drug_b=db)
 
-            # Focal loss modulation with asymmetric positive penalty to suppress false negatives
-            smoothed_labels = labels * 0.94 + 0.03
+            # Asymmetric Focal loss modulation with gamma=2.0 and pos_weight to strongly penalize false negatives
+            smoothed_labels = labels * 0.96 + 0.02
             targets = smoothed_labels.view(-1)
             logits_flat = risk_logits.view(-1)
             probs = torch.sigmoid(logits_flat)
             p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
-            focal_mod = (1.0 - p_t).clamp(min=0.1, max=1.0)
+            focal_mod = torch.pow((1.0 - p_t).clamp(min=0.05, max=1.0), 2.0)
             raw_bce = F.binary_cross_entropy_with_logits(
                 logits_flat, targets, pos_weight=pos_weight_tensor, reduction='none'
             )
@@ -443,14 +449,14 @@ def train_extended_multimodal(
                     batch_size_cur = da.num_graphs if hasattr(da, 'num_graphs') else da.x.size(0)
                     bio_sims: list[tuple[torch.Tensor, torch.Tensor, float]] = []
 
-                    # 1. PharmGKB CYP Enzymes & Transporters
+                    # 1. PharmGKB CYP Enzymes & Transporters (Pharmacogenomic DDI Driver)
                     if 'gene_a' in batch and 'gene_b' in batch:
                         ga = batch['gene_a'].to(device)
                         gb = batch['gene_b'].to(device)
                         gmask = (batch['gene_mask_a'].to(device) > 0.5) & (batch['gene_mask_b'].to(device) > 0.5)
                         if gmask.any():
                             gene_sim = F.cosine_similarity(ga, gb, dim=-1).clamp(0.0, 1.0)
-                            bio_sims.append((gene_sim, gmask, 1.0))
+                            bio_sims.append((gene_sim, gmask, 1.25))
 
                     # 2. BindingDB Target Affinity Vectors
                     if 'target_a' in batch and 'target_b' in batch:
@@ -494,7 +500,7 @@ def train_extended_multimodal(
                         pdbmask = (batch['pdb_mask_a'].to(device) > 0.5) & (batch['pdb_mask_b'].to(device) > 0.5)
                         if pdbmask.any():
                             pdb_sim = F.cosine_similarity(pdba, pdbb, dim=-1).clamp(0.0, 1.0)
-                            bio_sims.append((pdb_sim, pdbmask, 0.7))
+                            bio_sims.append((pdb_sim, pdbmask, 1.0))
 
                     if bio_sims:
                         batch_size_cur = da.num_graphs if hasattr(da, 'num_graphs') else da.x.size(0)
@@ -596,8 +602,13 @@ def train_extended_multimodal(
                     'use_target_encoder': use_target_encoder,
                     'target_feature_dim': cache.target_dim,
                     'target_hidden_channels': 64,
+                    'use_pdb_encoder': is_multimodal,
+                    'pdb_feature_dim': cache.pdb_dim,
+                    'pdb_hidden_channels': 64,
                     'use_geo_features': is_multimodal,
+                    'use_geo_encoder': is_multimodal,
                     'geo_dim': cache.geo_dim,
+                    'geo_hidden_channels': 32,
                     'use_cross_modal_attention': use_cross_modal_attention if is_multimodal else False,
                     'use_cross_drug_attention': use_cross_drug_attention,
                     'memory_dropout': memory_dropout,
@@ -633,8 +644,13 @@ def train_extended_multimodal(
                     'use_target_encoder': use_target_encoder,
                     'target_feature_dim': cache.target_dim,
                     'target_hidden_channels': 64,
+                    'use_pdb_encoder': is_multimodal,
+                    'pdb_feature_dim': cache.pdb_dim,
+                    'pdb_hidden_channels': 64,
                     'use_geo_features': is_multimodal,
+                    'use_geo_encoder': is_multimodal,
                     'geo_dim': cache.geo_dim,
+                    'geo_hidden_channels': 32,
                     'use_cross_modal_attention': use_cross_modal_attention if is_multimodal else False,
                     'use_cross_drug_attention': use_cross_drug_attention,
                     'memory_dropout': memory_dropout,
@@ -685,26 +701,35 @@ def train_extended_multimodal(
 
     if best_s1_weights_path.is_file() and 's1_cold' in test_loaders:
         ckpt_s1 = torch.load(best_s1_weights_path, map_location=device)
-        s1_eval_model = PxDDIModel(
-            in_channels=in_channels,
-            hidden_channels=hidden_dim,
-            edge_feature_dim=edge_dim,
-            architecture_version=architecture_version,
-            gene_feature_dim=cache.gene_dim,
-            gene_hidden_channels=64,
-            use_clinical_toxicity=is_multimodal,
-            use_cross_modal_attention=use_cross_modal_attention if is_multimodal else False,
-            use_cross_drug_attention=use_cross_drug_attention,
-            use_target_encoder=use_target_encoder,
-            target_feature_dim=cache.target_dim,
-            target_hidden_channels=64,
-            use_neighbor_memory=use_neighbor_memory,
-            use_geo_features=is_multimodal,
-            geo_dim=cache.geo_dim,
-            memory_dropout=memory_dropout,
-            embedding_noise_std=embedding_noise_std,
-        ).to(device)
-        s1_eval_model.load_state_dict(ckpt_s1['model_state_dict'])
+        try:
+            s1_eval_model = model_from_checkpoint(ckpt_s1).to(device)
+            s1_eval_model.load_state_dict(ckpt_s1['model_state_dict'])
+        except Exception:
+            s1_eval_model = PxDDIModel(
+                in_channels=in_channels,
+                hidden_channels=hidden_dim,
+                edge_feature_dim=edge_dim,
+                architecture_version=architecture_version,
+                gene_feature_dim=cache.gene_dim,
+                gene_hidden_channels=64,
+                use_clinical_toxicity=is_multimodal,
+                use_cross_modal_attention=use_cross_modal_attention if is_multimodal else False,
+                use_cross_drug_attention=use_cross_drug_attention,
+                use_target_encoder=use_target_encoder,
+                target_feature_dim=cache.target_dim,
+                target_hidden_channels=64,
+                use_pdb_encoder=is_multimodal,
+                pdb_feature_dim=cache.pdb_dim,
+                pdb_hidden_channels=64,
+                use_neighbor_memory=use_neighbor_memory,
+                use_geo_features=is_multimodal,
+                use_geo_encoder=is_multimodal,
+                geo_dim=cache.geo_dim,
+                geo_hidden_channels=32,
+                memory_dropout=memory_dropout,
+                embedding_noise_std=embedding_noise_std,
+            ).to(device)
+            s1_eval_model.load_state_dict(ckpt_s1['model_state_dict'])
         s1_scores, s1_targets = predict_loader(s1_eval_model, test_loaders['s1_cold'], device, is_multimodal=is_multimodal)
         s1_best_metrics = evaluate_predictions(s1_scores, s1_targets, threshold='optimal')
         final_results['s1_best_epoch'] = ckpt_s1.get('epoch')
@@ -1169,7 +1194,7 @@ def run_full_multimodal_study(
     run_ablation: bool = kwargs.pop('run_ablation', True)
     run_error_analysis: bool = kwargs.pop('run_error_analysis', True)
     calibrate: bool = kwargs.pop('calibrate', True)
-    pos_weight: float = float(kwargs.pop('pos_weight', 1.75))
+    pos_weight: float = float(kwargs.pop('pos_weight', 2.2))
     use_ssl: bool = bool(kwargs.pop('use_ssl', False))
     ssl_weight: float = float(kwargs.pop('ssl_weight', 0.2))
     memory_dropout: float = float(kwargs.pop('memory_dropout', 0.75))
@@ -1403,7 +1428,7 @@ def run_full_multimodal_study(
     use_cross_modal_attention: bool = kwargs.pop('use_cross_modal_attention', True)
     use_cross_drug_attention: bool = kwargs.pop('use_cross_drug_attention', False)
     use_target_encoder: bool = kwargs.pop('use_target_encoder', True)
-    use_neighbor_memory: bool = kwargs.pop('use_neighbor_memory', True)
+    use_neighbor_memory: bool = kwargs.pop('use_neighbor_memory', False)
     select_best_by: str = kwargs.pop('select_best_by', 's1')
 
     neighbor_mem = None
