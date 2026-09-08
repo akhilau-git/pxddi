@@ -757,7 +757,15 @@ class PxDDIModel(nn.Module):
         """Extract multi-modal drug embedding for diagnostic and contrastive analysis."""
         device = next(self.parameters()).device
         b = drug.batch if hasattr(drug, 'batch') and drug.batch is not None else torch.zeros(drug.x.size(0), dtype=torch.long, device=drug.x.device)
-        e = self.encoder(drug.x.to(device), drug.edge_index.to(device), drug.edge_attr.to(device), b.to(device))
+        if self.use_chemberta:
+            e = self.encoder(getattr(drug, 'smiles', drug), device)
+        elif self.architecture_version == MODEL_ARCHITECTURE_LEGACY or getattr(drug, 'edge_attr', None) is None:
+            e = self.encoder(drug.x.to(device), drug.edge_index.to(device), b.to(device))
+        else:
+            try:
+                e = self.encoder(drug.x.to(device), drug.edge_index.to(device), drug.edge_attr.to(device), b.to(device))
+            except TypeError:
+                e = self.encoder(drug.x.to(device), drug.edge_index.to(device), b.to(device))
         reps = [e]
         if self.fp_encoder is not None and fp is not None:
             reps.append(self.fp_encoder(fp.float().view(-1, 1024).to(device)))

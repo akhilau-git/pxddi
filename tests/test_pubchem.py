@@ -120,3 +120,51 @@ def test_build_faers_bridge_with_ascii_dir(tmp_path, monkeypatch):
     assert out_csv.exists()
 
 
+def test_pharmgkb_faers_provenance_tracking(tmp_path):
+    from src.data_prep.expanded_pharmgkb_bridge import update_master_nodes_with_pharmgkb_faers_analogs
+
+    # Drug A is profiled, Drug B is an analog of Drug A, Drug C has no analog
+    master_df = pd.DataFrame([
+        {
+            "canonical_smiles": "CC(=O)Oc1ccccc1C(=O)O",  # Aspirin
+            "gene_symbols": "['CYP2C9']",
+            "gene_vector_multihot": [1] + [0] * 49,
+            "toxicity_score": 0.25,
+            "n_faers_reports": 10,
+        },
+        {
+            "canonical_smiles": "CC(=O)Oc1ccccc1C(=O)OCC",  # Ethyl acetylsalicylate (analog)
+            "gene_symbols": None,
+            "gene_vector_multihot": None,
+            "toxicity_score": None,
+            "n_faers_reports": None,
+        },
+    ])
+    in_csv = tmp_path / "master_nodes.csv"
+    master_df.to_csv(in_csv, index=False)
+
+    out_csv = tmp_path / "master_nodes_enriched.csv"
+    res_df, summary = update_master_nodes_with_pharmgkb_faers_analogs(
+        master_nodes_csv=in_csv,
+        output_path=out_csv,
+        similarity_threshold=0.60,
+    )
+
+    assert "pharmgkb_provenance" in res_df.columns
+    assert "faers_provenance" in res_df.columns
+    assert "is_imputed_pharmgkb" in res_df.columns
+    assert "is_imputed_faers" in res_df.columns
+
+    # Check that drug 0 was observed and drug 1 was imputed
+    assert res_df.loc[0, "pharmgkb_provenance"] == "observed"
+    assert res_df.loc[0, "is_imputed_pharmgkb"] is False or res_df.loc[0, "is_imputed_pharmgkb"] == 0
+    assert res_df.loc[1, "pharmgkb_provenance"] == "imputed_analog"
+    assert res_df.loc[1, "is_imputed_pharmgkb"] is True or res_df.loc[1, "is_imputed_pharmgkb"] == 1
+
+    # Verify that input file was preserved
+    orig = pd.read_csv(in_csv)
+    assert "pharmgkb_provenance" not in orig.columns
+    assert out_csv.is_file()
+
+
+

@@ -160,6 +160,8 @@ def test_ensure_benchmark_splits_and_run_benchmark():
         "CN1C2CCC1C(C(C2)OC(=O)c3ccccc3)C(=O)OC",  # Cocaine
         "CN1CCC[C@H]1c2cccnc2",  # Nicotine
         "CC(=O)Nc1ccc(O)cc1",  # Paracetamol
+        "CCO",  # Ethanol
+        "c1ccccc1",  # Benzene
     ]
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -179,16 +181,17 @@ def test_ensure_benchmark_splits_and_run_benchmark():
         nodes_path = graph_dir / "master_drug_nodes.csv"
         nodes_df.to_csv(nodes_path, index=False)
 
-        # Generate dense pairs among the 6 drugs
+        # Generate realistic non-clique pairs so unreported negatives exist
         edges = []
         for i in range(len(drugs)):
             for j in range(i + 1, len(drugs)):
-                edges.append({
-                    "drug_a_id": drugs[i],
-                    "drug_b_id": drugs[j],
-                    "interaction_type": "adverse_interaction",
-                    "evidence_count": 1,
-                })
+                if (i + j) % 2 == 1:
+                    edges.append({
+                        "drug_a_id": drugs[i],
+                        "drug_b_id": drugs[j],
+                        "interaction_type": "adverse_interaction",
+                        "evidence_count": 1,
+                    })
         edges_df = pd.DataFrame(edges)
         edges_path = graph_dir / "master_ddi_edges.csv"
         edges_df.to_csv(edges_path, index=False)
@@ -216,3 +219,33 @@ def test_ensure_benchmark_splits_and_run_benchmark():
         assert len(comp_df) == 2
         assert "architecture" in comp_df.columns
         assert (out_dir / "benchmark_results.csv").is_file()
+
+
+def test_cached_loader_rejects_malformed_labels():
+    from src.data_prep.cached_graph_loader import CachedDDIPairDataset
+
+    cache = MolecularCache(gene_dim=50)
+    smi_a = "CC(=O)Oc1ccccc1C(=O)O"
+    smi_b = "Cn1c(=O)c2c(ncn2C)n(C)c1=O"
+    cache.register_drug(smi_a)
+    cache.register_drug(smi_b)
+
+    # Corrupted string label
+    corrupted_df = pd.DataFrame({
+        "drug_a_id": [smi_a],
+        "drug_b_id": [smi_b],
+        "label": ["corrupted_label"],
+    })
+    with pytest.raises(ValueError, match="Invalid or corrupted label"):
+        CachedDDIPairDataset(corrupted_df, cache)
+
+    # NaN / null label
+    nan_df = pd.DataFrame({
+        "drug_a_id": [smi_a],
+        "drug_b_id": [smi_b],
+        "label": [float("nan")],
+    })
+    with pytest.raises(ValueError, match="Missing/NaN label"):
+        CachedDDIPairDataset(nan_df, cache)
+
+

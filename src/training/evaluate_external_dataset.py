@@ -333,6 +333,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=False)
     loader = DataLoader(records, batch_size=128, shuffle=False, collate_fn=_collate)
     raw_scores, labels = [], []
+    all_sources, all_targets = [], []
     with torch.no_grad():
         for graph_a, graph_b, batch_labels, sources, targets in loader:
             memory_features = None
@@ -347,6 +348,8 @@ def main() -> None:
             )
             raw_scores.extend(torch.sigmoid(risk).cpu().numpy())
             labels.extend(batch_labels.numpy())
+            all_sources.extend(sources)
+            all_targets.extend(targets)
     labels_array = np.asarray(labels, dtype=int)
     raw_array = np.asarray(raw_scores, dtype=float)
     final_scores = apply_calibrator(raw_array, checkpoint.get('calibration'))
@@ -366,6 +369,9 @@ def main() -> None:
     metrics['excluded_graph_incompatible_rows'] = int(len(excluded))
     excluded.to_csv(output_dir / 'graph_incompatible_exclusions.csv', index=False)
     pd.DataFrame({
+        'row_id': np.arange(len(labels_array)),
+        'source_drug': all_sources,
+        'target_drug': all_targets,
         'label': labels_array,
         'raw_prediction_score': raw_array,
         'calibrated_prediction_score': final_scores,

@@ -98,6 +98,8 @@ def build_binary_pair_dataset(
     seed: int = 42,
     max_attempt_multiplier: int = 50,
     negative_sampling_strategy: str = 'uniform',
+    *,
+    known_reported_positive_pairs: pd.DataFrame | set[tuple[str, str]] | None = None,
 ) -> pd.DataFrame:
     """Create an auditable binary dataset from reported and unreported pairs.
 
@@ -127,6 +129,16 @@ def build_binary_pair_dataset(
         canonical_pair(source, target)
         for source, target in zip(positives[source_col], positives[target_col])
     }
+    forbidden_keys = set(positive_keys)
+    if known_reported_positive_pairs is not None:
+        if isinstance(known_reported_positive_pairs, set):
+            forbidden_keys.update(known_reported_positive_pairs)
+        elif isinstance(known_reported_positive_pairs, pd.DataFrame):
+            k_src = source_col if source_col in known_reported_positive_pairs.columns else known_reported_positive_pairs.columns[0]
+            k_tgt = target_col if target_col in known_reported_positive_pairs.columns else known_reported_positive_pairs.columns[1]
+            for s, t in zip(known_reported_positive_pairs[k_src], known_reported_positive_pairs[k_tgt]):
+                forbidden_keys.add(canonical_pair(str(s), str(t)))
+
     target_negatives = round(len(positives) * neg_ratio)
     if target_negatives == 0:
         return positives.sample(frac=1, random_state=seed).reset_index(drop=True)
@@ -145,13 +157,17 @@ def build_binary_pair_dataset(
     while len(negative_keys) < target_negatives and attempts < max_attempts:
         source, target = rng.choice(all_drugs, size=2, replace=False, p=sampling_probs)
         candidate = canonical_pair(source, target)
-        if candidate not in positive_keys:
+        if candidate not in forbidden_keys:
             negative_keys.add(candidate)
         attempts += 1
 
     if len(negative_keys) < target_negatives:
         possible_pairs = len(all_drugs) * (len(all_drugs) - 1) // 2
-        available_pairs = possible_pairs - len(positive_keys)
+        drug_set = set(all_drugs)
+        relevant_forbidden = {
+            (u, v) for u, v in forbidden_keys if u in drug_set and v in drug_set
+        }
+        available_pairs = max(0, possible_pairs - len(relevant_forbidden))
         raise ValueError(
             'Could not sample the requested number of unique unreported pairs. '
             f'Requested {target_negatives}; sampled {len(negative_keys)}; '
@@ -316,6 +332,7 @@ def _sample_partition_negatives(
     seed: int,
     negative_sampling_strategy: str,
     max_attempt_multiplier: int,
+    allow_zero_negatives: bool = False,
 ) -> tuple[pd.DataFrame, set[tuple[str, str]], dict[str, int]]:
     """Sample unique unreported negatives constrained to one split's identities."""
     if positive_frame.empty or neg_ratio == 0:
@@ -386,6 +403,12 @@ def _sample_partition_negatives(
             break
 
     if len(sampled_keys) < target_negatives:
+        if len(sampled_keys) == 0 and target_negatives > 0 and not allow_zero_negatives:
+            raise RuntimeError(
+                f'Split-aware negative sampling failed completely: requested {target_negatives} negatives, '
+                f'but drew 0 after {attempts} attempts. Evaluation on a single-class partition produces '
+                f'undefined or misleading metrics.'
+            )
         import warnings
         warnings.warn(
             f'Split-aware negative sampling saturated: requested {target_negatives} negatives; '
@@ -436,6 +459,7 @@ def create_split_aware_binary_splits(
     seed: int = 42,
     negative_sampling_strategy: str = 'degree_matched',
     max_attempt_multiplier: int = 50,
+    allow_zero_negatives: bool = False,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     """Construct cold-start splits before sampling their unreported negatives.
 
@@ -496,6 +520,7 @@ def create_split_aware_binary_splits(
             seed=seed + position + 1,
             negative_sampling_strategy=negative_sampling_strategy,
             max_attempt_multiplier=max_attempt_multiplier,
+            allow_zero_negatives=allow_zero_negatives,
         )
         used_negative_keys.update(negative_keys)
         combined = (

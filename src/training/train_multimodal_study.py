@@ -202,7 +202,7 @@ def train_extended_multimodal(
     use_cross_drug_attention: bool = False,
     use_target_encoder: bool = True,
     use_neighbor_memory: bool = False,
-    select_best_by: str = 's1',
+    select_best_by: str = 'val',
     pos_weight: float = 2.2,
     use_ssl: bool = False,
     ssl_weight: float = 0.2,
@@ -213,6 +213,11 @@ def train_extended_multimodal(
     patience: int = 8,
 ) -> tuple[PxDDIModel, pd.DataFrame, dict[str, Any]]:
     """Train the multimodal model across extended epochs with checkpointing."""
+    if select_best_by == 's1':
+        print("⚠️ Audit Notice: 'select_best_by=s1' selects models using S1 test split (test data leakage). "
+              "AuditDDI policy requires model selection and early stopping on validation/dev split. "
+              "Automatically switching to select_best_by='val'.")
+        select_best_by = 'val'
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -598,111 +603,63 @@ def train_extended_multimodal(
         is_best = val_metrics['auroc'] > best_val_auroc
         if is_best:
             best_val_auroc = val_metrics['auroc']
-            torch.save(
-                {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'val_auroc': best_val_auroc,
-                    'val_accuracy': val_metrics['accuracy'],
-                    'optimal_threshold': val_metrics.get('optimal_threshold', 0.35),
-                    'in_channels': in_channels,
-                    'hidden_channels': hidden_dim,
-                    'edge_feature_dim': edge_dim,
-                    'architecture_version': architecture_version,
-                    'gene_feature_dim': cache.gene_dim,
-                    'gene_hidden_channels': 64,
-                    'use_clinical_toxicity': is_multimodal,
-                    'use_neighbor_memory': use_neighbor_memory,
-                    'use_target_encoder': use_target_encoder,
-                    'target_feature_dim': cache.target_dim,
-                    'target_hidden_channels': 64,
-                    'use_pdb_encoder': is_multimodal,
-                    'pdb_feature_dim': cache.pdb_dim,
-                    'pdb_hidden_channels': 64,
-                    'use_geo_features': is_multimodal,
-                    'use_geo_encoder': is_multimodal,
-                    'geo_dim': cache.geo_dim,
-                    'geo_hidden_channels': 32,
-                    'use_cross_modal_attention': use_cross_modal_attention if is_multimodal else False,
-                    'use_cross_modal_target_attention': is_multimodal and use_target_encoder,
-                    'use_cross_modal_pdb_attention': is_multimodal,
-                    'use_inductive_bio_features': is_multimodal,
-                    'use_fusion_norm': is_multimodal,
-                    'use_cross_drug_attention': use_cross_drug_attention,
-                    'memory_dropout': memory_dropout,
-                    'embedding_noise_std': embedding_noise_std,
-                },
-                best_weights_path,
-            )
-
-        prev_s1_auroc = history_records[-2]['s1_cold_auroc'] if len(history_records) >= 2 else 0.0
-        s1_improved_over_prev = (s1_metrics['auroc'] > prev_s1_auroc + 1e-4)
-
-        is_s1_best = s1_metrics['auroc'] > best_s1_auroc
-        if is_s1_best:
-            best_s1_auroc = s1_metrics['auroc']
-            best_s1_epoch = epoch
+            best_val_epoch = epoch
             epochs_without_s1_improvement = 0
-            torch.save(
-                {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    's1_auroc': best_s1_auroc,
-                    's1_accuracy': s1_metrics['accuracy'],
-                    's1_fn': s1_metrics['false_negatives'],
-                    's1_opt_thresh': s1_metrics['optimal_threshold'],
-                    'optimal_threshold': s1_metrics.get('optimal_threshold', 0.35),
-                    'in_channels': in_channels,
-                    'hidden_channels': hidden_dim,
-                    'edge_feature_dim': edge_dim,
-                    'architecture_version': architecture_version,
-                    'gene_feature_dim': cache.gene_dim,
-                    'gene_hidden_channels': 64,
-                    'use_clinical_toxicity': is_multimodal,
-                    'use_neighbor_memory': use_neighbor_memory,
-                    'use_target_encoder': use_target_encoder,
-                    'target_feature_dim': cache.target_dim,
-                    'target_hidden_channels': 64,
-                    'use_pdb_encoder': is_multimodal,
-                    'pdb_feature_dim': cache.pdb_dim,
-                    'pdb_hidden_channels': 64,
-                    'use_geo_features': is_multimodal,
-                    'use_geo_encoder': is_multimodal,
-                    'geo_dim': cache.geo_dim,
-                    'geo_hidden_channels': 32,
-                    'use_cross_modal_attention': use_cross_modal_attention if is_multimodal else False,
-                    'use_cross_modal_target_attention': is_multimodal and use_target_encoder,
-                    'use_cross_modal_pdb_attention': is_multimodal,
-                    'use_inductive_bio_features': is_multimodal,
-                    'use_fusion_norm': is_multimodal,
-                    'use_cross_drug_attention': use_cross_drug_attention,
-                    'memory_dropout': memory_dropout,
-                    'embedding_noise_std': embedding_noise_std,
-                },
-                best_s1_weights_path,
-            )
+            best_dict = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_auroc': best_val_auroc,
+                'val_accuracy': val_metrics['accuracy'],
+                'optimal_threshold': val_metrics.get('optimal_threshold', 0.35),
+                'in_channels': in_channels,
+                'hidden_channels': hidden_dim,
+                'edge_feature_dim': edge_dim,
+                'architecture_version': architecture_version,
+                'gene_feature_dim': cache.gene_dim,
+                'gene_hidden_channels': 64,
+                'use_clinical_toxicity': is_multimodal,
+                'use_neighbor_memory': use_neighbor_memory,
+                'use_target_encoder': use_target_encoder,
+                'target_feature_dim': cache.target_dim,
+                'target_hidden_channels': 64,
+                'use_pdb_encoder': is_multimodal,
+                'pdb_feature_dim': cache.pdb_dim,
+                'pdb_hidden_channels': 64,
+                'use_geo_features': is_multimodal,
+                'use_geo_encoder': is_multimodal,
+                'geo_dim': cache.geo_dim,
+                'geo_hidden_channels': 32,
+                'use_cross_modal_attention': use_cross_modal_attention if is_multimodal else False,
+                'use_cross_modal_target_attention': is_multimodal and use_target_encoder,
+                'use_cross_modal_pdb_attention': is_multimodal,
+                'use_inductive_bio_features': is_multimodal,
+                'use_fusion_norm': is_multimodal,
+                'use_cross_drug_attention': use_cross_drug_attention,
+                'memory_dropout': memory_dropout,
+                'embedding_noise_std': embedding_noise_std,
+            }
+            torch.save(best_dict, best_weights_path)
+            torch.save(best_dict, best_s1_weights_path)
         else:
             epochs_without_s1_improvement += 1
 
         best_mark = " [* Best Val]" if is_best else ""
-        s1_mark = " [^ Best S1]" if is_s1_best else ""
         print(f"  Epoch {epoch:02d}/{epochs:02d} ({ep_sec:.1f}s) - Loss: {avg_loss:.4f} | "
               f"Val AUROC: {val_metrics['auroc']:.4f} (Acc: {val_metrics['accuracy']*100:.1f}%) | "
-              f"S1 AUROC: {s1_metrics['auroc']:.4f} (Acc: {s1_metrics['accuracy']*100:.1f}%, FN: {s1_metrics['false_negatives']}){best_mark}{s1_mark}")
+              f"Diagnostic S1 AUROC: {s1_metrics['auroc']:.4f} (Acc: {s1_metrics['accuracy']*100:.1f}%, FN: {s1_metrics['false_negatives']}){best_mark}")
 
-        # Early Stopping: Prevent transductive overfitting from degrading S1 cold-start generalization
+        # Early Stopping: Based strictly on validation split (zero test set leakage)
         if patience > 0 and epochs_without_s1_improvement >= patience and epoch >= 4:
-            print(f"\n⏹️ Early stopping triggered at Epoch {epoch}: S1 AUROC has not improved for {patience} consecutive epochs (Peak S1 AUROC: {best_s1_auroc:.4f} at Epoch {best_s1_epoch}). Restoring peak S1 checkpoint.")
+            print(f"\n⏹️ Early stopping triggered at Epoch {epoch}: Validation AUROC has not improved for {patience} consecutive epochs (Peak Val AUROC: {best_val_auroc:.4f} at Epoch {best_val_epoch}). Restoring peak validation checkpoint.")
             break
 
-    # Load best checkpoint for final evaluation
-    target_weights_path = best_s1_weights_path if (select_best_by == 's1' and best_s1_weights_path.is_file()) else best_weights_path
+    # Load peak validation checkpoint for honest out-of-sample evaluation
+    target_weights_path = best_weights_path
     if target_weights_path.is_file():
         ckpt = torch.load(target_weights_path, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'])
-        sel_label = "Peak S1 Checkpoint" if target_weights_path == best_s1_weights_path else "Best Transductive Val"
-        print(f"\nLoaded {sel_label} model from epoch {ckpt['epoch']} (S1 AUROC: {ckpt.get('s1_auroc', 'N/A')}, Val AUROC: {ckpt.get('val_auroc', 'N/A')})")
+        print(f"\nLoaded peak validation checkpoint from epoch {ckpt['epoch']} (Val AUROC: {ckpt.get('val_auroc', 'N/A')})")
 
     history_df = pd.DataFrame(history_records)
     history_df.to_csv(out_p / f'{architecture_version}_training_history.csv', index=False)
@@ -1034,6 +991,14 @@ def evaluate_multimodal_calibration(
 
     from src.models.calibration import fit_temperature_scaling
 
+    # Fit temperature calibrator strictly on held-out validation data (zero test leakage)
+    val_temp_cal = fit_temperature_scaling(val_targets, val_probs, fitted_on='validation')
+    cal_val_temp_probs = apply_calibrator(val_probs, val_temp_cal)
+    cal_val_temp_ece = float(expected_calibration_error(val_targets, cal_val_temp_probs, bins=10) or 0.0)
+    print(f"Validation ECE (Temp-Scaled)  : {cal_val_temp_ece:.4f} (T={val_temp_cal.get('temperature', 1.0):.2f})")
+    calibration_report['validation_temperature'] = float(val_temp_cal.get('temperature', 1.0))
+    calibration_report['validation_ece_temp_calibrated'] = cal_val_temp_ece
+
     for name, split_df in test_splits.items():
         if split_df.empty:
             continue
@@ -1043,15 +1008,16 @@ def evaluate_multimodal_calibration(
         cal_probs = apply_calibrator(probs, calibrator)
         cal_ece = float(expected_calibration_error(tgts, cal_probs, bins=10) or 0.0)
 
-        temp_cal = fit_temperature_scaling(tgts, probs, fitted_on=name)
-        temp_cal_probs = apply_calibrator(probs, temp_cal)
+        # Apply the validation-fitted temperature scaling out-of-sample
+        temp_cal_probs = apply_calibrator(probs, val_temp_cal)
         temp_ece = float(expected_calibration_error(tgts, temp_cal_probs, bins=10) or 0.0)
 
         calibration_report[f'{name}_ece_uncalibrated'] = uncal_ece
         calibration_report[f'{name}_ece_calibrated'] = cal_ece
-        calibration_report[f'{name}_temperature'] = float(temp_cal.get('temperature', 1.0))
+        calibration_report[f'{name}_temperature_fitted_on'] = 'validation'
+        calibration_report[f'{name}_temperature'] = float(val_temp_cal.get('temperature', 1.0))
         calibration_report[f'{name}_ece_temp_calibrated'] = temp_ece
-        print(f"Split: {name:<15} | Raw ECE: {uncal_ece:.4f} | Platt ECE: {cal_ece:.4f} | Temp ECE: {temp_ece:.4f} (T={temp_cal.get('temperature', 1.0):.2f})")
+        print(f"Split: {name:<15} | Raw ECE: {uncal_ece:.4f} | Platt ECE: {cal_ece:.4f} | Out-of-Sample Temp ECE: {temp_ece:.4f} (T={val_temp_cal.get('temperature', 1.0):.2f})")
 
     with open(out_p / 'calibration_report.json', 'w', encoding='utf-8') as f:
         json.dump(calibration_report, f, indent=2)
@@ -1061,7 +1027,7 @@ def evaluate_multimodal_calibration(
     return calibration_report
 
 
-def evaluate_cross_dataset_generalization(
+def evaluate_multimodal_subcohort_generalization(
     model: PxDDIModel,
     cache: MolecularCache,
     test_df: pd.DataFrame,
@@ -1069,7 +1035,12 @@ def evaluate_cross_dataset_generalization(
     device: torch.device | None = None,
     optimal_threshold: float | None = None,
 ) -> pd.DataFrame:
-    """Evaluate generalization across external datasets (BindingDB targets vs FAERS adverse events vs PharmGKB)."""
+    """Evaluate generalization across modality-annotated sub-cohorts of the S1 test split.
+
+    Note: These represent modality coverage slices of the S1 cold-start split
+    (BindingDB target vs FAERS adverse events vs PharmGKB coverage), not independent
+    external datasets.
+    """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -1077,7 +1048,8 @@ def evaluate_cross_dataset_generalization(
     out_p.mkdir(parents=True, exist_ok=True)
 
     if test_df.empty or len(test_df) == 0:
-        empty_df = pd.DataFrame(columns=['cross_dataset_cohort', 'pair_count', 'auroc', 'auprc', 'accuracy'])
+        empty_df = pd.DataFrame(columns=['subcohort', 'pair_count', 'auroc', 'auprc', 'accuracy'])
+        empty_df.to_csv(out_p / 's1_multimodal_subcohort_profiling.csv', index=False)
         empty_df.to_csv(out_p / 'cross_dataset_generalization_report.csv', index=False)
         return empty_df
 
@@ -1142,6 +1114,7 @@ def evaluate_cross_dataset_generalization(
         pos_m = (y_t == 1)
         b_rec = float(np.sum((b_preds == 1) & pos_m) / max(pos_m.sum(), 1))
         results.append({
+            'subcohort': cohort_name,
             'cross_dataset_cohort': cohort_name,
             'pair_count': len(sub),
             'auroc': auroc,
@@ -1152,13 +1125,18 @@ def evaluate_cross_dataset_generalization(
         })
 
     res_df = pd.DataFrame(results)
+    res_df.to_csv(out_p / 's1_multimodal_subcohort_profiling.csv', index=False)
     res_df.to_csv(out_p / 'cross_dataset_generalization_report.csv', index=False)
 
     print(f"\n{'=' * 80}")
-    print(f"CROSS-DATASET GENERALIZATION VALIDATION (Decision Threshold: {optimal_threshold:.4f}):")
+    print(f"S1 MULTIMODAL SUB-COHORT COVERAGE ANALYSIS (Decision Threshold: {optimal_threshold:.4f}):")
     print(f"{'=' * 80}")
     print(res_df.to_string(index=False))
     return res_df
+
+
+# Maintain backward-compatible alias for existing pipelines
+evaluate_cross_dataset_generalization = evaluate_multimodal_subcohort_generalization
 
 
 def generate_literature_benchmark_report(
@@ -1182,13 +1160,14 @@ def generate_literature_benchmark_report(
     cold_target_auprc = 0.0
     cold_target_rec = 0.0
     if cross_dataset_df is not None and not cross_dataset_df.empty:
-        primary_cohorts = cross_dataset_df[cross_dataset_df['cross_dataset_cohort'].isin(['PharmGKB Pathway Profiled', 'BindingDB Target Profiled'])]
+        c_col = 'subcohort' if 'subcohort' in cross_dataset_df.columns else 'cross_dataset_cohort'
+        primary_cohorts = cross_dataset_df[cross_dataset_df[c_col].isin(['PharmGKB Pathway Profiled', 'BindingDB Target Profiled'])]
         if not primary_cohorts.empty:
             cold_target_auroc = float(primary_cohorts['auroc'].mean())
             cold_target_auprc = float(primary_cohorts['auprc'].mean())
             cold_target_rec = float(primary_cohorts.get('recall', pd.Series([0.0])).mean())
         else:
-            prof_rows = cross_dataset_df[cross_dataset_df['cross_dataset_cohort'].astype(str).str.contains('Target|Pathway', case=False, na=False)]
+            prof_rows = cross_dataset_df[cross_dataset_df[c_col].astype(str).str.contains('Target|Pathway', case=False, na=False)]
             if not prof_rows.empty:
                 cold_target_auroc = float(prof_rows['auroc'].mean())
                 cold_target_auprc = float(prof_rows['auprc'].mean())
@@ -1225,10 +1204,10 @@ def generate_literature_benchmark_report(
             'Scenario Type': 'Cold-Target / Protein',
             'Definition': 'Existing drug vs new protein/disease pathway (Target Profiled)',
             'Expected AUC-ROC': '0.73 – 0.87',
-            'AuditDDI AUC-ROC': f"{cold_target_auroc:.4f}" if cold_target_auroc > 0 else '0.75 – 0.85',
+            'AuditDDI AUC-ROC': f"{cold_target_auroc:.4f}" if cold_target_auroc > 0 else 'N/A (Split not profiled)',
             'Expected AUPR / F1': '0.73 – 0.89',
-            'AuditDDI AUPRC': f"{cold_target_auprc:.4f}" if cold_target_auprc > 0 else '0.74 – 0.86',
-            'AuditDDI Recall': f"{cold_target_rec*100:.1f}%" if cold_target_rec > 0 else '> 75%',
+            'AuditDDI AUPRC': f"{cold_target_auprc:.4f}" if cold_target_auprc > 0 else 'N/A (Split not profiled)',
+            'AuditDDI Recall': f"{cold_target_rec*100:.1f}%" if cold_target_rec > 0 else 'N/A',
             'Status / Difficulty': 'Major bottleneck; addressed via BindingDB & PDB structural encoding',
             'Benefit': 'Expansion – Enables drug repurposing for new diseases and pathways',
         },
@@ -1658,7 +1637,7 @@ def run_full_multimodal_study(
 
     # 6. Cold-Start Error Analysis Stratified by External Coverage
     tier_dict: list[dict[str, Any]] = []
-    opt_thresh_for_eval = extended_metrics.get('s1_best_opt_thresh', extended_metrics.get('s1_cold_opt_thresh', 0.35))
+    opt_thresh_for_eval = extended_metrics.get('val_optimal_threshold', extended_metrics.get('s1_best_opt_thresh', extended_metrics.get('s1_cold_optimal_threshold', extended_metrics.get('s1_cold_opt_thresh', 0.35))))
     if run_error_analysis:
         err_df, tier_summary_df = analyze_cold_start_coverage_errors(
             model=best_model,

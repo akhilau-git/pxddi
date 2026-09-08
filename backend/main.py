@@ -481,8 +481,35 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 CHECKPOINT_PATH = resolve_checkpoint_path()
 try:
     checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=True)
-except Exception:
+except Exception as safe_load_err:
+    allow_unsafe = os.environ.get('PXDDI_ALLOW_UNSAFE_PICKLE', '0').strip().lower() in {'1', 'true', 'yes'}
+    if not allow_unsafe:
+        LOGGER.error(
+            "Security Policy Violation: Checkpoint '%s' failed weights_only=True load: %s. "
+            "To permit unsafe pickle deserialization for trusted local development, set PXDDI_ALLOW_UNSAFE_PICKLE=1.",
+            CHECKPOINT_PATH,
+            safe_load_err,
+        )
+        raise RuntimeError(
+            f"Checkpoint at {CHECKPOINT_PATH} cannot be safely deserialized with weights_only=True. "
+            f"Arbitrary code execution via pickle is blocked. "
+            f"Set environment variable PXDDI_ALLOW_UNSAFE_PICKLE=1 to override for trusted files."
+        ) from safe_load_err
+    LOGGER.warning(
+        "AUDIT WARNING: Deserializing checkpoint with weights_only=False. "
+        "Do not run this path in production or on untrusted checkpoint files."
+    )
     checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
+
+if checkpoint.get('use_chemberta', False):
+    try:
+        import transformers  # noqa: F401
+    except ImportError:
+        LOGGER.error("The selected checkpoint requires 'transformers', which is not installed.")
+        raise RuntimeError(
+            "The selected checkpoint requires the 'transformers' package for ChemBERTa embeddings. "
+            "Please install it via: pip install transformers"
+        )
 model = model_from_checkpoint(checkpoint)
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()

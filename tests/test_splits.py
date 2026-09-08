@@ -245,3 +245,35 @@ def test_split_aware_sampler_handles_saturated_partition():
         )
     assert len(negatives) == 1
     assert canonical_pair('DrugB', 'DrugC') in keys
+
+
+def test_build_binary_pair_dataset_forbids_omitted_known_positives():
+    # 4 drugs: A, B, C, D
+    # Subsampled positives in partition: (DrugA, DrugB) and (DrugC, DrugD)
+    # Another known positive exists: (DrugA, DrugC)
+    # When sampling negatives from {A, B, C, D}, (DrugA, DrugC) must never be sampled as a negative.
+    positives = pd.DataFrame({
+        'source': ['DrugA', 'DrugC'],
+        'target': ['DrugB', 'DrugD'],
+    })
+    all_known = pd.DataFrame({
+        'source': ['DrugA', 'DrugC', 'DrugA'],
+        'target': ['DrugB', 'DrugD', 'DrugC'],
+    })
+
+    dataset = splits_module.build_binary_pair_dataset(
+        positives,
+        source_col='source',
+        target_col='target',
+        neg_ratio=1.0,
+        seed=42,
+        known_reported_positive_pairs=all_known,
+    )
+    assert len(dataset) == 4
+    neg_pairs = dataset[dataset['label'] == 0.0]
+    assert len(neg_pairs) == 2
+    for _, row in neg_pairs.iterrows():
+        pair = canonical_pair(str(row['source']), str(row['target']))
+        assert pair != canonical_pair('DrugA', 'DrugC'), "Cross-partition known positive was sampled as negative!"
+
+

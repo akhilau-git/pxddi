@@ -25,6 +25,8 @@ def test_multimodal_study_smoke():
         "CN1C2CCC1C(C(C2)OC(=O)c3ccccc3)C(=O)OC",
         "CN1CCC[C@H]1c2cccnc2",
         "CC(=O)Nc1ccc(O)cc1",
+        "CCO",
+        "c1ccccc1",
     ]
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -44,15 +46,17 @@ def test_multimodal_study_smoke():
         nodes_path = graph_dir / "master_drug_nodes.csv"
         nodes_df.to_csv(nodes_path, index=False)
 
+        # Generate realistic non-clique pairs so unreported negatives exist
         edges = []
         for i in range(len(drugs)):
             for j in range(i + 1, len(drugs)):
-                edges.append({
-                    "drug_a_id": drugs[i],
-                    "drug_b_id": drugs[j],
-                    "interaction_type": "adverse_interaction",
-                    "evidence_count": 1,
-                })
+                if (i + j) % 2 == 1:
+                    edges.append({
+                        "drug_a_id": drugs[i],
+                        "drug_b_id": drugs[j],
+                        "interaction_type": "adverse_interaction",
+                        "evidence_count": 1,
+                    })
         edges_df = pd.DataFrame(edges)
         edges_path = graph_dir / "master_ddi_edges.csv"
         edges_df.to_csv(edges_path, index=False)

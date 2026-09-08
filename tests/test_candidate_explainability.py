@@ -223,3 +223,26 @@ def test_explain_multimodal_pair_with_cache():
     assert exp['epistemic_std'] >= 0.0
 
 
+def test_legacy_representation_helper_no_crash():
+    from src.data_prep.cached_graph_loader import MolecularCache
+    from src.models.ddi_model import MODEL_ARCHITECTURE_LEGACY, PxDDIModel
+
+    cache = MolecularCache(gene_dim=10)
+    drug_a = 'CCO'
+    cache.register_drug(drug_a)
+
+    legacy_model = PxDDIModel(
+        in_channels=cache.graphs[drug_a].x.size(1),
+        hidden_channels=16,
+        architecture_version=MODEL_ARCHITECTURE_LEGACY,
+    ).eval()
+
+    graph = cache.graphs[drug_a]
+    # Legacy encoder should evaluate cleanly without crashing on edge_attr
+    rep = legacy_model.get_drug_representations(graph)
+    assert rep is not None
+    assert rep.shape[0] == 1
+    assert rep.shape[1] > 0
+
+
+

@@ -18,6 +18,9 @@ const toxBValue = document.getElementById('toxB-value');
 // Meta Elements
 const metaArch = document.getElementById('meta-arch');
 const metaAuroc = document.getElementById('meta-auroc');
+const metaThreshold = document.getElementById('meta-threshold');
+const metaCalib = document.getElementById('meta-calib');
+const metaOod = document.getElementById('meta-ood');
 const metaReqid = document.getElementById('meta-reqid');
 const apiBaseUrl = new URL(
     document.body.dataset.apiBaseUrl || '/api',
@@ -48,15 +51,15 @@ function setLoading(isLoading) {
     }
 }
 
-function getColorClass(percentage) {
-    if (percentage > 75) return 'val-danger';
-    if (percentage > 40) return 'val-warning';
+function getColorClass(percentage, thresholdPct = 50) {
+    if (percentage >= thresholdPct) return 'val-danger';
+    if (percentage >= thresholdPct * 0.75) return 'val-warning';
     return 'val-safe';
 }
 
-function getBgColor(percentage) {
-    if (percentage > 75) return 'var(--danger)';
-    if (percentage > 40) return 'var(--warning)';
+function getBgColor(percentage, thresholdPct = 50) {
+    if (percentage >= thresholdPct) return 'var(--danger)';
+    if (percentage >= thresholdPct * 0.75) return 'var(--warning)';
     return 'var(--success)';
 }
 
@@ -101,36 +104,42 @@ async function checkRisk() {
 
         const data = await res.json();
         
+        // Use model decision threshold from checkpoint
+        const threshold = (typeof data.decision_threshold_used === 'number' && Number.isFinite(data.decision_threshold_used))
+            ? data.decision_threshold_used
+            : 0.5;
+        const thresholdPct = threshold * 100;
+        const interactionPredicted = Boolean(data.interaction_predicted);
+
         // Populate Data
         const riskPct = percentageFromScore(data.interaction_risk_estimate, 'interaction score');
         riskValue.innerText = `${riskPct.toFixed(1)}%`;
-        riskValue.className = `metric-value ${getColorClass(riskPct)}`;
+        riskValue.className = `metric-value ${getColorClass(riskPct, thresholdPct)}`;
         
         // Animate the bar
         setTimeout(() => {
             riskBar.style.width = `${riskPct}%`;
-            riskBar.style.backgroundColor = getBgColor(riskPct);
+            riskBar.style.backgroundColor = getBgColor(riskPct, thresholdPct);
         }, 100);
 
-        if (riskPct > 75) {
-            riskDesc.innerHTML = `<span style="color: var(--danger)">Higher model score</span>. Research-only output; it cannot guide prescribing.`;
-        } else if (riskPct > 40) {
-            riskDesc.innerHTML = `<span style="color: var(--warning)">Intermediate model score</span>. Research-only output; it cannot guide prescribing.`;
+        if (interactionPredicted) {
+            riskDesc.innerHTML = `<span style="color: var(--danger)">Interaction Predicted</span> (>= decision threshold ${thresholdPct.toFixed(1)}%). Research-only output; cannot guide prescribing.`;
+        } else if (riskPct >= thresholdPct * 0.75) {
+            riskDesc.innerHTML = `<span style="color: var(--warning)">Borderline Score</span> (< threshold ${thresholdPct.toFixed(1)}%). Research-only output; cannot guide prescribing.`;
         } else {
-            riskDesc.innerHTML = `<span style="color: var(--success)">Lower model score</span>. It does not establish that a pair is safe.`;
+            riskDesc.innerHTML = `<span style="color: var(--success)">Sub-Threshold Score</span> (< threshold ${thresholdPct.toFixed(1)}%). Unreported interaction does not establish that a pair is safe.`;
         }
 
         // Toxicity
         const toxAPct = percentageFromScore(data.drug_a_toxicity.score, 'Drug A toxicity score');
         toxAValue.innerText = `${toxAPct.toFixed(1)}%`;
-        toxAValue.className = `metric-value small ${getColorClass(toxAPct)}`;
+        toxAValue.className = `metric-value small ${getColorClass(toxAPct, 50)}`;
 
         const toxBPct = percentageFromScore(data.drug_b_toxicity.score, 'Drug B toxicity score');
         toxBValue.innerText = `${toxBPct.toFixed(1)}%`;
-        toxBValue.className = `metric-value small ${getColorClass(toxBPct)}`;
+        toxBValue.className = `metric-value small ${getColorClass(toxBPct, 50)}`;
 
-        // Show only metadata returned by the API. Never fill these fields with
-        // invented architecture or performance values.
+        // Show only metadata returned by the API
         metaArch.innerText = data.model_architecture || 'Unavailable';
         const evidence = data.stored_validation_evidence;
         metaAuroc.innerText = (
@@ -138,6 +147,18 @@ async function checkRisk() {
                 ? `${evidence.auroc.toFixed(4)} (internal validation only)`
                 : 'Unavailable'
         );
+
+        if (metaThreshold) {
+            metaThreshold.innerText = `${thresholdPct.toFixed(2)}% (${interactionPredicted ? 'Interaction Triggered' : 'Below Cutoff'})`;
+        }
+        if (metaCalib) {
+            const cal = data.score_calibration;
+            metaCalib.innerText = cal ? `${cal.status} (${cal.method || 'none'})` : 'Uncalibrated';
+        }
+        if (metaOod) {
+            const dom = data.structural_applicability_domain;
+            metaOod.innerText = dom ? (dom.outside_structural_domain ? 'Out-of-Domain (Novel Scaffold)' : 'In-Domain (Similar to Training)') : 'Unavailable';
+        }
         
         // A missing header is reported honestly rather than generating a fake ID.
         metaReqid.innerText = res.headers.get('x-request-id') || 'Unavailable';

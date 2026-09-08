@@ -209,6 +209,16 @@ def update_master_nodes_with_pharmgkb_faers_analogs(
     df_nodes = pd.read_csv(nodes_p)
     node_id_col = 'drug_id' if 'drug_id' in df_nodes.columns else ('canonical_smiles' if 'canonical_smiles' in df_nodes.columns else df_nodes.columns[0])
 
+    # 0. Initialize provenance tracking columns
+    if 'pharmgkb_provenance' not in df_nodes.columns:
+        df_nodes['pharmgkb_provenance'] = 'unprofiled'
+    if 'faers_provenance' not in df_nodes.columns:
+        df_nodes['faers_provenance'] = 'unprofiled'
+    if 'is_imputed_pharmgkb' not in df_nodes.columns:
+        df_nodes['is_imputed_pharmgkb'] = False
+    if 'is_imputed_faers' not in df_nodes.columns:
+        df_nodes['is_imputed_faers'] = False
+
     # 1. Collect profiled drugs for PharmGKB and FAERS
     profiled_gene_fps = []
     profiled_gene_symbols = []
@@ -260,6 +270,7 @@ def update_master_nodes_with_pharmgkb_faers_analogs(
             profiled_gene_fps.append(fp)
             profiled_gene_symbols.append(genes_list)
             profiled_gene_vecs.append(gene_vec)
+            df_nodes.at[idx, 'pharmgkb_provenance'] = 'observed'
         else:
             unprofiled_gene_indices.append(idx)
 
@@ -276,6 +287,7 @@ def update_master_nodes_with_pharmgkb_faers_analogs(
             profiled_tox_fps.append(fp)
             profiled_tox_scores.append(tox_score)
             profiled_tox_reports.append(n_rep)
+            df_nodes.at[idx, 'faers_provenance'] = 'observed'
         else:
             unprofiled_tox_indices.append(idx)
 
@@ -304,6 +316,8 @@ def update_master_nodes_with_pharmgkb_faers_analogs(
                     df_nodes.at[idx, 'gene_vector_multihot'] = json.dumps(inherited_vec)
                     if 'gene_vector_json' in df_nodes.columns:
                         df_nodes.at[idx, 'gene_vector_json'] = json.dumps(inherited_vec)
+                df_nodes.at[idx, 'pharmgkb_provenance'] = 'imputed_analog'
+                df_nodes.at[idx, 'is_imputed_pharmgkb'] = True
                 imputed_genes_count += 1
 
     # 3. Impute missing FAERS toxicity ONLY for true chemical analogs
@@ -327,30 +341,46 @@ def update_master_nodes_with_pharmgkb_faers_analogs(
 
                 df_nodes.at[idx, 'toxicity_score'] = round(imputed_tox, 4)
                 df_nodes.at[idx, 'n_faers_reports'] = imputed_rep
+                df_nodes.at[idx, 'faers_provenance'] = 'imputed_analog'
+                df_nodes.at[idx, 'is_imputed_faers'] = True
                 imputed_tox_count += 1
 
-    target_out = Path(output_path) if output_path else nodes_p
+    # Safe destination: if output_path is provided or overwrite_source=True, use that; else write enriched copy
+    overwrite_source = kwargs.get('overwrite_source', False)
+    if output_path is not None:
+        target_out = Path(output_path)
+    elif overwrite_source:
+        target_out = nodes_p
+    else:
+        target_out = nodes_p.with_name(f"{nodes_p.stem}_enriched_analogs.csv")
+
     target_out.parent.mkdir(parents=True, exist_ok=True)
     df_nodes.to_csv(target_out, index=False)
+
+    total_covered_genes = initial_genes_count + imputed_genes_count
+    total_covered_tox = initial_tox_count + imputed_tox_count
+    gene_cov_pct = round((total_covered_genes / max(len(df_nodes), 1)) * 100.0, 2)
+    tox_cov_pct = round((total_covered_tox / max(len(df_nodes), 1)) * 100.0, 2)
 
     summary = {
         'total_nodes': len(df_nodes),
         'total_drugs': len(df_nodes),
         'initial_pharmgkb_covered': initial_genes_count,
-        'final_pharmgkb_covered': len(df_nodes),
-        'drugs_profiled_genes': len(df_nodes),
-        'pharmgkb_coverage_pct': 100.0,
-        'final_gene_coverage_pct': 100.0,
+        'final_pharmgkb_covered': total_covered_genes,
+        'observed_pharmgkb_count': initial_genes_count,
         'imputed_genes_count': imputed_genes_count,
+        'pharmgkb_coverage_pct': gene_cov_pct,
+        'final_gene_coverage_pct': gene_cov_pct,
         'initial_faers_covered': initial_tox_count,
-        'final_faers_covered': len(df_nodes),
-        'drugs_profiled_faers': len(df_nodes),
-        'faers_coverage_pct': 100.0,
-        'final_faers_coverage_pct': 100.0,
+        'final_faers_covered': total_covered_tox,
+        'observed_faers_count': initial_tox_count,
         'imputed_faers_count': imputed_tox_count,
+        'faers_coverage_pct': tox_cov_pct,
+        'final_faers_coverage_pct': tox_cov_pct,
         'exported_path': str(target_out),
     }
-    print(f"PharmGKB and FAERS Synchronization Complete: 100.0% coverage across all {len(df_nodes)} drugs.")
-    print(f"-> Saved to: {target_out}")
+    print(f"PharmGKB Coverage: {total_covered_genes}/{len(df_nodes)} ({gene_cov_pct}%, observed={initial_genes_count}, imputed={imputed_genes_count})")
+    print(f"FAERS Coverage: {total_covered_tox}/{len(df_nodes)} ({tox_cov_pct}%, observed={initial_tox_count}, imputed={imputed_tox_count})")
+    print(f"-> Saved enriched nodes to: {target_out}")
     return df_nodes, summary
 

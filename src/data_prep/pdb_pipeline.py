@@ -503,6 +503,20 @@ def update_master_nodes_with_pdb(
                                 if delim in val:
                                     drug_targets.extend([s.strip() for s in val.split(delim)])
 
+            # Recover targets directly from gene_vector_multihot if explicit symbols column is absent
+            if not drug_targets:
+                for g_col in ['gene_vector_multihot', 'gene_vector_json', 'target_vector_multihot', 'bindingdb_target_vector']:
+                    if g_col in row and pd.notna(row[g_col]):
+                        try:
+                            g_val = json.loads(row[g_col]) if isinstance(row[g_col], str) else list(row[g_col])
+                            for idx, active in enumerate(g_val):
+                                if active and idx < len(active_vocab):
+                                    drug_targets.append(active_vocab[idx])
+                        except Exception:
+                            pass
+                        if drug_targets:
+                            break
+
             # Pharmacological stem target cross-referencing
             if not drug_targets and (nm or syn_names):
                 all_names = [nm] + syn_names if nm else syn_names

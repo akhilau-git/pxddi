@@ -328,12 +328,30 @@ class CachedDDIPairDataset(Dataset):
                     actual_target = cand
                     break
 
-        # Validate that edges have registered drugs
+        # Validate that edges have registered drugs and strictly validate labels
+        valid_positives = {True, 1, 1.0, '1', '1.0', 'true'}
+        valid_negatives = {False, 0, 0.0, '0', '0.0', 'false'}
         for _, row in edges_df.iterrows():
             sa, sb = str(row[actual_source]).strip(), str(row[actual_target]).strip()
             if sa in self.cache.graphs and sb in self.cache.graphs:
-                raw_label = row.get(label_col, 1.0)
-                lbl = 1.0 if (raw_label is True or raw_label == 1.0 or str(raw_label).lower() in {'1', 'true'}) else 0.0
+                if label_col in row and pd.notna(row[label_col]):
+                    raw_label = row[label_col]
+                    clean_str = str(raw_label).strip().lower()
+                    if raw_label in valid_positives or clean_str in {'1', '1.0', 'true'}:
+                        lbl = 1.0
+                    elif raw_label in valid_negatives or clean_str in {'0', '0.0', 'false'}:
+                        lbl = 0.0
+                    else:
+                        raise ValueError(
+                            f"Invalid or corrupted label '{raw_label}' encountered for edge ({sa}, {sb}). "
+                            f"Expected binary value (1/0, True/False)."
+                        )
+                elif label_col in row and pd.isna(row[label_col]):
+                    raise ValueError(
+                        f"Missing/NaN label encountered for edge ({sa}, {sb}). Label column cannot be null."
+                    )
+                else:
+                    lbl = 1.0
                 self.samples.append((sa, sb, lbl))
 
         self.memory_features: list[torch.Tensor] = []

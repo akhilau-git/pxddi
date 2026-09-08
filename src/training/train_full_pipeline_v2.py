@@ -1997,7 +1997,8 @@ def main() -> None:
             )
         full_dataset = build_binary_pair_dataset(
             positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SPLIT_SEED,
-            negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY
+            negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY,
+            known_reported_positive_pairs=all_clean_positives,
         )
         dataset_summary = {
             'protocol': 'legacy_pre_split_v1_scaffold_only',
@@ -2031,7 +2032,8 @@ def main() -> None:
         else:
             full_dataset = build_binary_pair_dataset(
                 positives, source_col='source', target_col='target', neg_ratio=1.0, seed=SPLIT_SEED,
-                negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY
+                negative_sampling_strategy=NEGATIVE_SAMPLING_STRATEGY,
+                known_reported_positive_pairs=all_clean_positives,
             )
             dataset_summary = {
                 'protocol': 'legacy_pre_split_v1',

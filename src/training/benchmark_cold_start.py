@@ -176,6 +176,7 @@ def ensure_benchmark_splits(
         holdout_fraction=holdout_fraction,
         seed=seed,
         negative_sampling_strategy='uniform',
+        allow_zero_negatives=kwargs.get('allow_zero_negatives', False),
     )
 
     for name, df in splits.items():

@@ -364,3 +364,19 @@ body {
 .error-state svg { margin-bottom: 1rem; }
 .error-state h3 { color: var(--danger); margin-bottom: 0.5rem; }
 .error-state p { color: var(--text-secondary); margin-bottom: 1rem; }
+
+.diagnostic-warnings {
+    margin-top: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.warning-banner {
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    color: #fbbf24;
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
