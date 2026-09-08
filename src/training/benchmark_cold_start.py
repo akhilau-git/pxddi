@@ -285,6 +285,13 @@ def evaluate_loader(
     neg_mask = (targets == 0)
     fn = int(np.sum((preds == 0) & pos_mask))
     fp = int(np.sum((preds == 1) & neg_mask))
+    tp = int(np.sum((preds == 1) & pos_mask))
+    tn = int(np.sum((preds == 0) & neg_mask))
+    fnr = float(fn / max(pos_mask.sum(), 1))
+    fpr = float(fp / max(neg_mask.sum(), 1))
+    recall = float(tp / max(pos_mask.sum(), 1))
+    sensitivity = recall
+    specificity = float(tn / max(neg_mask.sum(), 1))
 
     return {
         'auroc': auroc,
@@ -293,11 +300,16 @@ def evaluate_loader(
         'f1': float(f1_score(targets, preds, zero_division=0)),
         'mcc': float(matthews_corrcoef(targets, preds)),
         'brier': brier,
+        'recall': recall,
+        'sensitivity': sensitivity,
+        'specificity': specificity,
         'optimal_threshold': opt_thresh,
         'false_negatives': fn,
         'false_positives': fp,
-        'fnr': float(fn / max(pos_mask.sum(), 1)),
-        'fpr': float(fp / max(neg_mask.sum(), 1)),
+        'true_positives': tp,
+        'true_negatives': tn,
+        'fnr': fnr,
+        'fpr': fpr,
     }
 
 

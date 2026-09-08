@@ -81,6 +81,7 @@ def test_multimodal_study_smoke():
         assert "ablation_results" in res
         assert "tier_summary" in res
         assert "calibration_report" in res
+        assert "literature_benchmark" in res
 
         # Verify artifacts written
         assert (out_study / "auditddi_multimodal_v1_best.pt").is_file()
@@ -88,6 +89,8 @@ def test_multimodal_study_smoke():
         assert (out_study / "ablation" / "ablation_study_results.csv").is_file()
         assert (out_study / "error_analysis" / "cold_start_error_analysis.csv").is_file()
         assert (out_study / "calibration" / "calibration_metrics.json").is_file()
+        assert (out_study / "literature_benchmark_comparison.csv").is_file()
+        assert (out_study / "literature_benchmark_comparison.md").is_file()
 
 
 def test_run_full_study_alias_import():
