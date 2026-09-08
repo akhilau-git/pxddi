@@ -152,7 +152,16 @@ class CrossModalGeneAttention(nn.Module):
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q = self.mol_proj(mol_emb).unsqueeze(1)
-        k = v = self.gene_proj(gene_vec).unsqueeze(1)
+        if hasattr(self, 'gene_proj') and isinstance(self.gene_proj, nn.Linear):
+            if gene_vec.size(-1) == self.gene_proj.in_features:
+                k = v = self.gene_proj(gene_vec).unsqueeze(1)
+            elif gene_vec.size(-1) == self.gene_proj.out_features:
+                k = v = gene_vec.unsqueeze(1)
+            else:
+                padded = F.pad(gene_vec, (0, max(0, self.gene_proj.in_features - gene_vec.size(-1))))[:, :self.gene_proj.in_features]
+                k = v = self.gene_proj(padded).unsqueeze(1)
+        else:
+            k = v = gene_vec.unsqueeze(1)
         attn_out, _ = self.cross_attn(q, k, v)
         attn_out = attn_out.squeeze(1)
         gated = self.gate(attn_out) * attn_out
@@ -395,10 +404,11 @@ class PxDDIModel(nn.Module):
             )
             use_tgt_attn = bool(kwargs.get('use_cross_modal_target_attention', False))
             use_pdb_attn = bool(kwargs.get('use_cross_modal_pdb_attention', False))
-            if use_tgt_attn and self.use_target_encoder:
+            if use_tgt_attn and (self.use_target_encoder or self.use_protein_sequence_encoder):
+                tgt_attn_in = self.target_hidden_channels if (self.use_protein_sequence_encoder and not self.use_target_encoder) else self.target_feature_dim
                 self.cross_modal_target_attention = CrossModalBioAttention(
                     mol_dim=hidden_channels,
-                    gene_dim=self.target_feature_dim,
+                    gene_dim=tgt_attn_in,
                     hidden_dim=self.target_hidden_channels,
                 )
             else:
@@ -572,7 +582,14 @@ class PxDDIModel(nn.Module):
 
         has_tgt = (self.target_encoder is not None) or (getattr(self, 'protein_sequence_encoder', None) is not None)
         if has_tgt and self.target_gate is not None:
-            if getattr(self, 'protein_sequence_encoder', None) is not None and target_seq_a is not None and target_seq_b is not None:
+            has_valid_seqs = (
+                getattr(self, 'protein_sequence_encoder', None) is not None
+                and target_seq_a is not None
+                and target_seq_b is not None
+                and any(isinstance(s, str) and len(s.strip()) > 0 for s in target_seq_a)
+                and any(isinstance(s, str) and len(s.strip()) > 0 for s in target_seq_b)
+            )
+            if has_valid_seqs:
                 ta = self.protein_sequence_encoder(target_seq_a, device=ea.device)
                 tb = self.protein_sequence_encoder(target_seq_b, device=eb.device)
                 target_attn = getattr(self, 'cross_modal_target_attention', None)
