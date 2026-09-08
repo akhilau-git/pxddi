@@ -37,6 +37,7 @@ from models.ddi_model import (
     MODEL_ARCHITECTURE_MOTIF_EDGE_AWARE,
     MODEL_ARCHITECTURE_GRAPH_FP_FUSION,
     MODEL_ARCHITECTURE_AUDITDDI_MEMORY,
+    MODEL_ARCHITECTURE_MULTIMODAL,
     architecture_uses_edge_features,
     architecture_requires_motif_features,
     architecture_requires_fingerprint_features,
