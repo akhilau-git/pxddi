@@ -20,6 +20,7 @@ const metaArch = document.getElementById('meta-arch');
 const metaAuroc = document.getElementById('meta-auroc');
 const metaThreshold = document.getElementById('meta-threshold');
 const metaCalib = document.getElementById('meta-calib');
+const metaConformal = document.getElementById('meta-conformal');
 const metaOod = document.getElementById('meta-ood');
 const metaReqid = document.getElementById('meta-reqid');
 const apiBaseUrl = new URL(
@@ -154,6 +155,14 @@ async function checkRisk() {
         if (metaCalib) {
             const cal = data.score_calibration;
             metaCalib.innerText = cal ? `${cal.status} (${cal.method || 'none'})` : 'Uncalibrated';
+        }
+        if (metaConformal) {
+            const unc = data.prediction_uncertainty;
+            if (unc && unc.status !== 'not_available' && unc.prediction_set) {
+                metaConformal.innerText = `${unc.prediction_set} (${unc.abstain ? 'Abstain / Uncertain' : 'Confident'})`;
+            } else {
+                metaConformal.innerText = 'Not configured';
+            }
         }
         if (metaOod) {
             const dom = data.structural_applicability_domain;

@@ -9,6 +9,7 @@ from torch_geometric.nn import global_mean_pool
 from .encoder import CrossDrugAttention, EdgeAwareMolecularEncoder, MolecularEncoder
 from .toxicity_model import ToxicityHead
 from .patient_context import PatientContextEncoder
+from .protein_target_encoder import ProteinTargetSequenceEncoder
 
 
 MODEL_ARCHITECTURE_LEGACY = 'legacy_gat_v1'
@@ -80,10 +81,11 @@ def model_from_checkpoint(checkpoint):
     use_pdb_attn = bool(checkpoint.get('use_cross_modal_pdb_attention', any('cross_modal_pdb_attention' in k for k in state_dict)))
     use_inductive = bool(checkpoint.get('use_inductive_bio_features', False))
     use_fnorm = bool(checkpoint.get('use_fusion_norm', any('fusion_norm' in k for k in state_dict)))
+    use_protein_seq = bool(checkpoint.get('use_protein_sequence_encoder', any('protein_sequence_encoder' in k for k in state_dict)))
 
     if classifier_w is not None and isinstance(classifier_w, torch.Tensor):
         h_dim = int(checkpoint.get('hidden_channels', 64))
-        target_extra = (64 * 3) if use_target else 0
+        target_extra = (64 * 3) if (use_target or use_protein_seq) else 0
         pdb_extra = (64 * 3) if use_pdb else 0
         base_dim = (h_dim + 128 + 64) * 3 + target_extra + pdb_extra + 4
         diff = classifier_w.shape[1] - base_dim
@@ -118,6 +120,7 @@ def model_from_checkpoint(checkpoint):
         use_target_encoder=use_target,
         target_feature_dim=checkpoint.get('target_feature_dim', 50),
         target_hidden_channels=checkpoint.get('target_hidden_channels', 64),
+        use_protein_sequence_encoder=use_protein_seq,
         use_pdb_encoder=use_pdb,
         pdb_feature_dim=checkpoint.get('pdb_feature_dim', checkpoint.get('pdb_dim', 50)),
         pdb_hidden_channels=checkpoint.get('pdb_hidden_channels', 64),
@@ -275,6 +278,23 @@ class PxDDIModel(nn.Module):
             self.target_encoder = None
             self.target_gate = None
 
+        self.use_protein_sequence_encoder = bool(
+            kwargs.get('use_protein_sequence_encoder', False)
+            or kwargs.get('use_esm2_target_encoder', False)
+        )
+        if self.use_protein_sequence_encoder and architecture_requires_multimodal_features(architecture_version):
+            self.protein_sequence_encoder = ProteinTargetSequenceEncoder(
+                output_dim=self.target_hidden_channels,
+                use_esm=bool(kwargs.get('use_esm', False)),
+            )
+            if self.target_gate is None:
+                self.target_gate = nn.Sequential(
+                    nn.Linear(self.target_hidden_channels, 1),
+                    nn.Sigmoid(),
+                )
+        else:
+            self.protein_sequence_encoder = None
+
         self.use_pdb_encoder = bool(
             kwargs.get('use_pdb_encoder', False)
             or (kwargs.get('use_pdb', False) and architecture_requires_multimodal_features(architecture_version))
@@ -304,7 +324,7 @@ class PxDDIModel(nn.Module):
         )
         motif_dim = int(motif_hidden_channels) if (self.motif_encoder is not None and motif_hidden_channels is not None) else 0
         gene_dim = int(gene_hidden_channels) if (self.gene_encoder is not None and gene_hidden_channels is not None) else 0
-        target_dim = self.target_hidden_channels if (self.target_encoder is not None) else 0
+        target_dim = self.target_hidden_channels if (self.target_encoder is not None or self.protein_sequence_encoder is not None) else 0
         pdb_dim = self.pdb_hidden_channels if (self.pdb_encoder is not None) else 0
         pair_feature_multiplier = 3 if self.uses_multiplicative_fusion else 2
         pair_embedding_channels = (
@@ -439,6 +459,8 @@ class PxDDIModel(nn.Module):
         target_b=None,
         target_mask_a=None,
         target_mask_b=None,
+        target_seq_a=None,
+        target_seq_b=None,
         geo_a=None,
         geo_b=None,
         geo_mask_a=None,
@@ -548,8 +570,24 @@ class PxDDIModel(nn.Module):
             ea_for_risk = torch.cat((ea_for_risk, ga_rep), dim=1)
             eb_for_risk = torch.cat((eb_for_risk, gb_rep), dim=1)
 
-        if self.target_encoder is not None and self.target_gate is not None:
-            if target_a is not None and target_b is not None:
+        has_tgt = (self.target_encoder is not None) or (getattr(self, 'protein_sequence_encoder', None) is not None)
+        if has_tgt and self.target_gate is not None:
+            if getattr(self, 'protein_sequence_encoder', None) is not None and target_seq_a is not None and target_seq_b is not None:
+                ta = self.protein_sequence_encoder(target_seq_a, device=ea.device)
+                tb = self.protein_sequence_encoder(target_seq_b, device=eb.device)
+                target_attn = getattr(self, 'cross_modal_target_attention', None)
+                if target_attn is not None:
+                    ta = ta + target_attn(ea, ta, target_mask_a)
+                    tb = tb + target_attn(eb, tb, target_mask_b)
+                ta_gate = self.target_gate(ta)
+                tb_gate = self.target_gate(tb)
+                if target_mask_a is not None:
+                    ta_gate = ta_gate * target_mask_a.view(-1, 1)
+                if target_mask_b is not None:
+                    tb_gate = tb_gate * target_mask_b.view(-1, 1)
+                ta_rep = ta_gate * ta
+                tb_rep = tb_gate * tb
+            elif target_a is not None and target_b is not None and self.target_encoder is not None:
                 t_in_a = target_a.float().view(-1, self.target_feature_dim)
                 t_in_b = target_b.float().view(-1, self.target_feature_dim)
                 ta = self.target_encoder(t_in_a)

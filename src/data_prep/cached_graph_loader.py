@@ -49,6 +49,7 @@ class MolecularCache:
         self.geo_masks: dict[str, torch.Tensor] = {}
         self.pdb_vectors: dict[str, torch.Tensor] = {}
         self.pdb_masks: dict[str, torch.Tensor] = {}
+        self.target_sequences: dict[str, str] = {}
 
     def register_drug(
         self,
@@ -58,6 +59,7 @@ class MolecularCache:
         target_vector: list[int] | list[float] | None = None,
         geo_vector: list[float] | None = None,
         pdb_vector: list[int] | list[float] | None = None,
+        target_sequence: str | None = None,
     ) -> bool:
         """Parse and cache a single drug's multi-modal representations."""
         if smiles in self.graphs:
@@ -147,6 +149,12 @@ class MolecularCache:
             self.pdb_vectors[smiles] = torch.zeros(self.pdb_dim, dtype=torch.float32)
             self.pdb_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
 
+        # UniProt Protein Target Primary Sequence
+        if target_sequence and isinstance(target_sequence, str) and len(target_sequence.strip()) > 0:
+            self.target_sequences[smiles] = target_sequence.strip()
+        else:
+            self.target_sequences[smiles] = ""
+
         return True
 
     def populate_from_master_nodes(self, master_nodes_path: str | Path) -> int:
@@ -161,6 +169,7 @@ class MolecularCache:
         geo_col_cands = ['geo_signature_vector', 'geo_vector', 'disease_signature_vector', 'geo_signatures_vector']
         pdb_col_cands = ['pdb_vector_multihot', 'pdb_vector', 'pdb_signature_vector', 'pdb_targets_vector']
         tox_col_cands = ['toxicity_score', 'clinical_toxicity', 'faers_toxicity_score', 'tox_score', 'faers_score']
+        target_seq_col_cands = ['target_sequence', 'uniprot_sequence', 'target_seq', 'protein_sequence', 'amino_acid_sequence']
 
         for c in gene_col_cands:
             if c in df_nodes.columns:
@@ -271,6 +280,14 @@ class MolecularCache:
                     except Exception:
                         pass
 
+            # Extract UniProt protein target sequence
+            target_seq = None
+            for c in target_seq_col_cands:
+                if c in row and pd.notna(row[c]):
+                    target_seq = str(row[c]).strip()
+                    if target_seq:
+                        break
+
             if self.register_drug(
                 smi,
                 gene_vector=gene_vec,
@@ -278,6 +295,7 @@ class MolecularCache:
                 target_vector=target_vec,
                 geo_vector=geo_vec,
                 pdb_vector=pdb_vec,
+                target_sequence=target_seq,
             ):
                 count += 1
 
@@ -286,13 +304,14 @@ class MolecularCache:
         n_targets = sum(1 for m in self.target_masks.values() if m.item() > 0)
         n_geo = sum(1 for m in self.geo_masks.values() if m.item() > 0)
         n_pdb = sum(1 for m in self.pdb_masks.values() if m.item() > 0)
+        n_seqs = sum(1 for s in self.target_sequences.values() if len(s) > 0)
 
         print(
             f"MolecularCache populated: {count} drugs cached "
             f"[Graphs: {len(self.graphs)}, ECFP: {len(self.fingerprints)}, "
             f"PharmGKB: {n_genes} (dim={self.gene_dim}), FAERS: {n_tox}, "
             f"BindingDB: {n_targets} (dim={self.target_dim}), GEO: {n_geo} (dim={self.geo_dim}), "
-            f"PDB: {n_pdb} (dim={self.pdb_dim})]"
+            f"PDB: {n_pdb} (dim={self.pdb_dim}), UniProt: {n_seqs}]"
         )
         return count
 
@@ -395,6 +414,8 @@ class CachedDDIPairDataset(Dataset):
             'pdb_b': self.cache.pdb_vectors.get(sb, torch.zeros(self.cache.pdb_dim, dtype=torch.float32)),
             'pdb_mask_a': self.cache.pdb_masks.get(sa, torch.tensor(0.0, dtype=torch.float32)),
             'pdb_mask_b': self.cache.pdb_masks.get(sb, torch.tensor(0.0, dtype=torch.float32)),
+            'target_seq_a': self.cache.target_sequences.get(sa, ""),
+            'target_seq_b': self.cache.target_sequences.get(sb, ""),
             'label': torch.tensor(lbl, dtype=torch.float32),
         }
         if self.memory_features and index < len(self.memory_features):
@@ -426,6 +447,8 @@ def multimodal_collate_fn(batch_items: list[dict[str, Any]]) -> dict[str, Any]:
         'target_b': torch.stack([item['target_b'] for item in batch_items]),
         'target_mask_a': torch.stack([item['target_mask_a'] for item in batch_items]),
         'target_mask_b': torch.stack([item['target_mask_b'] for item in batch_items]),
+        'target_seq_a': [item.get('target_seq_a', '') for item in batch_items],
+        'target_seq_b': [item.get('target_seq_b', '') for item in batch_items],
         'geo_a': torch.stack([item['geo_a'] for item in batch_items]),
         'geo_b': torch.stack([item['geo_b'] for item in batch_items]),
         'geo_mask_a': torch.stack([item['geo_mask_a'] for item in batch_items]),

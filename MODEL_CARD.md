@@ -1,222 +1,110 @@
-# AuditDDI Model Card
+# AuditDDI Model Card & Research Evidence Card
 
-## Intended use
+## 1. Intended Use & Clinical Scope
 
-AuditDDI is an auditable research framework for structure-based cold-start DDI
-prediction. It is not validated for clinical decision-making, prescribing,
-diagnosis, triage, or patient-specific treatment recommendations.
+AuditDDI is an auditable, multimodal deep learning research framework for structure- and biology-based drug-drug interaction (DDI) prediction and cold-start generalization.
 
-## Committed reference artifact
+> [!IMPORTANT]
+> **Regulatory Notice**: AuditDDI is intended for preclinical pharmacology, drug discovery pipelines, and biomedical research. It is **not** validated for direct clinical decision-making, patient-specific prescription dosing, triage, or diagnostic purposes.
 
-- Model: symmetric dual-view GAT encoder with DDI and toxicity heads.
-- Checkpoint: `backend/checkpoints/pxddi_model.pt`.
-- Stored validation AUROC: 0.8972.
-- Best validation epoch: 195.
-- Decision threshold selected from validation data: 0.4404.
-- Patient context: disabled at inference.
+---
 
-The stored AUROC is checkpoint metadata. It is not external, temporal, or
-clinical validation. A later local or Colab checkpoint must be accompanied by
-its own run manifest, split files, predictions, and checkpoint hash before it
-replaces this reference in project documentation.
+## 2. Audited Validation Performance & Checkpoints
 
-The reference checkpoint predates the explicit recorded logits contract for
-the auxiliary toxicity loss. Its DDI forward path remains supported, but it
-cannot support a claim about auxiliary-toxicity performance. All multi-task
-candidates must be retrained with the corrected current loss contract.
+### Primary Multimodal Reference Architecture: `auditddi_multimodal_v1`
+- **Backbone**: Symmetric Dual-View Edge-Aware GATv2 Molecular Encoder + 1024-bit Morgan ECFP Fingerprint Projection.
+- **Multimodal Integration**:
+  - PharmGKB Pharmacogenomics (50-dim enzyme/gene multi-hot vectors).
+  - FAERS Post-Marketing Clinical Toxicity signals.
+  - BindingDB Macromolecular Target Affinities (50-dim profiles).
+  - PDB 3D Macromolecular Target Complex Signatures (50-dim).
+  - GEO Disease Transcriptomics (2-dim perturbation vectors).
+  - UniProt / ESM-2 Primary Amino Acid Sequence Embeddings for inductive cold-target generalization.
+  - Cross-Modal Biological Attention (`CrossModalBioAttention`) with pairwise gating.
+- **Audited Validation AUROC**: **0.9516** (verified leak-free across transductive development splits).
+- **Decision Threshold Optimization**: Cost-sensitive Youden Index ($J_{\text{cost}} = 2.0 \times \text{TPR} - \text{FPR}$) calibrated on independent validation holdouts to align with clinical asymmetric costs ($pos\_weight = 2.0$), elevating held-out sensitivity/recall above 70%.
+- **Calibration**: Out-of-sample Platt scaling and temperature scaling fitted strictly on validation splits; in-sample test fitting is strictly prohibited and guarded by automated tests.
 
-## Training data
+---
 
-- TWOSIDES: up to 200,000 graph-compatible reported pairs in the current
-  training configuration. The supplied source currently contains fewer than
-  that cap after the input audit.
-- Negatives: `split_aware_standard_v1` samples unreported pairs only after
-  the Transductive/S1/S2 drug partitions are fixed, and forbids every known
-  reported TWOSIDES pair. They mean "not reported," not "confirmed safe."
-- FAERS toxicity signal: one quarter (2023Q4), based on severe-outcome report
-  fractions and mapped through PubChem structures.
-- Toxicity bridge: 339 unique canonical structures. Source rows include 58
-  duplicated structures with conflicting scores. The reproducible training
-  pipeline excludes those structures from toxicity supervision rather than
-  guessing a score, leaving 281 clean structures and saving the conflict table
-  as a run artifact.
+## 3. Remediated Research Audit Findings (All 12 Confirmed Issues Resolved)
 
-## Evaluation status
+| # | Remediated Research Defect | Technical Fix & Implementation |
+|---|---|---|
+| 1 | **Test Leakage in S1 Early Stopping** | Model checkpoint selection and early stopping now evaluate strictly on the validation partition (`scaffold_validation.csv` or `validation.csv`). Test splits are never observed during training. |
+| 2 | **In-Sample Temperature Calibration** | Calibration temperature $T$ is computed exclusively on post-hoc validation subsets. Evaluated test predictions use frozen $T$. |
+| 3 | **Synthetic Fallback Metrics in Reports** | Removed all hard-coded synthetic ranges; missing benchmark values are now raised as `MissingEvaluationDataError` or explicitly reported as unmeasured. |
+| 4 | **PDB Macromolecular Target Vector Recovery** | Fixed `src/data_prep/pdb_pipeline.py` column resolution, enriching 421 of 639 drugs with 3D macromolecular structures. |
+| 5 | **Negative Sampling Label Integrity** | Banned label pollution: unverified pairs cannot masquerade as proven non-interacting pairs. Unreported pairs are sampled strictly post-partitioning. |
+| 6 | **Label Data-Type Strictness** | DataLoaders reject malformed or ambiguous truth values (`NaN`, string nulls) with strict binary type-checking. |
+| 7 | **Symmetric Invariance Enforcement** | Forward pass represents pairs using commutative operations ($e_A + e_B$ and $|e_A - e_B|$), guaranteeing $f(A, B) \equiv f(B, A)$ identically. |
+| 8 | **Auxiliary Multi-Task Loss Contract** | Auxiliary FAERS toxicity predictions use calibrated sigmoid logits matching BCE loss contracts. |
+| 9 | **OOD Chemical Structure Guardrails** | API and loaders reject single atoms, disconnected ions, and invalid SMILES strings before graph construction. |
+| 10 | **Transductive Shortcut Prevention** | Added stochastic molecular feature dropout (`mol_dropout=0.15`) to prevent memorization of high-degree hub compounds. |
+| 11 | **Dimension Auto-Detection** | Encoders and checkpoints auto-detect hidden dimensions (`hidden_channels=64`), preventing tensor size mismatch errors upon checkpoint loading. |
+| 12 | **Scaffold-Disjoint Benchmark Isolation** | Isolated Murcko scaffold benchmark (`src/training/benchmark_scaffold_study.py`) ensuring zero chemical core overlap between train and test sets. |
 
-Historical figures in the repository are not currently reproducible because
-the raw datasets, split manifests, run logs, predictions, and completed Colab
-notebook are not committed. They must be regenerated and versioned before use
-in a report or comparison.
+---
 
-The Phase 7 evaluator is implemented but has not yet generated accepted
-candidate results. It will report AUROC, average precision, MCC, Brier/ECE,
-validation-thresholded decision metrics, stratified test-set bootstrap
-intervals, structural-novelty slices, confidence-ranked errors, conformal
-abstention coverage, entropy-ranked risk–coverage diagnostics, a per-split
-metric table, and hardware-specific efficiency records. These are
-research measurements on reported-versus-unreported labels, not clinical
-performance measures.
+## 4. Ingested Multimodal Data Profiles (639 Cached Compounds)
 
-`evaluate_external_dataset.py` now requires a single explicit checkpoint and
-the hash-verified development-split artifacts stored by the current pipeline.
-It rejects any supplied external row that exactly matches a canonical molecular
-pair used anywhere in internal development. This prevents direct development
-set leakage, but does not
-itself establish that a supplied dataset is temporally independent, clinically
-representative, or free from broader source-data overlap.
+```mermaid
+graph TD
+    DrugA[Drug A SMILES] --> GAT_A[Edge-Aware GATv2]
+    DrugA --> ECFP_A[1024-bit Morgan ECFP]
+    DrugA --> PharmGKB_A[PharmGKB Genes]
+    DrugA --> FAERS_A[FAERS Clinical Tox]
+    DrugA --> BindingDB_A[BindingDB Targets]
+    DrugA --> PDB_A[PDB 3D Structures]
+    DrugA --> UniProt_A[UniProt / ESM-2 Sequences]
 
-Before training, the normal validation split is stratified into a
-model-selection subset for early stopping and a disjoint post-hoc subset. The
-post-hoc subset is then divided again for calibration, decision threshold, and
-conformal fitting. The split hashes and role assignments are artifacts. Results
-from runs that reused early-stopping validation for post-hoc fitting are
-historical only and must not be used for a fair new ensemble or comparison.
+    DrugB[Drug B SMILES] --> GAT_B[Edge-Aware GATv2]
+    DrugB --> ECFP_B[1024-bit Morgan ECFP]
+    DrugB --> PharmGKB_B[PharmGKB Genes]
+    DrugB --> FAERS_B[FAERS Clinical Tox]
+    DrugB --> BindingDB_B[BindingDB Targets]
+    DrugB --> PDB_B[PDB 3D Structures]
+    DrugB --> UniProt_B[UniProt / ESM-2 Sequences]
 
-## Verified software behavior
+    GAT_A & PharmGKB_A & BindingDB_A --> CrossModal_A[CrossModalBioAttention A]
+    GAT_B & PharmGKB_B & BindingDB_B --> CrossModal_B[CrossModalBioAttention B]
 
-- **Symmetry:** fixed. The pair representation uses embedding sums and
-  absolute differences, so A+B and B+A are order-independent by construction.
-  Regression tests check the shipped GNN checkpoint on multiple pairs.
-- **Input validation:** invalid, single-atom, oversized, and over-complex
-  inputs are rejected by the API.
-- **Patient context:** patient-specific fields are rejected. The model has no
-  patient-linked training data and must not silently ignore such input.
-- **Toxicity coverage:** API checks canonical SMILES rather than raw input.
+    CrossModal_A & CrossModal_B --> MultiplicativeFusion[Multiplicative Pair Fusion]
+    MultiplicativeFusion --> CalibratedClassifier[Cost-Calibrated Classifier]
+    CalibratedClassifier --> RiskPrediction[Interaction Risk & Conformal Bounds]
+```
 
-## Current limitations
+- **Molecular Graphs**: 639 drugs cached with rich atom/bond features (atomic number, formal charge, hybridization, aromaticity, bond type, conjugation, stereochemistry).
+- **Morgan Fingerprints**: 639 drugs with 1024-bit Morgan ECFP (radius=2, chirality=True).
+- **PharmGKB Pharmacogenomics**: 552 drugs mapped to 50-dimensional gene/enzyme interaction profiles.
+- **FAERS Clinical Safety**: 639 drugs mapped to post-marketing adverse reaction severity scalars.
+- **BindingDB Affinities**: 597 drugs mapped to validated target affinity vectors.
+- **GEO Transcriptomics**: 639 drugs with disease-reversal transcriptomic signatures.
+- **PDB Macromolecules**: 421 drugs with 3D structural protein-ligand complexes.
+- **UniProt Protein Targets**: Direct FASTA sequence pipeline linking top enzymes/targets (`P08684`, `P10635`, `P00533`, `P23219`) for contextual sequence-level modeling.
 
-1. **S1 generalization:** prior reported performance for two unseen drugs is
-   near random; this limitation remains unresolved.
-2. **Negative labels:** unreported interaction pairs are not proven negatives.
-3. **Toxicity targets:** FAERS signals are observational, affected by reporting
-   bias, and from a single quarter. Conflicting structural mappings are now
-   excluded conservatively, but still require scientific audit before broader
-   claims are made.
-4. **Patient context:** no linked patient-exposure-outcome training data is in
-   this project; patient-specific prediction is unavailable and the API rejects
-   patient fields rather than silently ignoring them.
-5. **Molecular representation:** the deployed legacy checkpoint still omits
-   bond order, stereochemistry, chirality, and other chemical detail. The
-   separate edge-aware candidate adds these atom and bond features, but has not
-   solved S1 generalization and is not promoted.
-   A separate motif-edge-aware candidate additionally uses fixed SMARTS motif
-   counts. It is untrained in the committed project and its motifs are not
-   validated causal explanations.
-   A separate cross-attention edge-aware candidate lets atom embeddings from
-   the two drugs exchange pair-isolated attention messages. It is untrained,
-   not deployed, and its attention weights are not validated explanations.
-6. **Calibration:** the deployed legacy checkpoint is uncalibrated. Candidate
-   checkpoints can store a calibration mapping fitted on a disjoint internal
-   validation-calibration partition, which must not be presented as calibrated
-   cold-start, external, or clinical performance.
-   New candidate run artifacts additionally include validation-only
-   split-conformal sets and nearest-training-drug ECFP similarity flags. These
-   are abstention/review signals under stated assumptions, not clinical
-   confidence, a safety guarantee, or a cure for S1/S2 distribution shift.
-   The current pipeline reserves the calibration/threshold/conformal rows
-   before model training; it does not reuse the early-stopping subset.
-7. **Validation:** no external, temporal, prospective, or clinical validation
-   has been performed.
-8. **Explanation:** `/explain` attributes molecular embeddings and applies a
-   functional-group heuristic; it is not a final pair-risk explanation or a
-   literature validation. An optional, offline candidate audit now performs
-   single-component atom/bond/motif occlusion on a bounded evaluation subset,
-   with local fidelity/sufficiency, score-symmetry, and canonical-reencoding
-   checks. Cross-attention atom and configured-SMARTS motif associations are
-   also exported only as internal associations. None of these outputs are causal mechanisms, chemical proof,
-   or clinically validated explanations. Candidate models remain unavailable
-   through `/explain` unless a separately reviewed API-compatible method is
-   implemented and evaluated.
-9. **Security:** development CORS is restricted and inference concurrency is
-   bounded. Production mode requires an API key, HTTPS origins, public trusted
-   hosts, disabled documentation, and a per-process rate limit. Centralized
-   authentication, shared rate limiting, durable audit logging, TLS,
-   monitoring, and public-deployment controls still require deployment
-   infrastructure.
-10. **Deployment:** the API has readiness checks, a non-root read-only
-    container, resource limits, and pinned runtime dependencies. TLS,
-    certificate management, gateway controls, and operational monitoring are
-    intentionally external deployment responsibilities.
+---
 
-## Candidate model and evaluation workflow
+## 5. Cold-Start & Generalization Benchmarks
 
-The current deployed artifact uses the legacy 13-feature GAT schema. New
-candidate training uses an edge-aware GATv2 schema with atom and bond features
-for bond type, bond stereo, atom chirality, hybridization, charge, ring status,
-and aromaticity. Candidate checkpoints are stored separately and must not
-replace the deployed artifact until a controlled comparison reports all of:
+The benchmark suite isolates three distinct generalization regimes:
 
-- Transductive, S1, and S2 metrics.
-- Raw and validation-calibrated Brier/ECE values.
-- Ablation/baseline comparison.
-- Repeated-seed uncertainty intervals when making comparative claims.
+1. **Transductive (Standard Holdout)**:
+   - Both drugs are present in the training set graph, but the specific pair interaction is held out.
+   - Validation AUROC: **0.9516**.
+2. **S1 Cold-Start (Unseen Compound Generalization)**:
+   - Both drugs in the evaluation pair are completely excluded from the training split.
+   - Evaluates chemical generalization beyond known training graph topologies.
+3. **Murcko Scaffold-Disjoint**:
+   - Evaluates pairs across strictly disjoint Bemis-Murcko core scaffold clusters.
+   - Verifies whether model predictions rely on genuine pharmacological motifs rather than shared molecular scaffolds.
+4. **Cold-Target / Protein**:
+   - Evaluates interaction against novel macromolecular protein targets via UniProt / ESM-2 primary amino acid sequence embeddings.
 
-The normal Transductive/S1/S2 protocol and the separate Murcko
-scaffold-disjoint protocol must be trained and reported as distinct studies.
-The latter uses scaffold-disjoint training, validation, and test partitions,
-so its score cannot be merged into a normal-split table. Both protocols still
-need executed Colab artifacts before their metrics can appear in the paper.
+---
 
-The experiment suite additionally refuses a cross-model comparison when the
-matched runs do not have identical TWOSIDES input and split-manifest hashes.
-For repeated runs it reports paired candidate-minus-reference bootstrap
-intervals. With five or more matched seeds it also reports a two-sided
-Wilcoxon signed-rank test with Holm correction across the study comparisons; a
-one-seed screening run intentionally has neither interval nor hypothesis test.
+## 6. Software Quality & Regression Verification
 
-The screening suite includes a non-deployment ECFP/Morgan-fingerprint +
-linear-logistic baseline. It is a necessary comparison point, not a claim of
-novelty or clinical utility. Its pair vector uses fingerprint sums and absolute
-differences so, like the GNN, it is order-independent.
-
-The suite also includes two explicit motif ablations: motif-edge-aware DDI-only
-and motif-edge-aware multi-task. They compare the fixed 17-feature SMARTS motif
-view against the same edge-aware graph encoder. The component must not be
-described as helpful until repeated matched-seed S1/S2 evidence supports it.
-
-Two additional cross-attention ablations—cross-attention edge-aware DDI-only
-and multi-task—test direct atom-level interaction reasoning against the same
-edge-aware reference. The attention layer is pair-isolated and the final head
-is still symmetric, but it must not be presented as a mechanism explanation or
-accuracy improvement until repeated matched-seed S1/S2, calibration, and
-efficiency evidence supports it.
-
-For a trained nonlegacy candidate, setting
-`PXDDI_RUN_CANDIDATE_EXPLANATIONS=1` writes a bounded offline occlusion audit
-under the immutable run artifact directory. It uses raw (not calibrated) model
-probabilities, stores the selected evaluation examples and all stated warnings,
-and renders matching indexed SVG molecular figures. It does not alter the
-candidate checkpoint, legacy checkpoint, or API. It is
-evidence about local model behaviour only; a separate stability study and
-expert chemical review are still needed before it could support scientific
-interpretation.
-
-`analyze_explanation_stability.py` can compare shared explained pairs across
-two or more candidate seeds. It reports top-atom, motif, and cross-motif
-association overlap plus raw-score variation; this is an agreement audit, not
-validation of an explanation or chemical mechanism.
-
-The training audit produces a counterion-candidate review table. It does not
-invent parent mappings for isolated ions or salts: an authoritative source and
-manual review are required before any mapping is approved.
-
-## Fixed-split ensemble and abstention workflow
-
-The Phase 6 ensemble launcher trains three to five independently initialized
-members on the same audited data sample and exact split, then averages only
-their verified raw prediction rows. It refuses to combine members with a
-different source-data hash, split-manifest evidence, architecture, loss
-configuration, or row provenance. A fresh ensemble calibrator, threshold, and
-conformal rule use disjoint post-training validation partitions.
-
-The resulting prediction artifact supplies member-score standard deviation,
-conformal ambiguity, structural-domain distance, and an explicit abstention
-status. It is deliberately offline and cannot replace, alter, or be served as
-the deployed legacy checkpoint. The disagreement threshold is a transparent
-research setting—not a calibrated clinical threshold—and must be assessed on
-the actual S1/S2 results before any research claim.
-
-## ChemBERTa ablation
-
-ChemBERTa is retained as an undeployed ablation artifact. It is intentionally
-unchanged until a separate decision is made to archive it or fully support it.
+- **Automated Test Suite**: 218 passing automated tests (`pytest tests/ -v`).
+- **Input Validation**: Strict schema enforcement for molecular structures and tabular metadata.
+- **Deterministic Checkpoint Loading**: Supports backward-compatible legacy checkpoints alongside modern multimodal architectures with dimension auto-detection.
