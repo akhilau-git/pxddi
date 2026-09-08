@@ -133,3 +133,40 @@ def test_molecular_cache_pdb_collation(mock_pdb_dir, tmp_path):
     assert "pdb_mask_a" in batch
     assert batch["pdb_a"].shape == (1, 50)
     assert batch["pdb_mask_a"][0].item() == 1.0
+
+
+def test_update_master_nodes_with_pdb_stem_and_gene_fallback(tmp_path):
+    """Verify fallback target cross-referencing and pharmacological stem matching."""
+    nodes_csv = tmp_path / "master_drug_nodes_fallback.csv"
+    empty_pdb_dir = tmp_path / "empty_pdb"
+    empty_pdb_dir.mkdir()
+
+    nodes_df = pd.DataFrame([
+        {
+            "drug_id": "DRUG_STATIN",
+            "canonical_smiles": "CC1C=CC2C(C1)C(C(C=C2)C)OC(=O)C(C)CC",
+            "display_name": "Atorvastatin",
+            "gene_symbols_json": json.dumps(["HMGCR", "CYP3A4"]),
+        },
+        {
+            "drug_id": "DRUG_BETA_BLOCKER",
+            "canonical_smiles": "CC(C)NCC(COc1cccc2ccccc12)O",
+            "display_name": "Propranolol",
+        },
+        {
+            "drug_id": "DRUG_UNPROFILED",
+            "canonical_smiles": "CCCC",
+            "display_name": "ButaneUnknown",
+        },
+    ])
+    nodes_df.to_csv(nodes_csv, index=False)
+
+    res = update_master_nodes_with_pdb(nodes_csv, empty_pdb_dir)
+    # Both Atorvastatin (from genes + stem) and Propranolol (from 'olol' stem -> ADRB1, ADRB2) should match!
+    assert res["nodes_with_pdb_structures"] >= 2
+
+    enriched = pd.read_csv(nodes_csv)
+    assert enriched.loc[enriched["drug_id"] == "DRUG_STATIN", "is_pdb_active"].values[0]
+    assert enriched.loc[enriched["drug_id"] == "DRUG_BETA_BLOCKER", "is_pdb_active"].values[0]
+    vec_statin = json.loads(enriched.loc[enriched["drug_id"] == "DRUG_STATIN", "pdb_vector_multihot"].values[0])
+    assert any(x > 0 for x in vec_statin)

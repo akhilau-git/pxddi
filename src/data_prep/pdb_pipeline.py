@@ -42,6 +42,33 @@ DEFAULT_PDB_VOCABULARY: list[str] = [
     'CDK4', 'CDK6', 'MTOR', 'PIK3CA', 'JAK2',
 ]
 
+PHARMACOLOGICAL_STEM_TARGETS: list[tuple[str, list[str]]] = [
+    ('statin', ['HMGCR', 'CYP3A4']),
+    ('olol', ['ADRB1', 'ADRB2']),
+    ('pril', ['ACE']),
+    ('sartan', ['AGTR1']),
+    ('prazole', ['CYP2C19', 'CYP3A4']),
+    ('coxib', ['PTGS2']),
+    ('dipine', ['CACNA1C']),
+    ('oxacin', ['TOP2A']),
+    ('tinib', ['EGFR', 'ABL1']),
+    ('zepam', ['GABRA1']),
+    ('zolam', ['GABRA1']),
+    ('afil', ['PDE5A']),
+    ('gliptin', ['DPP4']),
+    ('navir', ['CYP3A4']),
+    ('profen', ['PTGS1', 'PTGS2']),
+    ('setron', ['HTR1A', 'HTR2A']),
+    ('asone', ['NR3C1']),
+    ('olone', ['NR3C1']),
+    ('tine', ['SLC6A4']),
+    ('pramine', ['SLC6A4', 'SLC6A2']),
+    ('caine', ['SCN5A']),
+    ('triptan', ['HTR1A', 'HTR2A']),
+    ('statin', ['HMGCR']),
+    ('glitazone', ['PPARG']),
+]
+
 _MORGAN_GEN = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024, includeChirality=True)
 
 DRUG_SMILES_COLUMNS = (
@@ -366,11 +393,18 @@ def update_master_nodes_with_pdb(
 
     df_nodes = pd.read_csv(nodes_p)
 
+    active_vocab: list[str] = list(DEFAULT_PDB_VOCABULARY[:top_k_targets])
+
     if isinstance(pdb_dir_or_profiles, pd.DataFrame):
         df_pdb = pdb_dir_or_profiles
-        vocab = DEFAULT_TOP_PDB_TARGETS
     else:
-        df_pdb, _ = parse_pdb_directory(pdb_dir_or_profiles, top_k_targets=top_k_targets, master_nodes_path=nodes_p)
+        df_pdb, pdb_summary = parse_pdb_directory(pdb_dir_or_profiles, top_k_targets=top_k_targets, master_nodes_path=nodes_p)
+        if isinstance(pdb_summary, dict) and pdb_summary.get('top_10_targets'):
+            for t in pdb_summary['top_10_targets']:
+                up_t = str(t).strip().upper()
+                if up_t and up_t not in active_vocab:
+                    active_vocab.append(up_t)
+            active_vocab = active_vocab[:top_k_targets]
 
     node_id_col = 'drug_id' if 'drug_id' in df_nodes.columns else ('canonical_smiles' if 'canonical_smiles' in df_nodes.columns else df_nodes.columns[0])
 
@@ -386,7 +420,7 @@ def update_master_nodes_with_pdb(
         ikey = str(row.get('inchikey')).strip() if pd.notna(row.get('inchikey')) else None
         nm = normalise_drug_name(str(row.get('drug_name'))) if pd.notna(row.get('drug_name')) else None
         pdbs_json = str(row.get('pdb_structures_json', '[]'))
-        vec = json.loads(row['pdb_vector_multihot']) if isinstance(row.get('pdb_vector_multihot'), str) else [0] * top_k_targets
+        vec = json.loads(row['pdb_vector_multihot']) if isinstance(row.get('pdb_vector_multihot'), str) else [0] * len(active_vocab)
         res = float(row.get('pdb_resolution_score', 2.5)) if pd.notna(row.get('pdb_resolution_score')) else 2.5
 
         if can:
@@ -406,7 +440,7 @@ def update_master_nodes_with_pdb(
     pdb_resolutions: list[float] = []
 
     matched = 0
-    zero_vec = [0] * top_k_targets
+    zero_vec = [0] * len(active_vocab)
 
     for _, row in df_nodes.iterrows():
         raw_smi = str(row[node_id_col]).strip()
@@ -464,9 +498,23 @@ def update_master_nodes_with_pdb(
                         elif isinstance(parsed, list):
                             drug_targets.extend([str(x) for x in parsed])
                     except Exception:
-                        pass
+                        if isinstance(val, str):
+                            for delim in [';', ',', '|']:
+                                if delim in val:
+                                    drug_targets.extend([s.strip() for s in val.split(delim)])
+
+            # Pharmacological stem target cross-referencing
+            if not drug_targets and (nm or syn_names):
+                all_names = [nm] + syn_names if nm else syn_names
+                for name_to_check in all_names:
+                    if not name_to_check:
+                        continue
+                    low_name = name_to_check.lower()
+                    for stem, stem_tgts in PHARMACOLOGICAL_STEM_TARGETS:
+                        if stem in low_name:
+                            drug_targets.extend(stem_tgts)
+
             if drug_targets:
-                active_vocab = vocab if (isinstance(vocab, list) and vocab) else DEFAULT_PDB_VOCABULARY[:top_k_targets]
                 vec = encode_multihot_pdb_vector(drug_targets, active_vocab)
                 if any(x > 0 for x in vec):
                     annotated_pdbs = [f'PDB_{t}' for t in drug_targets if str(t).strip().upper() in set(active_vocab)]

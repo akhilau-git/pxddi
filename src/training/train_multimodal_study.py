@@ -1367,7 +1367,46 @@ def run_full_multimodal_study(
     print(f"Output Dir   : {out_p}")
     print("=" * 80)
 
-    # 1. Auto-enrich master nodes with BindingDB, GEO, and PDB using case-insensitive path resolution
+    # 1. Auto-enrich master nodes with PharmGKB pharmacogenomic pathways first (populates gene_symbols)
+    cand_pharmgkb = resolve_existing_dir([
+        kwargs.pop('pharmgkb_dir', None),
+        data_root / 'pharmgkb',
+        data_root / 'PharmGKB',
+        resolved_nodes.parent / 'pharmgkb',
+    ])
+    if cand_pharmgkb:
+        try:
+            sample_df = pd.read_csv(master_nodes_path, nrows=10)
+            if 'gene_vector_multihot' not in sample_df.columns or sample_df['gene_vector_multihot'].dropna().empty:
+                from src.data_prep.pharmgkb_pipeline import update_master_nodes_with_pharmgkb_pathways
+                from src.data_prep.expanded_pharmgkb_bridge import update_master_nodes_with_pharmgkb_faers_analogs
+                print(f"Auto-enriching master nodes with PharmGKB pathways from: {cand_pharmgkb}")
+                update_master_nodes_with_pharmgkb_pathways(master_nodes_path, cand_pharmgkb)
+                update_master_nodes_with_pharmgkb_faers_analogs(master_nodes_path)
+        except Exception as pgkb_err:
+            print(f"PharmGKB auto-enrichment notice: {pgkb_err}")
+
+    # 2. Auto-enrich master nodes with FAERS clinical toxicity
+    cand_faers = resolve_existing_path([
+        kwargs.pop('faers_dir', None),
+        kwargs.pop('faers_bridge_path', None),
+        data_root / 'faers' / 'faers_bridge.csv',
+        data_root / 'faers',
+        data_root / 'FAERS',
+        resolved_nodes.parent / 'faers_bridge.csv',
+        resolved_nodes.parent / 'faers',
+    ])
+    if cand_faers:
+        try:
+            sample_df = pd.read_csv(master_nodes_path, nrows=10)
+            if 'toxicity_score' not in sample_df.columns or sample_df['toxicity_score'].dropna().empty:
+                from src.data_prep.build_unified_graph import update_master_nodes_with_faers
+                print(f"Auto-enriching master nodes with FAERS from: {cand_faers}")
+                update_master_nodes_with_faers(master_nodes_path, cand_faers)
+        except Exception as faers_err:
+            print(f"FAERS auto-enrichment notice: {faers_err}")
+
+    # 3. Auto-enrich master nodes with BindingDB, GEO, and PDB (PDB now has rich gene symbols and targets available)
     for mod_name, dir_key, col_names, enrich_fn in [
         ('BindingDB', 'bindingdb_dir', ['bindingdb_target_vector', 'target_vector_multihot'], 'src.data_prep.bindingdb_pipeline.update_master_nodes_with_bindingdb'),
         ('GEO', 'geo_dir', ['geo_signature_vector', 'geo_vector'], 'src.data_prep.geo_pipeline.update_master_nodes_with_geo'),
@@ -1411,45 +1450,6 @@ def run_full_multimodal_study(
                     fn(master_nodes_path, cand_dir)
             except Exception as enrich_err:
                 print(f"{mod_name} auto-enrichment notice: {enrich_err}")
-
-    # 2. Auto-enrich master nodes with FAERS clinical toxicity
-    cand_faers = resolve_existing_path([
-        kwargs.pop('faers_dir', None),
-        kwargs.pop('faers_bridge_path', None),
-        data_root / 'faers' / 'faers_bridge.csv',
-        data_root / 'faers',
-        data_root / 'FAERS',
-        resolved_nodes.parent / 'faers_bridge.csv',
-        resolved_nodes.parent / 'faers',
-    ])
-    if cand_faers:
-        try:
-            sample_df = pd.read_csv(master_nodes_path, nrows=10)
-            if 'toxicity_score' not in sample_df.columns or sample_df['toxicity_score'].dropna().empty:
-                from src.data_prep.build_unified_graph import update_master_nodes_with_faers
-                print(f"Auto-enriching master nodes with FAERS from: {cand_faers}")
-                update_master_nodes_with_faers(master_nodes_path, cand_faers)
-        except Exception as faers_err:
-            print(f"FAERS auto-enrichment notice: {faers_err}")
-
-    # 3. Auto-enrich master nodes with PharmGKB pharmacogenomic pathways
-    cand_pharmgkb = resolve_existing_dir([
-        kwargs.pop('pharmgkb_dir', None),
-        data_root / 'pharmgkb',
-        data_root / 'PharmGKB',
-        resolved_nodes.parent / 'pharmgkb',
-    ])
-    if cand_pharmgkb:
-        try:
-            sample_df = pd.read_csv(master_nodes_path, nrows=10)
-            if 'gene_vector_multihot' not in sample_df.columns or sample_df['gene_vector_multihot'].dropna().empty:
-                from src.data_prep.pharmgkb_pipeline import update_master_nodes_with_pharmgkb_pathways
-                from src.data_prep.expanded_pharmgkb_bridge import update_master_nodes_with_pharmgkb_faers_analogs
-                print(f"Auto-enriching master nodes with PharmGKB pathways from: {cand_pharmgkb}")
-                update_master_nodes_with_pharmgkb_pathways(master_nodes_path, cand_pharmgkb)
-                update_master_nodes_with_pharmgkb_faers_analogs(master_nodes_path)
-        except Exception as pgkb_err:
-            print(f"PharmGKB auto-enrichment notice: {pgkb_err}")
 
     # 1. Populate Cache
     cache = MolecularCache(gene_dim=50)
