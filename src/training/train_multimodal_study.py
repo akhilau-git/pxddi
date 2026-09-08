@@ -211,8 +211,9 @@ def train_extended_multimodal(
     ssl_pairs_count: int = 5000,
     memory_dropout: float = 0.75,
     embedding_noise_std: float = 0.02,
-    bio_align_weight: float = 0.25,
     patience: int = 8,
+    hidden_dim: int = 64,
+    **kwargs: Any,
 ) -> tuple[PxDDIModel, pd.DataFrame, dict[str, Any]]:
     """Train the multimodal model across extended epochs with checkpointing."""
     if select_best_by == 's1':
@@ -285,12 +286,22 @@ def train_extended_multimodal(
     in_channels = sample_batch['drug_a'].x.size(1)
     edge_dim = sample_batch['drug_a'].edge_attr.size(1)
 
-    hidden_dim = 128
+    hidden_dim = int(kwargs.get('hidden_dim', 64))
     if chembl_pretrained_path and Path(chembl_pretrained_path).is_file():
         try:
             bundle_meta = torch.load(chembl_pretrained_path, map_location='cpu', weights_only=False)
-            if isinstance(bundle_meta, dict) and 'encoder_configuration' in bundle_meta:
-                hidden_dim = int(bundle_meta['encoder_configuration'].get('hidden_channels', 64))
+            if isinstance(bundle_meta, dict):
+                if 'encoder_configuration' in bundle_meta:
+                    hidden_dim = int(bundle_meta['encoder_configuration'].get('hidden_channels', hidden_dim))
+                elif 'hyperparameters' in bundle_meta and 'hidden_channels' in bundle_meta['hyperparameters']:
+                    hidden_dim = int(bundle_meta['hyperparameters']['hidden_channels'])
+                else:
+                    st = bundle_meta.get('model_state_dict', bundle_meta.get('encoder_state_dict', bundle_meta))
+                    if isinstance(st, dict):
+                        for k, v in st.items():
+                            if 'gat1.lin_src.weight' in k or 'gat1.lin_l.weight' in k:
+                                hidden_dim = int(v.shape[0] // 2)
+                                break
         except Exception:
             pass
 
