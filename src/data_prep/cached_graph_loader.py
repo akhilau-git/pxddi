@@ -107,7 +107,16 @@ class MolecularCache:
             self.toxicity_scalars[smiles] = torch.tensor(0.0, dtype=torch.float32)
             self.toxicity_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
 
+        # UniProt Protein Target Primary Sequence
+        has_seq = False
+        if target_sequence and isinstance(target_sequence, str) and len(target_sequence.strip()) > 0:
+            self.target_sequences[smiles] = target_sequence.strip()
+            has_seq = True
+        else:
+            self.target_sequences[smiles] = ""
+
         # BindingDB Target Vector (Multi-Hot / Affinity)
+        has_tgt = has_seq
         if target_vector and len(target_vector) > 0:
             tv = np.array(target_vector, dtype=np.float32)
             if len(tv) != self.target_dim:
@@ -116,10 +125,12 @@ class MolecularCache:
                 padded[:l] = tv[:l]
                 tv = padded
             self.target_vectors[smiles] = torch.tensor(tv, dtype=torch.float32)
-            self.target_masks[smiles] = torch.tensor(1.0 if np.any(tv > 0) else 0.0, dtype=torch.float32)
+            if np.any(tv > 0):
+                has_tgt = True
         else:
             self.target_vectors[smiles] = torch.zeros(self.target_dim, dtype=torch.float32)
-            self.target_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
+
+        self.target_masks[smiles] = torch.tensor(1.0 if has_tgt else 0.0, dtype=torch.float32)
 
         # GEO Disease Transcriptomic Signature Vector
         if geo_vector and len(geo_vector) > 0:
@@ -148,12 +159,6 @@ class MolecularCache:
         else:
             self.pdb_vectors[smiles] = torch.zeros(self.pdb_dim, dtype=torch.float32)
             self.pdb_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
-
-        # UniProt Protein Target Primary Sequence
-        if target_sequence and isinstance(target_sequence, str) and len(target_sequence.strip()) > 0:
-            self.target_sequences[smiles] = target_sequence.strip()
-        else:
-            self.target_sequences[smiles] = ""
 
         return True
 

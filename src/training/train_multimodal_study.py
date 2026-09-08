@@ -332,6 +332,7 @@ def train_extended_multimodal(
         geo_hidden_channels=32,
         memory_dropout=memory_dropout,
         embedding_noise_std=embedding_noise_std,
+        use_protein_sequence_encoder=is_multimodal and bool(kwargs.get('use_protein_sequence_encoder', False)),
     )
 
     encoder_warmed = False
@@ -1092,6 +1093,7 @@ def evaluate_multimodal_subcohort_generalization(
         has_target = (cache.target_masks.get(sa, torch.tensor(0.0)).item() > 0.5) and (cache.target_masks.get(sb, torch.tensor(0.0)).item() > 0.5)
         has_faers = (cache.toxicity_masks.get(sa, torch.tensor(0.0)).item() > 0.5) and (cache.toxicity_masks.get(sb, torch.tensor(0.0)).item() > 0.5)
         has_gene = (cache.gene_masks.get(sa, torch.tensor(0.0)).item() > 0.5) and (cache.gene_masks.get(sb, torch.tensor(0.0)).item() > 0.5)
+        has_uniprot = bool(cache.target_sequences.get(sa, "")) and bool(cache.target_sequences.get(sb, ""))
 
         rows.append({
             'drug_a': sa,
@@ -1101,13 +1103,15 @@ def evaluate_multimodal_subcohort_generalization(
             'has_bindingdb_target': has_target,
             'has_faers_toxicity': has_faers,
             'has_pharmgkb_gene': has_gene,
+            'has_uniprot_target': has_uniprot,
         })
 
-    cols = ['drug_a', 'drug_b', 'target', 'prob', 'has_bindingdb_target', 'has_faers_toxicity', 'has_pharmgkb_gene']
+    cols = ['drug_a', 'drug_b', 'target', 'prob', 'has_bindingdb_target', 'has_faers_toxicity', 'has_pharmgkb_gene', 'has_uniprot_target']
     eval_df = pd.DataFrame(rows, columns=cols)
 
     subsets = [
         ('All S1 Pairs', eval_df),
+        ('UniProt Target Sequence Profiled', eval_df[eval_df['has_uniprot_target']]),
         ('BindingDB Target Profiled', eval_df[eval_df['has_bindingdb_target']]),
         ('FAERS Toxicity Profiled', eval_df[eval_df['has_faers_toxicity']]),
         ('PharmGKB Pathway Profiled', eval_df[eval_df['has_pharmgkb_gene']]),
@@ -1589,6 +1593,7 @@ def run_full_multimodal_study(
     use_cross_modal_attention: bool = kwargs.pop('use_cross_modal_attention', True)
     use_cross_drug_attention: bool = kwargs.pop('use_cross_drug_attention', False)
     use_target_encoder: bool = kwargs.pop('use_target_encoder', True)
+    use_protein_sequence_encoder: bool = bool(kwargs.pop('use_protein_sequence_encoder', True))
     use_neighbor_memory: bool = kwargs.pop('use_neighbor_memory', False)
     select_best_by: str = kwargs.pop('select_best_by', 's1')
 
@@ -1616,6 +1621,7 @@ def run_full_multimodal_study(
         use_cross_modal_attention=use_cross_modal_attention,
         use_cross_drug_attention=use_cross_drug_attention,
         use_target_encoder=use_target_encoder,
+        use_protein_sequence_encoder=use_protein_sequence_encoder,
         use_neighbor_memory=use_neighbor_memory,
         select_best_by=select_best_by,
         pos_weight=pos_weight,
