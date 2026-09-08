@@ -188,6 +188,8 @@ def test_pdb_and_geo_encoders_forward():
 
     g1 = smiles_to_graph("CC(=O)Oc1ccccc1C(=O)O", feature_schema=FEATURE_SCHEMA_RICH, include_fingerprint_features=True)
     g2 = smiles_to_graph("CC(=O)Nc1ccc(O)cc1", feature_schema=FEATURE_SCHEMA_RICH, include_fingerprint_features=True)
+    assert g1 is not None and g1.x is not None and g1.edge_attr is not None
+    assert g2 is not None and g2.x is not None and g2.edge_attr is not None
 
     model = PxDDIModel(
         in_channels=g1.x.size(1),
@@ -236,6 +238,8 @@ def test_inductive_bio_features_and_cross_modal_attention():
 
     g1 = smiles_to_graph("CC(=O)Oc1ccccc1C(=O)O", feature_schema=FEATURE_SCHEMA_RICH, include_fingerprint_features=True)
     g2 = smiles_to_graph("CC(C)Cc1ccc(cc1)C(C)C(=O)O", feature_schema=FEATURE_SCHEMA_RICH, include_fingerprint_features=True)
+    assert g1 is not None and g1.x is not None and g1.edge_attr is not None
+    assert g2 is not None and g2.x is not None and g2.edge_attr is not None
 
     model = PxDDIModel(
         in_channels=g1.x.size(1),

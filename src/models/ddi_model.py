@@ -280,8 +280,8 @@ class PxDDIModel(nn.Module):
             or (kwargs.get('use_pdb', False) and architecture_requires_multimodal_features(architecture_version))
             or (architecture_version == MODEL_ARCHITECTURE_MULTIMODAL and kwargs.get('use_pdb', True))
         )
-        self.pdb_feature_dim = kwargs.get('pdb_feature_dim', kwargs.get('pdb_dim', 50))
-        self.pdb_hidden_channels = kwargs.get('pdb_hidden_channels', 64)
+        self.pdb_feature_dim = int(kwargs.get('pdb_feature_dim') or kwargs.get('pdb_dim') or 50)
+        self.pdb_hidden_channels = int(kwargs.get('pdb_hidden_channels', 64))
         if self.use_pdb_encoder and architecture_requires_multimodal_features(architecture_version):
             self.pdb_encoder = nn.Sequential(
                 nn.Linear(self.pdb_feature_dim, self.pdb_hidden_channels),
@@ -378,8 +378,8 @@ class PxDDIModel(nn.Module):
             if use_tgt_attn and self.use_target_encoder:
                 self.cross_modal_target_attention = CrossModalBioAttention(
                     mol_dim=hidden_channels,
-                    gene_dim=self.target_feature_dim,
-                    hidden_dim=self.target_hidden_channels,
+                    gene_dim=int(self.target_feature_dim),
+                    hidden_dim=int(self.target_hidden_channels),
                 )
             else:
                 self.cross_modal_target_attention = None
@@ -387,8 +387,8 @@ class PxDDIModel(nn.Module):
             if use_pdb_attn and self.use_pdb_encoder:
                 self.cross_modal_pdb_attention = CrossModalBioAttention(
                     mol_dim=hidden_channels,
-                    gene_dim=self.pdb_feature_dim,
-                    hidden_dim=self.pdb_hidden_channels,
+                    gene_dim=int(self.pdb_feature_dim),
+                    hidden_dim=int(self.pdb_hidden_channels),
                 )
             else:
                 self.cross_modal_pdb_attention = None
@@ -554,9 +554,10 @@ class PxDDIModel(nn.Module):
                 t_in_b = target_b.float().view(-1, self.target_feature_dim)
                 ta = self.target_encoder(t_in_a)
                 tb = self.target_encoder(t_in_b)
-                if getattr(self, 'cross_modal_target_attention', None) is not None:
-                    ta = ta + self.cross_modal_target_attention(ea, t_in_a, target_mask_a)
-                    tb = tb + self.cross_modal_target_attention(eb, t_in_b, target_mask_b)
+                target_attn = getattr(self, 'cross_modal_target_attention', None)
+                if target_attn is not None:
+                    ta = ta + target_attn(ea, t_in_a, target_mask_a)
+                    tb = tb + target_attn(eb, t_in_b, target_mask_b)
                 elif self.cross_modal_attention is not None and t_in_a.size(-1) == self.cross_modal_attention.gene_proj.in_features:
                     ta = ta + self.cross_modal_attention(ea, t_in_a, target_mask_a)
                     tb = tb + self.cross_modal_attention(eb, t_in_b, target_mask_b)
@@ -580,9 +581,10 @@ class PxDDIModel(nn.Module):
                 p_in_b = pdb_b.float().view(-1, self.pdb_feature_dim)
                 pa = self.pdb_encoder(p_in_a)
                 pb = self.pdb_encoder(p_in_b)
-                if getattr(self, 'cross_modal_pdb_attention', None) is not None:
-                    pa = pa + self.cross_modal_pdb_attention(ea, p_in_a, pdb_mask_a)
-                    pb = pb + self.cross_modal_pdb_attention(eb, p_in_b, pdb_mask_b)
+                pdb_attn = getattr(self, 'cross_modal_pdb_attention', None)
+                if pdb_attn is not None:
+                    pa = pa + pdb_attn(ea, p_in_a, pdb_mask_a)
+                    pb = pb + pdb_attn(eb, p_in_b, pdb_mask_b)
                 elif self.cross_modal_attention is not None and p_in_a.size(-1) == self.cross_modal_attention.gene_proj.in_features:
                     pa = pa + self.cross_modal_attention(ea, p_in_a, pdb_mask_a)
                     pb = pb + self.cross_modal_attention(eb, p_in_b, pdb_mask_b)
@@ -759,7 +761,7 @@ class PxDDIModel(nn.Module):
         reps = [e]
         if self.fp_encoder is not None and fp is not None:
             reps.append(self.fp_encoder(fp.float().view(-1, 1024).to(device)))
-        if self.gene_encoder is not None and gene is not None:
+        if self.gene_encoder is not None and self.gene_gate is not None and gene is not None:
             g = self.gene_encoder(gene.float().to(device))
             g_gate = self.gene_gate(g)
             if gene_mask is not None:
