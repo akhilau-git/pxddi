@@ -39,6 +39,7 @@ from src.data_prep.uniprot_pipeline import (
     CANONICAL_TARGET_TO_UNIPROT,
     clean_protein_sequence,
     parse_fasta_string,
+    update_master_nodes_with_uniprot,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

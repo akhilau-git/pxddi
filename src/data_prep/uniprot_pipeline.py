@@ -18,6 +18,16 @@ import urllib.error
 
 import pandas as pd
 
+__all__ = [
+    "CANONICAL_TARGET_TO_UNIPROT",
+    "OFFLINE_SEQUENCE_FALLBACKS",
+    "clean_protein_sequence",
+    "parse_fasta_string",
+    "fetch_uniprot_sequence",
+    "build_target_sequence_catalog",
+    "update_master_nodes_with_uniprot",
+]
+
 # Canonical UniProt Accession mappings for top DDI pharmacological targets
 CANONICAL_TARGET_TO_UNIPROT: dict[str, str] = {
     'CYP3A4': 'P08684',
