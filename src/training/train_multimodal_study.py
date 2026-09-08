@@ -346,19 +346,20 @@ def train_extended_multimodal(
             try:
                 ckpt_obj = torch.load(chembl_pretrained_path, map_location=device, weights_only=False)
                 st_dict = ckpt_obj.get('model_state_dict', ckpt_obj.get('encoder_state_dict', ckpt_obj))
-                enc_dict = {
-                    k.replace('encoder.', ''): v
-                    for k, v in st_dict.items()
-                    if (k.startswith('encoder.') or k in model.encoder.state_dict())
-                }
-                if enc_dict and any('node_embedding' in k for k in enc_dict):
+                target_state = model.encoder.state_dict()
+                enc_dict = {}
+                for k, v in st_dict.items():
+                    clean_k = k.replace('encoder.', '')
+                    if clean_k in target_state and target_state[clean_k].shape == v.shape:
+                        enc_dict[clean_k] = v
+                if enc_dict and any(k.startswith('gat') for k in enc_dict):
                     model.encoder.load_state_dict(enc_dict, strict=False)
                     print(f"✅ Extracted and loaded {len(enc_dict)} molecular encoder weights from checkpoint: {chembl_pretrained_path}")
                     encoder_warmed = True
                 else:
-                    print(f"Notice: could not load ChEMBL weights ({exc}), proceeding with warm-up check.")
-            except Exception:
-                print(f"Notice: could not load ChEMBL weights ({exc}), proceeding with warm-up check.")
+                    print(f"Notice: checkpoint {Path(chembl_pretrained_path).name} encoder shapes do not match current architecture (expected {len(target_state)} layers), initializing via self-supervised contrastive warm-up.")
+            except Exception as inner_exc:
+                print(f"Notice: could not load encoder weights from {chembl_pretrained_path} ({inner_exc}), proceeding with warm-up check.")
 
     if not encoder_warmed and hasattr(model, 'encoder'):
         from src.models.encoder import EdgeAwareMolecularEncoder

@@ -353,6 +353,34 @@ def test_inductive_bio_features_and_cross_modal_attention():
     assert torch.is_tensor(risk_eval)
 
 
+def test_extract_compatible_encoder_weights_from_checkpoint(tmp_path):
+    from src.models.ddi_model import PxDDIModel, MODEL_ARCHITECTURE_MULTIMODAL
 
+    source_model = PxDDIModel(
+        in_channels=79,
+        hidden_channels=64,
+        edge_feature_dim=10,
+        architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+    )
+    ckpt_path = tmp_path / "candidate_model.pt"
+    torch.save({"model_state_dict": source_model.state_dict()}, ckpt_path)
 
+    target_model = PxDDIModel(
+        in_channels=79,
+        hidden_channels=64,
+        edge_feature_dim=10,
+        architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+    )
 
+    ckpt_obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    st_dict = ckpt_obj.get("model_state_dict", ckpt_obj.get("encoder_state_dict", ckpt_obj))
+    target_state = target_model.encoder.state_dict()
+    enc_dict = {}
+    for k, v in st_dict.items():
+        clean_k = k.replace("encoder.", "")
+        if clean_k in target_state and target_state[clean_k].shape == v.shape:
+            enc_dict[clean_k] = v
+
+    assert len(enc_dict) > 0
+    assert any(k.startswith("gat") for k in enc_dict)
+    target_model.encoder.load_state_dict(enc_dict, strict=False)
