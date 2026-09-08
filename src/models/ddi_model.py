@@ -259,8 +259,8 @@ class PxDDIModel(nn.Module):
         )
 
         self.use_target_encoder = bool(kwargs.get('use_target_encoder', False))
-        self.target_feature_dim = kwargs.get('target_feature_dim', 50)
-        self.target_hidden_channels = kwargs.get('target_hidden_channels', 64)
+        self.target_feature_dim = int(kwargs.get('target_feature_dim', 50))
+        self.target_hidden_channels = int(kwargs.get('target_hidden_channels', 64))
         if self.use_target_encoder and architecture_requires_multimodal_features(architecture_version):
             self.target_encoder = nn.Sequential(
                 nn.Linear(self.target_feature_dim, self.target_hidden_channels),
@@ -304,8 +304,8 @@ class PxDDIModel(nn.Module):
         )
         motif_dim = int(motif_hidden_channels) if (self.motif_encoder is not None and motif_hidden_channels is not None) else 0
         gene_dim = int(gene_hidden_channels) if (self.gene_encoder is not None and gene_hidden_channels is not None) else 0
-        target_dim = int(self.target_hidden_channels) if (self.target_encoder is not None) else 0
-        pdb_dim = int(self.pdb_hidden_channels) if (self.pdb_encoder is not None) else 0
+        target_dim = self.target_hidden_channels if (self.target_encoder is not None) else 0
+        pdb_dim = self.pdb_hidden_channels if (self.pdb_encoder is not None) else 0
         pair_feature_multiplier = 3 if self.uses_multiplicative_fusion else 2
         pair_embedding_channels = (
             hidden_channels
@@ -378,8 +378,8 @@ class PxDDIModel(nn.Module):
             if use_tgt_attn and self.use_target_encoder:
                 self.cross_modal_target_attention = CrossModalBioAttention(
                     mol_dim=hidden_channels,
-                    gene_dim=int(self.target_feature_dim),
-                    hidden_dim=int(self.target_hidden_channels),
+                    gene_dim=self.target_feature_dim,
+                    hidden_dim=self.target_hidden_channels,
                 )
             else:
                 self.cross_modal_target_attention = None
@@ -387,8 +387,8 @@ class PxDDIModel(nn.Module):
             if use_pdb_attn and self.use_pdb_encoder:
                 self.cross_modal_pdb_attention = CrossModalBioAttention(
                     mol_dim=hidden_channels,
-                    gene_dim=int(self.pdb_feature_dim),
-                    hidden_dim=int(self.pdb_hidden_channels),
+                    gene_dim=self.pdb_feature_dim,
+                    hidden_dim=self.pdb_hidden_channels,
                 )
             else:
                 self.cross_modal_pdb_attention = None
