@@ -411,6 +411,7 @@ def train_extended_multimodal(
     history_records: list[dict[str, Any]] = []
     best_val_auroc = -1.0
     best_s1_auroc = -1.0
+    best_s1_epoch = 1
     epochs_without_s1_improvement = 0
     best_weights_path = out_p / f'{architecture_version}_best.pt'
     best_s1_weights_path = out_p / f'{architecture_version}_best_s1.pt'
@@ -629,6 +630,7 @@ def train_extended_multimodal(
         is_s1_best = s1_metrics['auroc'] > best_s1_auroc
         if is_s1_best:
             best_s1_auroc = s1_metrics['auroc']
+            best_s1_epoch = epoch
             epochs_without_s1_improvement = 0
             torch.save(
                 {
@@ -664,9 +666,6 @@ def train_extended_multimodal(
                 },
                 best_s1_weights_path,
             )
-        elif s1_improved_over_prev:
-            # Active positive momentum / recovery: decrement stagnation counter to allow upward trend to continue
-            epochs_without_s1_improvement = max(0, epochs_without_s1_improvement - 1)
         else:
             epochs_without_s1_improvement += 1
 
@@ -677,9 +676,8 @@ def train_extended_multimodal(
               f"S1 AUROC: {s1_metrics['auroc']:.4f} (Acc: {s1_metrics['accuracy']*100:.1f}%, FN: {s1_metrics['false_negatives']}){best_mark}{s1_mark}")
 
         # Early Stopping: Prevent transductive overfitting from degrading S1 cold-start generalization
-        # Only stop if stagnant for `patience` consecutive epochs AND not actively trending upward
-        if patience > 0 and epochs_without_s1_improvement >= patience and epoch >= 6 and not s1_improved_over_prev:
-            print(f"\n⏹️ Early stopping triggered at Epoch {epoch}: S1 AUROC plateaued for {patience} consecutive epochs without upward momentum (Peak S1 AUROC: {best_s1_auroc:.4f}). Restoring peak S1 checkpoint.")
+        if patience > 0 and epochs_without_s1_improvement >= patience and epoch >= 4:
+            print(f"\n⏹️ Early stopping triggered at Epoch {epoch}: S1 AUROC has not improved for {patience} consecutive epochs (Peak S1 AUROC: {best_s1_auroc:.4f} at Epoch {best_s1_epoch}). Restoring peak S1 checkpoint.")
             break
 
     # Load best checkpoint for final evaluation
@@ -1105,6 +1103,8 @@ def evaluate_cross_dataset_generalization(
             continue
         y_t = sub['target'].to_numpy()
         y_p = sub['prob'].to_numpy()
+        auroc = float(roc_auc_score(y_t, y_p))
+        auprc = float(average_precision_score(y_t, y_p))
         b_preds = (y_p >= 0.50).astype(int)
         b_acc = float(accuracy_score(y_t, b_preds))
         b_f1 = float(f1_score(y_t, b_preds, zero_division=0))
@@ -1442,6 +1442,9 @@ def run_full_multimodal_study(
                                 pass
                         if not has_nonzero:
                             needs_enrichment = True
+                if mod_name == 'PDB' and 'is_pdb_active' in sample_df.columns:
+                    if int(sample_df['is_pdb_active'].sum()) == 0:
+                        needs_enrichment = True
                 if needs_enrichment:
                     mod_path, fn_name = enrich_fn.rsplit('.', 1)
                     module = __import__(mod_path, fromlist=[fn_name])

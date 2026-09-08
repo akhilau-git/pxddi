@@ -448,6 +448,10 @@ class PxDDIModel(nn.Module):
         else:
             ea_for_risk, eb_for_risk = ea, eb
 
+        if self.training and self.embedding_noise_std > 0.0:
+            ea_for_risk = ea_for_risk + torch.randn_like(ea_for_risk) * self.embedding_noise_std
+            eb_for_risk = eb_for_risk + torch.randn_like(eb_for_risk) * self.embedding_noise_std
+
         if self.fp_encoder is not None:
             if fp_a is not None and fp_b is not None:
                 enc_fp_a = self.fp_encoder(fp_a.float().view(-1, 1024))
@@ -549,9 +553,6 @@ class PxDDIModel(nn.Module):
                 features.append(torch.stack([clinical_tox_a.float().view(-1), clinical_tox_b.float().view(-1)], dim=1))
             else:
                 features.append(torch.zeros((ea.size(0), 2), device=ea.device, dtype=ea.dtype))
-        if self.training and self.embedding_noise_std > 0.0:
-            ea = ea + torch.randn_like(ea) * self.embedding_noise_std
-            eb = eb + torch.randn_like(eb) * self.embedding_noise_std
 
         if self.use_neighbor_memory:
             if memory_features is None:
