@@ -358,7 +358,7 @@ def evaluate_split(
             if mem is not None:
                 mem = mem.to(device)
 
-            logits = model(
+            out = model(
                 drug_a=da,
                 drug_b=db,
                 fp_a=fpa,
@@ -385,7 +385,8 @@ def evaluate_split(
                 pdb_mask_b=pdbmb,
                 memory_features=mem,
             )
-            probs = torch.sigmoid(logits.squeeze(-1)).cpu().numpy()
+            logits = out[0] if isinstance(out, tuple) else out
+            probs = torch.sigmoid(logits.view(-1)).cpu().numpy()
             labels = batch["labels"].numpy()
             all_probs.extend(probs)
             all_labels.extend(labels)
@@ -550,7 +551,8 @@ def run_scaffold_disjoint_study(
                     pdb_mask_a=pdbma,
                     pdb_mask_b=pdbmb,
                 )
-                loss = criterion(out.squeeze(-1), y)
+                risk_logits = out[0] if isinstance(out, tuple) else out
+                loss = criterion(risk_logits.view(-1), y.float().view(-1))
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
