@@ -72,7 +72,7 @@ def ensure_scaffold_splits(
     seed: int = 42,
     **kwargs: Any,
 ) -> Path:
-    """Ensure scaffold-disjoint splits exist; generate them if missing."""
+    """Ensure scaffold-disjoint splits exist; generate them automatically if missing."""
     if splits_dir is not None and str(splits_dir).strip().lower() not in ("none", ""):
         splits_path = Path(splits_dir)
     elif master_nodes_path is not None:
@@ -92,37 +92,122 @@ def ensure_scaffold_splits(
         return splits_path
 
     print(f"Generating scaffold-disjoint splits into: {splits_path}...")
-    if master_edges_path is None:
-        if master_nodes_path is not None:
-            cand = Path(master_nodes_path).resolve().parent / "master_ddi_edges.csv"
-            if cand.is_file():
-                master_edges_path = cand
-            else:
-                cand_parent = Path(master_nodes_path).resolve().parent.parent / "unified_graph" / "master_ddi_edges.csv"
-                if cand_parent.is_file():
-                    master_edges_path = cand_parent
+    edge_candidates: list[Path] = []
+    if master_edges_path is not None:
+        edge_candidates.append(Path(master_edges_path))
+    if master_nodes_path is not None:
+        nodes_p = Path(master_nodes_path).resolve()
+        edge_candidates.extend([
+            nodes_p.parent / "master_ddi_edges.csv",
+            nodes_p.parent.parent / "unified_graph" / "master_ddi_edges.csv",
+            nodes_p.parent.parent / "splits" / "transductive_train.csv",
+            nodes_p.parent.parent / "twosides" / "drug_drug_edges.csv",
+            nodes_p.parent / "drug_drug_edges.csv",
+        ])
+    edge_candidates.extend([
+        Path("unified_graph/master_ddi_edges.csv"),
+        Path("splits/transductive_train.csv"),
+        Path("twosides/drug_drug_edges.csv"),
+        Path("master_ddi_edges.csv"),
+    ])
 
-    if master_edges_path is None or not Path(master_edges_path).is_file():
+    resolved_edges = next((p for p in edge_candidates if p.is_file()), None)
+    if resolved_edges is None:
         raise FileNotFoundError(
-            f"Cannot generate scaffold splits without positive edges table. Master edges not found."
+            f"Cannot generate scaffold splits: interaction edges table not found. Looked in: {[str(p) for p in edge_candidates[:4]]}."
         )
 
-    df_edges = pd.read_csv(master_edges_path)
-    split_tables, audit_meta = create_scaffold_disjoint_splits(
-        df_edges,
-        validation_fraction=validation_fraction,
-        test_fraction=test_fraction,
-        seed=seed,
-    )
+    print(f"Loading interaction pairs from: {resolved_edges}")
+    df_raw = pd.read_csv(resolved_edges, low_memory=False)
 
-    split_tables["scaffold_train"].to_csv(splits_path / "scaffold_train.csv", index=False)
-    split_tables["scaffold_validation"].to_csv(splits_path / "scaffold_validation.csv", index=False)
-    split_tables["scaffold_test"].to_csv(splits_path / "scaffold_test.csv", index=False)
+    src_col = "drug_a_id" if "drug_a_id" in df_raw.columns else ("source" if "source" in df_raw.columns else ("drug_a" if "drug_a" in df_raw.columns else df_raw.columns[0]))
+    dst_col = "drug_b_id" if "drug_b_id" in df_raw.columns else ("target" if "target" in df_raw.columns else ("drug_b" if "drug_b" in df_raw.columns else df_raw.columns[1]))
+    lbl_col = "label" if "label" in df_raw.columns else None
+
+    # Load master nodes to map ID -> SMILES
+    id_to_smiles: dict[str, str] = {}
+    if master_nodes_path is not None and Path(master_nodes_path).is_file():
+        df_nodes = pd.read_csv(master_nodes_path)
+        node_id_col = "drug_id" if "drug_id" in df_nodes.columns else ("canonical_smiles" if "canonical_smiles" in df_nodes.columns else df_nodes.columns[0])
+        smi_col = "canonical_smiles" if "canonical_smiles" in df_nodes.columns else node_id_col
+        for _, r in df_nodes.iterrows():
+            did = str(r[node_id_col]).strip()
+            smi = str(r[smi_col]).strip()
+            if did and smi:
+                id_to_smiles[did] = smi
+
+    df_pairs = df_raw[[src_col, dst_col]].copy().drop_duplicates()
+    if lbl_col is not None:
+        df_pairs["label"] = df_raw[lbl_col]
+    else:
+        df_pairs["label"] = 1.0
+
+    def get_smiles(val: Any) -> str:
+        s = str(val).strip()
+        return id_to_smiles.get(s, s)
+
+    df_pairs["_smiles_a"] = df_pairs[src_col].map(get_smiles)
+    df_pairs["_smiles_b"] = df_pairs[dst_col].map(get_smiles)
+
+    # Keep only valid SMILES
+    valid_mask = (df_pairs["_smiles_a"].str.len() > 1) & (df_pairs["_smiles_b"].str.len() > 1)
+    df_pairs = df_pairs[valid_mask].copy()
+
+    split_tables = None
+    audit_meta = None
+    last_err = None
+    for cand_seed in range(seed, seed + 30):
+        try:
+            split_tables, audit_meta = create_scaffold_disjoint_splits(
+                df_pairs,
+                drug_a_col="_smiles_a",
+                drug_b_col="_smiles_b",
+                label_col="label",
+                validation_fraction=validation_fraction,
+                test_fraction=test_fraction,
+                seed=cand_seed,
+            )
+            break
+        except ValueError as err:
+            last_err = err
+            continue
+
+    if split_tables is None:
+        raise last_err or RuntimeError("Could not find a valid scaffold partition across candidate seeds.")
+
+    for name in ["scaffold_train", "scaffold_validation", "scaffold_test"]:
+        tbl = split_tables[name].copy()
+        tbl = tbl.rename(columns={src_col: "drug_a_id", dst_col: "drug_b_id"})
+
+        # Sample negatives strictly within this scaffold partition if only positives exist
+        labels_present = set(tbl["label"].unique())
+        if len(labels_present) < 2:
+            partition_drugs = list(set(tbl["drug_a_id"].unique()) | set(tbl["drug_b_id"].unique()))
+            known_pos = set(zip(tbl["drug_a_id"], tbl["drug_b_id"])) | set(zip(tbl["drug_b_id"], tbl["drug_a_id"]))
+
+            rng = np.random.default_rng(seed)
+            neg_a, neg_b = [], []
+            n_pos = len(tbl)
+            attempts = 0
+            while len(neg_a) < n_pos and attempts < n_pos * 20 and len(partition_drugs) >= 2:
+                attempts += 1
+                da, db = rng.choice(partition_drugs, size=2, replace=False)
+                if (da, db) not in known_pos and (db, da) not in known_pos:
+                    neg_a.append(da)
+                    neg_b.append(db)
+                    known_pos.add((da, db))
+
+            if neg_a:
+                neg_df = pd.DataFrame({"drug_a_id": neg_a, "drug_b_id": neg_b, "label": 0.0})
+                tbl = pd.concat([tbl[["drug_a_id", "drug_b_id", "label"]], neg_df], ignore_index=True)
+
+        cols_to_save = [c for c in ["drug_a_id", "drug_b_id", "label"] if c in tbl.columns]
+        tbl[cols_to_save].to_csv(splits_path / f"{name}.csv", index=False)
 
     with open(splits_path / "scaffold_split_audit.json", "w") as f:
         json.dump(audit_meta, f, indent=2, default=str)
 
-    print(f"Scaffold splits saved successfully to {splits_path}.")
+    print(f"Scaffold splits successfully created in: {splits_path}")
     return splits_path
 
 
@@ -321,6 +406,7 @@ def run_scaffold_disjoint_study(
     pos_weight: float = 2.0,
     seed: int = 42,
     device: torch.device | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Execute complete scaffold-disjoint benchmark study comparing Baseline vs Multimodal."""
     if device is None:
@@ -328,7 +414,12 @@ def run_scaffold_disjoint_study(
 
     out_p = Path(output_dir)
     out_p.mkdir(parents=True, exist_ok=True)
-    splits_p = Path(splits_dir)
+    splits_p = ensure_scaffold_splits(
+        splits_dir=splits_dir,
+        master_nodes_path=master_nodes_path,
+        master_edges_path=kwargs.get("master_edges_path"),
+        seed=seed,
+    )
 
     print("=" * 80)
     print("STARTING AUDITDDI MURCKO SCAFFOLD-DISJOINT STUDY")
