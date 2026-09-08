@@ -55,3 +55,33 @@ def test_build_target_sequence_catalog(tmp_path):
 
     loaded = json.loads(export_path.read_text(encoding="utf-8"))
     assert loaded["CYP3A4"] == catalog["CYP3A4"]
+
+
+def test_update_master_nodes_with_uniprot(tmp_path):
+    from src.data_prep.uniprot_pipeline import update_master_nodes_with_uniprot
+    import pandas as pd
+
+    # Mock master nodes
+    nodes_csv = tmp_path / "master_nodes.csv"
+    df = pd.DataFrame({
+        "drug_id": ["ASPIRIN", "CODEINE", "GENERIC_DRUG"],
+        "canonical_smiles": ["CC(=O)OC1=CC=CC=C1C(=O)O", "CC1=CC=C2C=C1", "C1CCCCC1"],
+    })
+    df.to_csv(nodes_csv, index=False)
+
+    # Mock UniProt dir
+    u_dir = tmp_path / "uniprot"
+    u_dir.mkdir()
+    (u_dir / "target_sequences.json").write_text(json.dumps({
+        "P08684": "MALIPDLAMETWLLLAVSLVLLYLYGTHSHGLFK",
+        "P10635": "MGLEALVPLAVIVAIFLLLVDLMHRRQRWAARYP",
+        "P35354": "MLARALLLCAVLALSHTANPCCSHPCQNRGVCMS",
+    }), encoding="utf-8")
+
+    enriched = update_master_nodes_with_uniprot(nodes_csv, uniprot_dir=u_dir)
+    assert "target_sequence" in enriched.columns
+    assert "uniprot_target_id" in enriched.columns
+    assert len(enriched["target_sequence"].iloc[0]) > 0
+    assert enriched["uniprot_target_id"].iloc[0] == "P35354"
+    assert enriched["uniprot_target_id"].iloc[1] == "P10635"
+    assert enriched["uniprot_target_id"].iloc[2] == "P08684"

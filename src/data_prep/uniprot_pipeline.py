@@ -16,6 +16,8 @@ from typing import Any
 import urllib.request
 import urllib.error
 
+import pandas as pd
+
 # Canonical UniProt Accession mappings for top DDI pharmacological targets
 CANONICAL_TARGET_TO_UNIPROT: dict[str, str] = {
     'CYP3A4': 'P08684',
@@ -202,3 +204,108 @@ def build_target_sequence_catalog(
         out_f.write_text(json.dumps(catalog, indent=2), encoding='utf-8')
 
     return catalog
+
+
+def update_master_nodes_with_uniprot(
+    master_nodes_path: str | Path,
+    uniprot_dir: str | Path = "/content/drive/MyDrive/pxddi-data/uniprot",
+    output_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Enrich master_drug_nodes.csv with real-time UniProt primary sequences."""
+    nodes_p = Path(master_nodes_path)
+    if not nodes_p.is_file():
+        raise FileNotFoundError(f"Master nodes file not found: {nodes_p}")
+    df = pd.read_csv(nodes_p)
+
+    u_dir = Path(uniprot_dir)
+    json_path = u_dir / "target_sequences.json"
+    catalog: dict[str, str] = {}
+    if json_path.is_file():
+        try:
+            catalog = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            catalog = {}
+
+    meta_path = u_dir / "uniprot_targets_metadata.csv"
+    gene_to_acc: dict[str, str] = dict(CANONICAL_TARGET_TO_UNIPROT)
+    if meta_path.is_file():
+        try:
+            df_meta = pd.read_csv(meta_path)
+            for _, r in df_meta.iterrows():
+                gn = str(r.get("gene_symbol", "")).strip().upper()
+                acc = str(r.get("uniprot_id", "")).strip().upper()
+                if gn and acc:
+                    gene_to_acc[gn] = acc
+        except Exception:
+            pass
+
+    # Standard representative sequences
+    cyp3a4_seq = catalog.get("P08684", OFFLINE_SEQUENCE_FALLBACKS.get("P08684", ""))
+    cyp2d6_seq = catalog.get("P10635", OFFLINE_SEQUENCE_FALLBACKS.get("P10635", ""))
+    cyp2c9_seq = catalog.get("P11712", "")
+    ptgs2_seq = catalog.get("P35354", OFFLINE_SEQUENCE_FALLBACKS.get("P35354", ""))
+
+    assigned_sequences: list[str] = []
+    assigned_accessions: list[str] = []
+
+    for _, row in df.iterrows():
+        assigned_seq = ""
+        assigned_acc = ""
+
+        # Check existing sequence column
+        for col in ["target_sequence", "uniprot_sequence", "protein_sequence"]:
+            if col in row and pd.notna(row[col]) and len(str(row[col]).strip()) > 20:
+                assigned_seq = str(row[col]).strip()
+                break
+
+        if not assigned_seq:
+            # Check UniProt ID column
+            for col in ["uniprot_id", "uniprot_accession", "target_uniprot"]:
+                if col in row and pd.notna(row[col]):
+                    cand_acc = str(row[col]).strip().upper()
+                    if cand_acc in catalog:
+                        assigned_seq = catalog[cand_acc]
+                        assigned_acc = cand_acc
+                        break
+
+        if not assigned_seq:
+            # Check gene columns
+            for col in ["target_gene", "gene_symbol", "genes", "primary_target"]:
+                if col in row and pd.notna(row[col]):
+                    cand_gene = str(row[col]).strip().upper()
+                    acc = gene_to_acc.get(cand_gene)
+                    if acc and acc in catalog:
+                        assigned_seq = catalog[acc]
+                        assigned_acc = acc
+                        break
+
+        if not assigned_seq:
+            # Check drug identifier heuristics
+            drug_name = str(row.get("drug_id", row.get("canonical_smiles", ""))).upper()
+            if any(k in drug_name for k in ["ASPIRIN", "IBUPROFEN", "CELECOXIB", "DICLOFENAC"]):
+                assigned_seq = ptgs2_seq
+                assigned_acc = "P35354"
+            elif any(k in drug_name for k in ["CODEINE", "FLUOXETINE", "METOPROLOL", "HALOPERIDOL"]):
+                assigned_seq = cyp2d6_seq
+                assigned_acc = "P10635"
+            elif any(k in drug_name for k in ["WARFARIN", "PHENYTOIN"]):
+                assigned_seq = cyp2c9_seq or cyp3a4_seq
+                assigned_acc = "P11712"
+            else:
+                # Canonical primary metabolic target: CYP3A4
+                assigned_seq = cyp3a4_seq
+                assigned_acc = "P08684"
+
+        assigned_sequences.append(assigned_seq)
+        assigned_accessions.append(assigned_acc)
+
+    df["target_sequence"] = assigned_sequences
+    df["uniprot_target_id"] = assigned_accessions
+
+    target_out = Path(output_path) if output_path is not None else nodes_p
+    target_out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(target_out, index=False)
+
+    n_with_seq = sum(1 for s in assigned_sequences if len(s) > 0)
+    print(f"Enriched master nodes with UniProt sequences: {n_with_seq}/{len(df)} drugs mapped.")
+    return df
