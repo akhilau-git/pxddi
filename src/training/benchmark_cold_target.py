@@ -232,12 +232,28 @@ def run_cold_target_study(
     s1_loader = build_cached_multimodal_dataloader(df_s1, cache, batch_size=batch_size, shuffle=False)
     trans_loader = build_cached_multimodal_dataloader(df_trans, cache, batch_size=batch_size, shuffle=False)
 
+    # Defensively ensure target_sequences attribute exists on cache
+    if not hasattr(cache, "target_sequences") or not cache.target_sequences:
+        cache.target_sequences = {}
+        try:
+            df_m = pd.read_csv(master_nodes_path)
+            id_c = "drug_id" if "drug_id" in df_m.columns else df_m.columns[0]
+            seq_c = next((c for c in ["target_sequence", "uniprot_sequence", "target_seq", "protein_sequence"] if c in df_m.columns), None)
+            if seq_c:
+                for _, row in df_m.iterrows():
+                    val = str(row[seq_c]).strip() if pd.notna(row[seq_c]) else ""
+                    if val and val.lower() != "nan":
+                        cache.target_sequences[str(row[id_c]).strip()] = val
+        except Exception:
+            pass
+
     # Extract Cold-Target S1 subcohort: pairs where both drugs have UniProt sequence annotation
     s_col = "drug_a_id" if "drug_a_id" in df_s1.columns else df_s1.columns[0]
     t_col = "drug_b_id" if "drug_b_id" in df_s1.columns else df_s1.columns[1]
+    target_seqs = getattr(cache, "target_sequences", {})
     cold_target_mask = df_s1.apply(
-        lambda r: bool(cache.target_sequences.get(str(r[s_col]).strip(), ""))
-        and bool(cache.target_sequences.get(str(r[t_col]).strip(), "")),
+        lambda r: bool(target_seqs.get(str(r[s_col]).strip(), ""))
+        and bool(target_seqs.get(str(r[t_col]).strip(), "")),
         axis=1,
     )
     df_cold_target = df_s1[cold_target_mask]
