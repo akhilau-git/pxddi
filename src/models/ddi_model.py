@@ -207,7 +207,7 @@ class PxDDIModel(nn.Module):
             self.fp_encoder = nn.Sequential(
                 nn.Linear(1024, 128),
                 nn.ReLU(),
-                nn.Dropout(0.1),
+                nn.Dropout(0.25),
             )
         else:
             self.fp_encoder = None
@@ -216,7 +216,7 @@ class PxDDIModel(nn.Module):
             self.gene_encoder = nn.Sequential(
                 nn.Linear(gene_feature_dim, gene_hidden_channels),
                 nn.ReLU(),
-                nn.Dropout(0.1),
+                nn.Dropout(0.25),
             )
             self.gene_gate = nn.Sequential(
                 nn.Linear(gene_hidden_channels, 1),
@@ -243,7 +243,7 @@ class PxDDIModel(nn.Module):
             self.target_encoder = nn.Sequential(
                 nn.Linear(self.target_feature_dim, self.target_hidden_channels),
                 nn.ReLU(),
-                nn.Dropout(0.1),
+                nn.Dropout(0.25),
             )
             self.target_gate = nn.Sequential(
                 nn.Linear(self.target_hidden_channels, 1),

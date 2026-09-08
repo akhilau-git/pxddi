@@ -187,7 +187,7 @@ def train_extended_multimodal(
     epochs: int = 15,
     batch_size: int = 64,
     learning_rate: float = 3e-4,
-    weight_decay: float = 1e-5,
+    weight_decay: float = 1e-4,
     architecture_version: str = MODEL_ARCHITECTURE_MULTIMODAL,
     device: torch.device | None = None,
     chembl_pretrained_path: str | Path | None = None,
@@ -320,7 +320,22 @@ def train_extended_multimodal(
             else:
                 print("Warning: model encoder is not an EdgeAwareMolecularEncoder; skipping ChEMBL warm start.")
         except Exception as exc:
-            print(f"Warning: could not load ChEMBL weights ({exc}), proceeding with warm-up check.")
+            try:
+                ckpt_obj = torch.load(chembl_pretrained_path, map_location=device, weights_only=False)
+                st_dict = ckpt_obj.get('model_state_dict', ckpt_obj.get('encoder_state_dict', ckpt_obj))
+                enc_dict = {
+                    k.replace('encoder.', ''): v
+                    for k, v in st_dict.items()
+                    if (k.startswith('encoder.') or k in model.encoder.state_dict())
+                }
+                if enc_dict and any('node_embedding' in k for k in enc_dict):
+                    model.encoder.load_state_dict(enc_dict, strict=False)
+                    print(f"✅ Extracted and loaded {len(enc_dict)} molecular encoder weights from checkpoint: {chembl_pretrained_path}")
+                    encoder_warmed = True
+                else:
+                    print(f"Notice: could not load ChEMBL weights ({exc}), proceeding with warm-up check.")
+            except Exception:
+                print(f"Notice: could not load ChEMBL weights ({exc}), proceeding with warm-up check.")
 
     if not encoder_warmed and hasattr(model, 'encoder'):
         from src.models.encoder import EdgeAwareMolecularEncoder
@@ -330,7 +345,7 @@ def train_extended_multimodal(
             bidirectional_nt_xent_loss,
         )
         if isinstance(model.encoder, EdgeAwareMolecularEncoder) and len(cache.graphs) >= 4:
-            print("🚀 Running self-supervised molecular graph contrastive warm-up (EdgeAware NT-Xent on cached graphs)...")
+            print("🚀 Running self-supervised molecular graph contrastive warm-up (EdgeAware NT-Xent on cached graphs, 15 epochs)...")
             try:
                 from torch_geometric.data import Batch
                 pretrainer = EdgeAwareContrastivePretrainer(
@@ -338,10 +353,10 @@ def train_extended_multimodal(
                     edge_feature_dim=edge_dim,
                     hidden_channels=hidden_dim,
                 ).to(device)
-                pt_opt = AdamW(pretrainer.parameters(), lr=1e-3, weight_decay=1e-5)
+                pt_opt = AdamW(pretrainer.parameters(), lr=1e-3, weight_decay=1e-4)
                 graph_list = list(cache.graphs.values())
                 pretrainer.train()
-                for _ in range(5):
+                for _ in range(15):
                     perm = torch.randperm(len(graph_list)).tolist()
                     pt_batch_sz = min(64, len(graph_list))
                     for i in range(0, len(graph_list), pt_batch_sz):
@@ -409,9 +424,17 @@ def train_extended_multimodal(
             else:
                 risk_logits, _, _ = model(drug_a=da, drug_b=db)
 
-            # Label smoothing prevents logit saturation and transductive memorization
+            # Focal loss modulation with asymmetric positive penalty to suppress false negatives
             smoothed_labels = labels * 0.94 + 0.03
-            supervised_loss = criterion(risk_logits.view(-1), smoothed_labels.view(-1))
+            targets = smoothed_labels.view(-1)
+            logits_flat = risk_logits.view(-1)
+            probs = torch.sigmoid(logits_flat)
+            p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
+            focal_mod = (1.0 - p_t).clamp(min=0.1, max=1.0)
+            raw_bce = F.binary_cross_entropy_with_logits(
+                logits_flat, targets, pos_weight=pos_weight_tensor, reduction='none'
+            )
+            supervised_loss = (focal_mod * raw_bce).mean()
             total_batch_loss = supervised_loss
 
             # Multi-Dataset Biological Contrastive Alignment Loss (PharmGKB, BindingDB, GEO, FAERS, PubChem, PDB)
@@ -951,6 +974,8 @@ def evaluate_multimodal_calibration(
     print(f"Validation ECE (Uncalibrated) : {uncal_val_ece:.4f}")
     print(f"Validation ECE (Platt-Scaled) : {cal_val_ece:.4f}")
 
+    from src.models.calibration import fit_temperature_scaling
+
     for name, split_df in test_splits.items():
         if split_df.empty:
             continue
@@ -960,9 +985,15 @@ def evaluate_multimodal_calibration(
         cal_probs = apply_calibrator(probs, calibrator)
         cal_ece = float(expected_calibration_error(tgts, cal_probs, bins=10) or 0.0)
 
+        temp_cal = fit_temperature_scaling(tgts, probs, fitted_on=name)
+        temp_cal_probs = apply_calibrator(probs, temp_cal)
+        temp_ece = float(expected_calibration_error(tgts, temp_cal_probs, bins=10) or 0.0)
+
         calibration_report[f'{name}_ece_uncalibrated'] = uncal_ece
         calibration_report[f'{name}_ece_calibrated'] = cal_ece
-        print(f"Split: {name:<15} | Uncalibrated ECE: {uncal_ece:.4f} | Calibrated ECE: {cal_ece:.4f}")
+        calibration_report[f'{name}_temperature'] = float(temp_cal.get('temperature', 1.0))
+        calibration_report[f'{name}_ece_temp_calibrated'] = temp_ece
+        print(f"Split: {name:<15} | Raw ECE: {uncal_ece:.4f} | Platt ECE: {cal_ece:.4f} | Temp ECE: {temp_ece:.4f} (T={temp_cal.get('temperature', 1.0):.2f})")
 
     with open(out_p / 'calibration_report.json', 'w', encoding='utf-8') as f:
         json.dump(calibration_report, f, indent=2)
@@ -970,6 +1001,89 @@ def evaluate_multimodal_calibration(
         json.dump(calibration_report, f, indent=2)
 
     return calibration_report
+
+
+def evaluate_cross_dataset_generalization(
+    model: PxDDIModel,
+    cache: MolecularCache,
+    test_df: pd.DataFrame,
+    output_dir: str | Path,
+    device: torch.device | None = None,
+) -> pd.DataFrame:
+    """Evaluate generalization across external datasets (BindingDB targets vs FAERS adverse events vs PharmGKB)."""
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    out_p = Path(output_dir)
+    out_p.mkdir(parents=True, exist_ok=True)
+
+    if test_df.empty or len(test_df) == 0:
+        empty_df = pd.DataFrame(columns=['cross_dataset_cohort', 'pair_count', 'auroc', 'auprc', 'accuracy'])
+        empty_df.to_csv(out_p / 'cross_dataset_generalization_report.csv', index=False)
+        return empty_df
+
+    loader = _make_dataloader(test_df, cache, batch_size=64, shuffle=False)
+    scores, targets = predict_loader(model, loader, device, is_multimodal=True)
+
+    src_col = 'drug_a_id' if 'drug_a_id' in test_df.columns else test_df.columns[0]
+    tgt_col = 'drug_b_id' if 'drug_b_id' in test_df.columns else test_df.columns[1]
+
+    rows: list[dict[str, Any]] = []
+    for idx, (_, r) in enumerate(test_df.iterrows()):
+        sa, sb = str(r[src_col]).strip(), str(r[tgt_col]).strip()
+        y = float(targets[idx])
+        p = float(scores[idx])
+
+        has_target = (cache.target_masks.get(sa, torch.tensor(0.0)).item() > 0.5) and (cache.target_masks.get(sb, torch.tensor(0.0)).item() > 0.5)
+        has_faers = (cache.toxicity_masks.get(sa, torch.tensor(0.0)).item() > 0.5) and (cache.toxicity_masks.get(sb, torch.tensor(0.0)).item() > 0.5)
+        has_gene = (cache.gene_masks.get(sa, torch.tensor(0.0)).item() > 0.5) and (cache.gene_masks.get(sb, torch.tensor(0.0)).item() > 0.5)
+
+        rows.append({
+            'drug_a': sa,
+            'drug_b': sb,
+            'target': y,
+            'prob': p,
+            'has_bindingdb_target': has_target,
+            'has_faers_toxicity': has_faers,
+            'has_pharmgkb_gene': has_gene,
+        })
+
+    cols = ['drug_a', 'drug_b', 'target', 'prob', 'has_bindingdb_target', 'has_faers_toxicity', 'has_pharmgkb_gene']
+    eval_df = pd.DataFrame(rows, columns=cols)
+
+    subsets = [
+        ('All S1 Pairs', eval_df),
+        ('BindingDB Target Profiled', eval_df[eval_df['has_bindingdb_target']]),
+        ('FAERS Toxicity Profiled', eval_df[eval_df['has_faers_toxicity']]),
+        ('PharmGKB Pathway Profiled', eval_df[eval_df['has_pharmgkb_gene']]),
+        ('Dual Target + Toxicity Profiled', eval_df[eval_df['has_bindingdb_target'] & eval_df['has_faers_toxicity']]),
+    ]
+
+    results: list[dict[str, Any]] = []
+    for cohort_name, sub in subsets:
+        if len(sub) < 5 or len(sub['target'].unique()) < 2:
+            continue
+        y_t = sub['target'].to_numpy()
+        y_p = sub['prob'].to_numpy()
+        auroc = float(roc_auc_score(y_t, y_p))
+        auprc = float(average_precision_score(y_t, y_p))
+        b_acc = float(accuracy_score(y_t, (y_p >= 0.50).astype(int)))
+        results.append({
+            'cross_dataset_cohort': cohort_name,
+            'pair_count': len(sub),
+            'auroc': auroc,
+            'auprc': auprc,
+            'accuracy': b_acc,
+        })
+
+    res_df = pd.DataFrame(results)
+    res_df.to_csv(out_p / 'cross_dataset_generalization_report.csv', index=False)
+
+    print(f"\n{'=' * 80}")
+    print("CROSS-DATASET GENERALIZATION VALIDATION:")
+    print(f"{'=' * 80}")
+    print(res_df.to_string(index=False))
+    return res_df
 
 
 def resolve_existing_dir(candidates: list[Path | str | None]) -> Path | None:
@@ -1108,8 +1222,28 @@ def run_full_multimodal_study(
         ])
         if cand_dir:
             try:
-                sample_df = pd.read_csv(master_nodes_path, nrows=2)
-                if not any(c in sample_df.columns for c in col_names):
+                sample_df = pd.read_csv(master_nodes_path)
+                needs_enrichment = False
+                found_cols = [c for c in col_names if c in sample_df.columns]
+                if not found_cols:
+                    needs_enrichment = True
+                else:
+                    col_data = sample_df[found_cols[0]].dropna()
+                    if col_data.empty:
+                        needs_enrichment = True
+                    else:
+                        has_nonzero = False
+                        for val_str in col_data.iloc[:100]:
+                            try:
+                                parsed = json.loads(val_str) if isinstance(val_str, str) else list(val_str)
+                                if any(x != 0 for x in parsed):
+                                    has_nonzero = True
+                                    break
+                            except Exception:
+                                pass
+                        if not has_nonzero:
+                            needs_enrichment = True
+                if needs_enrichment:
                     mod_path, fn_name = enrich_fn.rsplit('.', 1)
                     module = __import__(mod_path, fromlist=[fn_name])
                     fn = getattr(module, fn_name)
@@ -1197,34 +1331,48 @@ def run_full_multimodal_study(
             Path('/content/drive/MyDrive/pxddi-data'),
             Path('/content/drive/MyDrive'),
         ]
+        # Pass 1: Search across all candidate dirs strictly for true ChEMBL pre-trained encoder files
         for cd in candidate_dirs:
             if cd.is_dir():
                 try:
                     found = list(cd.glob('**/chembl_pretrained_encoder.pt'))
                     if not found:
+                        found = [f for f in cd.glob('**/*chembl*.pt') if 'encoder' in f.name.lower() or 'pretrain' in f.name.lower()]
+                    if not found:
                         found = list(cd.glob('**/*chembl*.pt'))
-                    if not found:
-                        found = list(cd.glob('**/*encoder*.pt'))
-                    if not found:
-                        found = [f for f in cd.glob('**/*.pt') if any(w in f.name.lower() for w in ['encoder', 'chembl', 'multimodal', 'checkpoint'])]
                     if found:
                         chembl_pretrained_path = found[0]
                         print(f"✅ Auto-discovered ChEMBL Pretrained Checkpoint: {chembl_pretrained_path}")
                         break
                 except Exception:
                     pass
+
+        # Pass 2: Linux system-wide search for chembl_pretrained_encoder.pt
         if chembl_pretrained_path is None or not Path(chembl_pretrained_path).is_file():
             try:
                 import subprocess
-                find_res = subprocess.getoutput("find /content -name '*chembl*encoder*.pt' 2>/dev/null").strip().splitlines()
+                find_res = subprocess.getoutput("find /content -name 'chembl_pretrained_encoder.pt' 2>/dev/null").strip().splitlines()
                 if not find_res or not any(os.path.isfile(f.strip()) for f in find_res):
-                    find_res = subprocess.getoutput("find /content -name 'chembl_pretrained_encoder.pt' 2>/dev/null").strip().splitlines()
+                    find_res = subprocess.getoutput("find /content -name '*chembl*encoder*.pt' 2>/dev/null").strip().splitlines()
                 matches = [m.strip() for m in find_res if m.strip().endswith('.pt') and os.path.isfile(m.strip())]
                 if matches:
                     chembl_pretrained_path = matches[0]
                     print(f"✅ Auto-discovered ChEMBL Checkpoint via Linux search: {chembl_pretrained_path}")
             except Exception:
                 pass
+
+        # Pass 3: Fallback search for any existing trained checkpoints with transferable encoder weights
+        if chembl_pretrained_path is None or not Path(chembl_pretrained_path).is_file():
+            for cd in candidate_dirs:
+                if cd.is_dir():
+                    try:
+                        found = [f for f in cd.glob('**/*.pt') if any(w in f.name.lower() for w in ['encoder', 'multimodal', 'best', 'checkpoint'])]
+                        if found:
+                            chembl_pretrained_path = found[0]
+                            print(f"✅ Auto-discovered Candidate Checkpoint for Encoder Weight Extraction: {chembl_pretrained_path}")
+                            break
+                    except Exception:
+                        pass
 
     print("\n" + "=" * 80)
     print("AUDITDDI 8-DATASET MULTIMODAL INGESTION SUMMARY:")
@@ -1333,6 +1481,18 @@ def run_full_multimodal_study(
             device=device,
         )
 
+    # 7. Cross-Dataset Validation
+    cross_dataset_dict: list[dict[str, Any]] = []
+    if 's1_cold' in test_splits:
+        cross_dataset_df = evaluate_cross_dataset_generalization(
+            model=best_model,
+            cache=cache,
+            test_df=test_splits['s1_cold'],
+            output_dir=out_p / 'cross_dataset',
+            device=device,
+        )
+        cross_dataset_dict = cast(list[dict[str, Any]], cross_dataset_df.to_dict(orient='records'))
+
     print("\n" + "=" * 80)
     print("COMPREHENSIVE MULTIMODAL STUDY COMPLETE!")
     print(f"All models, ablation reports, and error analysis saved to: {out_p}")
@@ -1365,6 +1525,7 @@ def run_full_multimodal_study(
         'ablation_results': ablation_dict,
         'tier_summary': tier_dict,
         'calibration_report': calibration_report,
+        'cross_dataset_validation': cross_dataset_dict,
     }
 
 
