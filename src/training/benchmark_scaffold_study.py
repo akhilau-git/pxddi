@@ -234,13 +234,13 @@ def compute_comprehensive_metrics(
     brier = float(brier_score_loss(labels, probs))
     acc = float(accuracy_score(labels, preds))
     f1 = float(f1_score(labels, preds, zero_division=0))
-    mcc = float(matthews_corrcoef(labels, preds))
+    mcc = matthews_corrcoef(labels, preds)
 
     cm = confusion_matrix(labels, preds, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel()
     sensitivity = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
     specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else 0.0
-    balanced_acc = float((sensitivity + specificity) / 2.0)
+    balanced_acc = (sensitivity + specificity) / 2.0
 
     # 10-bin Expected Calibration Error (ECE)
     bins = np.linspace(0.0, 1.0, 11)
@@ -264,8 +264,8 @@ def compute_comprehensive_metrics(
         "specificity": specificity,
         "brier_score": brier,
         "ece": float(ece),
-        "threshold": float(threshold),
-        "n_samples": int(len(labels)),
+        "threshold": threshold,
+        "n_samples": len(labels),
         "n_positive": n_pos,
         "n_negative": n_neg,
     }
@@ -463,8 +463,8 @@ def run_scaffold_disjoint_study(
         # Retrieve sample graph for channels
         first_smi = next(iter(cache.graphs.keys()))
         first_graph = cache.graphs[first_smi]
-        in_dim = first_graph.x.size(1)
-        edge_dim = first_graph.edge_attr.size(1)
+        in_dim = first_graph.x.size(1) if first_graph.x is not None else 78
+        edge_dim = first_graph.edge_attr.size(1) if first_graph.edge_attr is not None else 10
 
         model = PxDDIModel(
             in_channels=in_dim,
@@ -585,12 +585,15 @@ def run_scaffold_disjoint_study(
         test_labels = test_y
 
         results[model_name] = {
-            "validation_auroc": float(val_metrics["auroc"]),
-            "optimal_threshold": float(best_thresh),
+            "validation_auroc": val_metrics["auroc"],
+            "optimal_threshold": best_thresh,
             "test_metrics": test_m,
-            "training_time_seconds": float(train_elapsed),
+            "training_time_seconds": train_elapsed,
         }
         print(f"Finished {model_name}: Scaffold Test AUROC = {test_m['auroc']:.4f}, AUPRC = {test_m['auprc']:.4f}")
+
+    if test_labels is None:
+        raise RuntimeError("No test labels were evaluated during scaffold study.")
 
     # Bootstrap hypothesis testing
     stat_comparison = paired_bootstrap_comparison(

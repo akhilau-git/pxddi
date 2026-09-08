@@ -109,11 +109,13 @@ def test_evaluate_split_handles_tuple_model_output():
     loader = build_cached_multimodal_dataloader(df_pairs, cache, batch_size=2, shuffle=False)
 
     first_graph = cache.graphs[smi1]
+    in_dim = first_graph.x.size(1) if first_graph.x is not None else 78
+    edge_dim = first_graph.edge_attr.size(1) if first_graph.edge_attr is not None else 10
     model = PxDDIModel(
-        in_channels=first_graph.x.size(1),
+        in_channels=in_dim,
         hidden_channels=16,
         architecture_version=MODEL_ARCHITECTURE_EDGE_AWARE,
-        edge_feature_dim=first_graph.edge_attr.size(1),
+        edge_feature_dim=edge_dim,
     )
 
     metrics, probs, labels = evaluate_split(model, loader, device=torch.device("cpu"))
