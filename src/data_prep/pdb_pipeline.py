@@ -224,8 +224,8 @@ def parse_pdb_directory(
         except Exception:
             pass
 
-    all_csvs = list(pdir.glob('**/*.csv')) + list(pdir.glob('**/*.tsv')) + list(pdir.glob('**/*.csv.gz'))
-    all_pdbs = list(pdir.glob('**/*.pdb')) + list(pdir.glob('**/*.ent')) + list(pdir.glob('**/*.cif'))
+    all_csvs = [f for f in pdir.rglob('*') if f.is_file() and f.suffix.lower() in ('.csv', '.tsv', '.tab', '.txt', '.csv.gz', '.tsv.gz')]
+    all_pdbs = [f for f in pdir.rglob('*') if f.is_file() and f.suffix.lower() in ('.pdb', '.ent', '.cif', '.pdb.gz', '.ent.gz')]
 
     records: list[dict[str, Any]] = []
 
@@ -403,6 +403,13 @@ def update_master_nodes_with_pdb(
         parent_can, ikey, _ = extract_parent_structure(raw_smi)
         can = canonicalize_smiles(raw_smi) or parent_can
         nm = normalise_drug_name(str(row.get('display_name', ''))) if 'display_name' in row else None
+        syn_names: list[str] = []
+        if 'synonyms_json' in row and pd.notna(row['synonyms_json']):
+            try:
+                raw_syns = json.loads(str(row['synonyms_json'])) if isinstance(row['synonyms_json'], str) else list(row['synonyms_json'])
+                syn_names = [normalise_drug_name(str(s)) for s in raw_syns if normalise_drug_name(str(s))]
+            except Exception:
+                pass
 
         found: tuple[str, list[int], float] | None = None
 
@@ -414,7 +421,19 @@ def update_master_nodes_with_pdb(
             found = inchikey_lookup[ikey]
         elif nm and nm in name_lookup:
             found = name_lookup[nm]
-        elif impute_by_tanimoto and profiled_fps and can:
+        else:
+            for s_nm in syn_names:
+                if s_nm in name_lookup:
+                    found = name_lookup[s_nm]
+                    break
+
+        if not found and nm:
+            for cand_n, val in name_lookup.items():
+                if len(cand_n) >= 4 and (cand_n in nm or nm in cand_n):
+                    found = val
+                    break
+
+        if not found and impute_by_tanimoto and profiled_fps and can:
             mol = Chem.MolFromSmiles(can)
             if mol is not None:
                 fp = _MORGAN_GEN.GetFingerprint(mol)

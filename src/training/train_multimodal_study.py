@@ -203,7 +203,7 @@ def train_extended_multimodal(
     memory_dropout: float = 0.75,
     embedding_noise_std: float = 0.02,
     bio_align_weight: float = 0.25,
-    patience: int = 5,
+    patience: int = 8,
 ) -> tuple[PxDDIModel, pd.DataFrame, dict[str, Any]]:
     """Train the multimodal model across extended epochs with checkpointing."""
     if device is None:
@@ -606,6 +606,9 @@ def train_extended_multimodal(
                 best_weights_path,
             )
 
+        prev_s1_auroc = history_records[-2]['s1_cold_auroc'] if len(history_records) >= 2 else 0.0
+        s1_improved_over_prev = (s1_metrics['auroc'] > prev_s1_auroc + 1e-4)
+
         is_s1_best = s1_metrics['auroc'] > best_s1_auroc
         if is_s1_best:
             best_s1_auroc = s1_metrics['auroc']
@@ -639,6 +642,9 @@ def train_extended_multimodal(
                 },
                 best_s1_weights_path,
             )
+        elif s1_improved_over_prev:
+            # Active positive momentum / recovery: decrement stagnation counter to allow upward trend to continue
+            epochs_without_s1_improvement = max(0, epochs_without_s1_improvement - 1)
         else:
             epochs_without_s1_improvement += 1
 
@@ -649,8 +655,9 @@ def train_extended_multimodal(
               f"S1 AUROC: {s1_metrics['auroc']:.4f} (Acc: {s1_metrics['accuracy']*100:.1f}%, FN: {s1_metrics['false_negatives']}){best_mark}{s1_mark}")
 
         # Early Stopping: Prevent transductive overfitting from degrading S1 cold-start generalization
-        if patience > 0 and epochs_without_s1_improvement >= patience and epoch >= 4:
-            print(f"\n⏹️ Early stopping triggered at Epoch {epoch}: S1 AUROC did not improve for {patience} consecutive epochs (Peak S1 AUROC: {best_s1_auroc:.4f}). Restoring peak S1 checkpoint.")
+        # Only stop if stagnant for `patience` consecutive epochs AND not actively trending upward
+        if patience > 0 and epochs_without_s1_improvement >= patience and epoch >= 6 and not s1_improved_over_prev:
+            print(f"\n⏹️ Early stopping triggered at Epoch {epoch}: S1 AUROC plateaued for {patience} consecutive epochs without upward momentum (Peak S1 AUROC: {best_s1_auroc:.4f}). Restoring peak S1 checkpoint.")
             break
 
     # Load best checkpoint for final evaluation
@@ -1168,7 +1175,7 @@ def run_full_multimodal_study(
     memory_dropout: float = float(kwargs.pop('memory_dropout', 0.75))
     bio_align_weight: float = float(kwargs.pop('bio_align_weight', 0.25))
     embedding_noise_std: float = float(kwargs.pop('embedding_noise_std', 0.02))
-    patience: int = int(kwargs.pop('patience', 5))
+    patience: int = int(kwargs.pop('patience', 8))
 
     if output_dir is None:
         out_p = Path(master_nodes_path).resolve().parent.parent / 'multimodal_study_results'
