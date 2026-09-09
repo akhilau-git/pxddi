@@ -12,6 +12,12 @@ AuditDDI is an auditable, multimodal deep learning research framework for struct
 ## 2. Audited Validation Performance & Checkpoints
 
 ### Primary Multimodal Reference Architecture: `auditddi_multimodal_v1`
+
+> [!NOTE]
+> **Deployed Serving Artifact vs. Target Architecture**:
+> - **Committed Baseline Serving Checkpoint (`backend/checkpoints/pxddi_model.pt`)**: The local API defaults to this legacy single-modal edge-aware GNN checkpoint (stored validation AUROC 0.8972, uncalibrated, research-only). It is committed for reproducibility, fast local development, and regression testing.
+> - **Target Multimodal Architecture (`auditddi_multimodal_v1`)**: The full 8-dataset multimodal network defined below. Candidates trained via Google Colab / GPU clusters (`study_results_.../auditddi_multimodal_best.pt`) are configured explicitly via `PXDDI_CHECKPOINT_PATH` only after independent verification.
+
 - **Backbone**: Symmetric Dual-View Edge-Aware GATv2 Molecular Encoder + 1024-bit Morgan ECFP Fingerprint Projection.
 - **Multimodal Integration**:
   - PharmGKB Pharmacogenomics (50-dim enzyme/gene multi-hot vectors).

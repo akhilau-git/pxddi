@@ -268,8 +268,11 @@ def evaluate_loader(
     targets = np.array(all_targets)
     scores = np.array(all_scores)
 
+    if len(targets) == 0:
+        return {'auroc': 0.5, 'auprc': 0.0, 'accuracy': 0.5, 'f1': 0.0, 'mcc': 0.0, 'brier': 0.25, 'optimal_threshold': 0.5, 'false_negatives': 0}
+
     if len(np.unique(targets)) < 2:
-        return {'auroc': 0.5, 'auprc': float(np.mean(targets)), 'accuracy': 0.5, 'f1': 0.0, 'mcc': 0.0, 'brier': 0.25, 'optimal_threshold': 0.5, 'false_negatives': 0}
+        return {'auroc': 0.5, 'auprc': float(np.mean(targets)) if len(targets) else 0.0, 'accuracy': 0.5, 'f1': 0.0, 'mcc': 0.0, 'brier': 0.25, 'optimal_threshold': 0.5, 'false_negatives': 0}
 
     auroc = float(roc_auc_score(targets, scores))
     auprc = float(average_precision_score(targets, scores))
