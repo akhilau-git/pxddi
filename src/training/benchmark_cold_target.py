@@ -263,26 +263,59 @@ def run_cold_target_study(
         cold_target_loader = s1_loader
 
     print(f"Dataset Partitions: Train={len(df_train)}, Val={len(df_val)}, S1={len(df_s1)}, Cold-Target Subcohort={len(df_cold_target)}")
+    cold_target_equals_s1 = len(df_cold_target) == len(df_s1)
+    if cold_target_equals_s1:
+        print(
+            "⚠️ Every S1 pair has a sequence annotation, so the current Cold-Target cohort "
+            "is identical to S1. This is a sequence-coverage analysis, not an independent "
+            "target-disjoint generalization result."
+        )
 
     first_smi = next(iter(cache.graphs.keys()))
     first_graph = cache.graphs[first_smi]
     in_dim = first_graph.x.size(1) if first_graph.x is not None else 78
     edge_dim = first_graph.edge_attr.size(1) if first_graph.edge_attr is not None else 10
 
-    # Architectures to compare
+    # Keep the original two-candidate comparison, then add a hybrid candidate
+    # by default.  The hybrid retains the BindingDB profile and adds the
+    # UniProt sequence representation; it does not discard an observed target
+    # profile merely because a sequence is available.
+    include_target_sequence_fusion = bool(kwargs.pop("include_target_sequence_fusion", True))
+    use_esm = bool(kwargs.pop("use_esm", False))
+    require_esm = bool(kwargs.pop("require_esm", use_esm))
+    use_target_attention = bool(kwargs.pop("use_cross_modal_target_attention", False))
     configs = [
-        ("multimodal_without_seq", False),
-        ("auditddi_protein_seq", True),
+        ("multimodal_without_seq", False, False),
+        ("auditddi_protein_seq", True, False),
     ]
+    if include_target_sequence_fusion:
+        configs.append(("auditddi_target_seq_fusion", True, True))
 
-    results: dict[str, Any] = {}
+    results: dict[str, Any] = {
+        "cohort_definition": {
+            "s1_pair_count": int(len(df_s1)),
+            "cold_target_pair_count": int(len(df_cold_target)),
+            "cold_target_equals_s1": cold_target_equals_s1,
+            "interpretation": (
+                "The Cold-Target cohort equals S1 because every S1 pair has a sequence annotation. "
+                "It is not an independent target-disjoint evaluation."
+                if cold_target_equals_s1
+                else "Cold-Target contains the S1 pairs for which both drugs have a sequence annotation."
+            ),
+        },
+    }
     s1_probs: dict[str, np.ndarray] = {}
     s1_labels: np.ndarray | None = None
     cold_target_probs: dict[str, np.ndarray] = {}
     cold_target_labels: np.ndarray | None = None
 
-    for model_name, use_protein_seq in configs:
-        tag = "WITH PROTEIN SEQUENCES" if use_protein_seq else "WITHOUT SEQUENCES (MULTI-HOT)"
+    for model_name, use_protein_seq, use_target_sequence_fusion in configs:
+        if use_target_sequence_fusion:
+            tag = "BINDINGDB TARGET PROFILES + PROTEIN SEQUENCES"
+        elif use_protein_seq:
+            tag = "PROTEIN SEQUENCES ONLY"
+        else:
+            tag = "WITHOUT SEQUENCES (BINDINGDB MULTI-HOT)"
         print(f"\n--- Training {model_name.upper()} ({tag}) ---")
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -300,13 +333,29 @@ def run_cold_target_study(
             target_feature_dim=cache.target_dim,
             target_hidden_channels=64,
             use_protein_sequence_encoder=use_protein_seq,
+            use_esm=use_protein_seq and use_esm,
+            use_target_sequence_fusion=use_target_sequence_fusion,
             use_pdb_encoder=True,
             pdb_feature_dim=cache.pdb_dim,
             pdb_hidden_channels=64,
             use_geo_features=True,
             geo_dim=cache.geo_dim,
             use_cross_modal_attention=True,
+            use_cross_modal_target_attention=use_target_attention,
+            use_cross_modal_sequence_attention=(
+                use_target_attention and use_protein_seq
+            ),
         ).to(device)
+        if (
+            use_protein_seq
+            and require_esm
+            and (model.protein_sequence_encoder is None or not model.protein_sequence_encoder.use_esm)
+        ):
+            raise RuntimeError(
+                "ESM-2 was requested but could not be loaded. Install the Colab "
+                "dependencies (including transformers) and ensure the model download is available, "
+                "or set use_esm=False to benchmark the learned residue-CNN explicitly."
+            )
 
         criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], device=device))
         optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
@@ -371,6 +420,13 @@ def run_cold_target_study(
             "s1_cold_start": s1_m,
             "cold_target_cohort": ct_m,
             "training_time_seconds": train_elapsed,
+            "protein_sequence_encoder": (
+                "esm2_t6_8m_frozen" if (
+                    model.protein_sequence_encoder is not None
+                    and model.protein_sequence_encoder.use_esm
+                ) else "learned_residue_cnn"
+            ) if use_protein_seq else None,
+            "target_sequence_fusion": bool(model.target_sequence_fusion is not None),
         }
         print(f"Finished {model_name}: S1 AUROC = {s1_m['auroc']:.4f}, Cold-Target AUROC = {ct_m['auroc']:.4f}")
 
@@ -395,13 +451,27 @@ def run_cold_target_study(
     )
     results["s1_statistical_comparison"] = stat_s1
 
+    if include_target_sequence_fusion:
+        results["cold_target_fusion_statistical_comparison"] = paired_bootstrap_comparison(
+            cold_target_labels,
+            cold_target_probs["multimodal_without_seq"],
+            cold_target_probs["auditddi_target_seq_fusion"],
+            seed=seed,
+        )
+        results["s1_fusion_statistical_comparison"] = paired_bootstrap_comparison(
+            s1_labels,
+            s1_probs["multimodal_without_seq"],
+            s1_probs["auditddi_target_seq_fusion"],
+            seed=seed,
+        )
+
     # Export JSON
     with open(out_p / "cold_target_benchmark_results.json", "w") as f:
         json.dump(results, f, indent=2)
 
     # Export CSV summary
     rows = []
-    for m_name in ["multimodal_without_seq", "auditddi_protein_seq"]:
+    for m_name, _, _ in configs:
         ct_data = results[m_name]["cold_target_cohort"]
         s1_data = results[m_name]["s1_cold_start"]
         rows.append({
@@ -414,31 +484,67 @@ def run_cold_target_study(
             "s1_sensitivity": s1_data["sensitivity"],
             "brier_score": ct_data["brier_score"],
             "ece": ct_data["ece"],
+            "protein_sequence_encoder": results[m_name]["protein_sequence_encoder"],
+            "target_sequence_fusion": results[m_name]["target_sequence_fusion"],
         })
     df_res = pd.DataFrame(rows)
     df_res.to_csv(out_p / "cold_target_benchmark_summary.csv", index=False)
 
     # Generate Markdown Report
-    base_ct = results["multimodal_without_seq"]["cold_target_cohort"]
-    prot_ct = results["auditddi_protein_seq"]["cold_target_cohort"]
-    base_s1 = results["multimodal_without_seq"]["s1_cold_start"]
-    prot_s1 = results["auditddi_protein_seq"]["s1_cold_start"]
-    ci_ct = stat_ct["delta_auroc_ci95"]
+    display_names = {
+        "multimodal_without_seq": "Multimodal Baseline",
+        "auditddi_protein_seq": "Protein Sequence Only",
+        "auditddi_target_seq_fusion": "BindingDB + Protein Sequence Fusion",
+    }
+    report_rows = []
+    for model_name, _, _ in configs:
+        ct_data = results[model_name]["cold_target_cohort"]
+        s1_data = results[model_name]["s1_cold_start"]
+        report_rows.append(
+            f"| **{display_names[model_name]}** | {ct_data['auroc']:.4f} | "
+            f"{ct_data['auprc']:.4f} | {ct_data['sensitivity'] * 100:.1f}% | "
+            f"{s1_data['auroc']:.4f} | {s1_data['auprc']:.4f} | "
+            f"{s1_data['sensitivity'] * 100:.1f}% | {ct_data['brier_score']:.4f} |"
+        )
+
+    def comparison_section(title: str, comparison: dict[str, Any]) -> str:
+        ci = comparison["delta_auroc_ci95"]
+        return (
+            f"## {title} (1,000-Iteration Paired Bootstrap)\n"
+            f"- **$\\Delta$ AUROC**: {comparison['delta_auroc_mean']:+.4f} "
+            f"(95% CI: [{ci[0]:+.4f}, {ci[1]:+.4f}])\n"
+            f"- **$\\Delta$ AUPRC**: {comparison['delta_auprc_mean']:+.4f}\n"
+            f"- **Paired Wilcoxon $p$-value**: {comparison['p_value']:.4e}\n"
+        )
+
+    comparison_sections = [
+        comparison_section("Sequence-only vs baseline on Cold-Target cohort", stat_ct),
+        comparison_section("Sequence-only vs baseline on S1", stat_s1),
+    ]
+    if include_target_sequence_fusion:
+        comparison_sections.extend([
+            comparison_section(
+                "Target-sequence fusion vs baseline on Cold-Target cohort",
+                results["cold_target_fusion_statistical_comparison"],
+            ),
+            comparison_section(
+                "Target-sequence fusion vs baseline on S1",
+                results["s1_fusion_statistical_comparison"],
+            ),
+        ])
 
     md_content = f"""# 🧬 AuditDDI Cold-Target & UniProt Protein Sequence Benchmark Study
 
 ## Executive Summary
-This study benchmarks the generalization improvement provided by **UniProt primary amino-acid target sequence encoding** compared to standard multimodal multi-hot representations.
+This study compares the standard BindingDB target-profile model, a sequence-only model, and a hybrid that combines both sources. Candidates are selected by validation AUROC; S1 remains evaluation-only.
+
+**Cohort note:** {results['cohort_definition']['interpretation']}
 
 | Model | Cold-Target AUROC | Cold-Target AUPRC | Cold-Target Recall | S1 Cold AUROC | S1 Cold AUPRC | S1 Recall | Brier Score |
 |---|---|---|---|---|---|---|---|
-| **Multimodal Baseline** | {base_ct['auroc']:.4f} | {base_ct['auprc']:.4f} | {base_ct['sensitivity']*100:.1f}% | {base_s1['auroc']:.4f} | {base_s1['auprc']:.4f} | {base_s1['sensitivity']*100:.1f}% | {base_ct['brier_score']:.4f} |
-| **AuditDDI Protein-Seq** | **{prot_ct['auroc']:.4f}** | **{prot_ct['auprc']:.4f}** | **{prot_ct['sensitivity']*100:.1f}%** | **{prot_s1['auroc']:.4f}** | **{prot_s1['auprc']:.4f}** | **{prot_s1['sensitivity']*100:.1f}%** | **{prot_ct['brier_score']:.4f}** |
+{chr(10).join(report_rows)}
 
-## Statistical Significance on Cold-Target Cohort (1,000-Iteration Paired Bootstrap)
-- **$\\Delta$ AUROC**: {stat_ct['delta_auroc_mean']:+.4f} (95% CI: [{ci_ct[0]:+.4f}, {ci_ct[1]:+.4f}])
-- **$\\Delta$ AUPRC**: {stat_ct['delta_auprc_mean']:+.4f}
-- **Paired Wilcoxon $p$-value**: {stat_ct['p_value']:.4e}
+{chr(10).join(comparison_sections)}
 """
     with open(out_p / "cold_target_performance_comparison.md", "w") as f:
         f.write(md_content)

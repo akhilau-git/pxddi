@@ -79,6 +79,18 @@ def model_from_checkpoint(checkpoint):
     use_cross_drug = bool(checkpoint.get('use_cross_drug_attention', any('cross_drug_attention' in k for k in state_dict)))
     use_tgt_attn = bool(checkpoint.get('use_cross_modal_target_attention', any('cross_modal_target_attention' in k for k in state_dict)))
     use_pdb_attn = bool(checkpoint.get('use_cross_modal_pdb_attention', any('cross_modal_pdb_attention' in k for k in state_dict)))
+    use_sequence_attn = bool(
+        checkpoint.get(
+            'use_cross_modal_sequence_attention',
+            any('cross_modal_sequence_attention' in k for k in state_dict),
+        )
+    )
+    use_target_sequence_fusion = bool(
+        checkpoint.get(
+            'use_target_sequence_fusion',
+            any('target_sequence_fusion' in k for k in state_dict),
+        )
+    )
     use_inductive = bool(checkpoint.get('use_inductive_bio_features', False))
     use_fnorm = bool(checkpoint.get('use_fusion_norm', any('fusion_norm' in k for k in state_dict)))
     use_protein_seq = bool(checkpoint.get('use_protein_sequence_encoder', any('protein_sequence_encoder' in k for k in state_dict)))
@@ -117,10 +129,12 @@ def model_from_checkpoint(checkpoint):
         use_cross_drug_attention=use_cross_drug,
         use_cross_modal_target_attention=use_tgt_attn,
         use_cross_modal_pdb_attention=use_pdb_attn,
+        use_cross_modal_sequence_attention=use_sequence_attn,
         use_target_encoder=use_target,
         target_feature_dim=checkpoint.get('target_feature_dim', 50),
         target_hidden_channels=checkpoint.get('target_hidden_channels', 64),
         use_protein_sequence_encoder=use_protein_seq,
+        use_target_sequence_fusion=use_target_sequence_fusion,
         use_pdb_encoder=use_pdb,
         pdb_feature_dim=checkpoint.get('pdb_feature_dim', checkpoint.get('pdb_dim', 50)),
         pdb_hidden_channels=checkpoint.get('pdb_hidden_channels', 64),
@@ -304,6 +318,26 @@ class PxDDIModel(nn.Module):
         else:
             self.protein_sequence_encoder = None
 
+        # The BindingDB multi-hot target profile and the UniProt sequence encode
+        # complementary information.  Keep this opt-in so historical
+        # checkpoints retain their original input contract, but allow new
+        # cold-start candidates to learn from both instead of replacing one
+        # source with the other.
+        self.use_target_sequence_fusion = bool(
+            kwargs.get('use_target_sequence_fusion', False)
+            and self.target_encoder is not None
+            and self.protein_sequence_encoder is not None
+        )
+        self.target_sequence_fusion = (
+            nn.Sequential(
+                nn.Linear(self.target_hidden_channels * 2, self.target_hidden_channels),
+                nn.ReLU(),
+                nn.LayerNorm(self.target_hidden_channels),
+            )
+            if self.use_target_sequence_fusion
+            else None
+        )
+
         self.use_pdb_encoder = bool(
             kwargs.get('use_pdb_encoder', False)
             or (kwargs.get('use_pdb', False) and architecture_requires_multimodal_features(architecture_version))
@@ -414,6 +448,19 @@ class PxDDIModel(nn.Module):
             else:
                 self.cross_modal_target_attention = None
 
+            # Sequence embeddings are already in target_hidden_channels,
+            # whereas BindingDB profiles use target_feature_dim.  A dedicated
+            # attention layer avoids relying on implicit dimension fallbacks.
+            use_sequence_attn = bool(kwargs.get('use_cross_modal_sequence_attention', False))
+            if use_sequence_attn and self.protein_sequence_encoder is not None:
+                self.cross_modal_sequence_attention = CrossModalBioAttention(
+                    mol_dim=hidden_channels,
+                    gene_dim=self.target_hidden_channels,
+                    hidden_dim=self.target_hidden_channels,
+                )
+            else:
+                self.cross_modal_sequence_attention = None
+
             if use_pdb_attn and self.use_pdb_encoder:
                 self.cross_modal_pdb_attention = CrossModalBioAttention(
                     mol_dim=hidden_channels,
@@ -425,6 +472,7 @@ class PxDDIModel(nn.Module):
         else:
             self.cross_modal_attention = None
             self.cross_modal_target_attention = None
+            self.cross_modal_sequence_attention = None
             self.cross_modal_pdb_attention = None
 
         self.risk_classifier = nn.Sequential(
@@ -589,44 +637,102 @@ class PxDDIModel(nn.Module):
                 and any(isinstance(s, str) and len(s.strip()) > 0 for s in target_seq_a)
                 and any(isinstance(s, str) and len(s.strip()) > 0 for s in target_seq_b)
             )
-            if has_valid_seqs:
-                ta = self.protein_sequence_encoder(target_seq_a, device=ea.device)
-                tb = self.protein_sequence_encoder(target_seq_b, device=eb.device)
-                target_attn = getattr(self, 'cross_modal_target_attention', None)
-                if target_attn is not None:
-                    ta = ta + target_attn(ea, ta, target_mask_a)
-                    tb = tb + target_attn(eb, tb, target_mask_b)
-                ta_gate = self.target_gate(ta)
-                tb_gate = self.target_gate(tb)
-                if target_mask_a is not None:
-                    ta_gate = ta_gate * target_mask_a.view(-1, 1)
-                if target_mask_b is not None:
-                    tb_gate = tb_gate * target_mask_b.view(-1, 1)
-                ta_rep = ta_gate * ta
-                tb_rep = tb_gate * tb
-            elif target_a is not None and target_b is not None and self.target_encoder is not None:
+            raw_target_available = (
+                target_a is not None
+                and target_b is not None
+                and self.target_encoder is not None
+            )
+
+            raw_ta = raw_tb = None
+            raw_mask_a = raw_mask_b = None
+            if raw_target_available:
                 t_in_a = target_a.float().view(-1, self.target_feature_dim)
                 t_in_b = target_b.float().view(-1, self.target_feature_dim)
-                ta = self.target_encoder(t_in_a)
-                tb = self.target_encoder(t_in_b)
+                raw_ta = self.target_encoder(t_in_a)
+                raw_tb = self.target_encoder(t_in_b)
                 target_attn = getattr(self, 'cross_modal_target_attention', None)
                 if target_attn is not None:
-                    ta = ta + target_attn(ea, t_in_a, target_mask_a)
-                    tb = tb + target_attn(eb, t_in_b, target_mask_b)
+                    raw_ta = raw_ta + target_attn(ea, t_in_a, target_mask_a)
+                    raw_tb = raw_tb + target_attn(eb, t_in_b, target_mask_b)
                 elif self.cross_modal_attention is not None and t_in_a.size(-1) == self.cross_modal_attention.gene_proj.in_features:
-                    ta = ta + self.cross_modal_attention(ea, t_in_a, target_mask_a)
-                    tb = tb + self.cross_modal_attention(eb, t_in_b, target_mask_b)
-                ta_gate = self.target_gate(ta)
-                tb_gate = self.target_gate(tb)
-                if target_mask_a is not None:
-                    ta_gate = ta_gate * target_mask_a.view(-1, 1)
-                if target_mask_b is not None:
-                    tb_gate = tb_gate * target_mask_b.view(-1, 1)
-                ta_rep = ta_gate * ta
-                tb_rep = tb_gate * tb
+                    raw_ta = raw_ta + self.cross_modal_attention(ea, t_in_a, target_mask_a)
+                    raw_tb = raw_tb + self.cross_modal_attention(eb, t_in_b, target_mask_b)
+                raw_mask_a = (
+                    target_mask_a.to(device=ea.device, dtype=ea.dtype).view(-1, 1)
+                    if target_mask_a is not None
+                    else torch.ones((ea.size(0), 1), device=ea.device, dtype=ea.dtype)
+                )
+                raw_mask_b = (
+                    target_mask_b.to(device=eb.device, dtype=eb.dtype).view(-1, 1)
+                    if target_mask_b is not None
+                    else torch.ones((eb.size(0), 1), device=eb.device, dtype=eb.dtype)
+                )
+
+            sequence_ta = sequence_tb = None
+            sequence_mask_a = sequence_mask_b = None
+            if has_valid_seqs:
+                sequence_ta = self.protein_sequence_encoder(target_seq_a, device=ea.device)
+                sequence_tb = self.protein_sequence_encoder(target_seq_b, device=eb.device)
+                sequence_mask_a = torch.tensor(
+                    [float(isinstance(seq, str) and bool(seq.strip())) for seq in target_seq_a],
+                    device=ea.device,
+                    dtype=ea.dtype,
+                ).view(-1, 1)
+                sequence_mask_b = torch.tensor(
+                    [float(isinstance(seq, str) and bool(seq.strip())) for seq in target_seq_b],
+                    device=eb.device,
+                    dtype=eb.dtype,
+                ).view(-1, 1)
+                sequence_attn = getattr(self, 'cross_modal_sequence_attention', None)
+                # Models trained before the explicit sequence-attention layer
+                # retain the prior, dimension-safe fallback for compatibility.
+                if sequence_attn is None:
+                    sequence_attn = getattr(self, 'cross_modal_target_attention', None)
+                if sequence_attn is not None:
+                    sequence_ta = sequence_ta + sequence_attn(ea, sequence_ta, sequence_mask_a)
+                    sequence_tb = sequence_tb + sequence_attn(eb, sequence_tb, sequence_mask_b)
+
+            if (
+                self.target_sequence_fusion is not None
+                and raw_ta is not None
+                and raw_tb is not None
+                and sequence_ta is not None
+                and sequence_tb is not None
+                and raw_mask_a is not None
+                and raw_mask_b is not None
+                and sequence_mask_a is not None
+                and sequence_mask_b is not None
+            ):
+                fused_a = self.target_sequence_fusion(torch.cat((raw_ta, sequence_ta), dim=1))
+                fused_b = self.target_sequence_fusion(torch.cat((raw_tb, sequence_tb), dim=1))
+                both_a = raw_mask_a * sequence_mask_a
+                both_b = raw_mask_b * sequence_mask_b
+                ta = (
+                    fused_a * both_a
+                    + raw_ta * raw_mask_a * (1.0 - sequence_mask_a)
+                    + sequence_ta * sequence_mask_a * (1.0 - raw_mask_a)
+                )
+                tb = (
+                    fused_b * both_b
+                    + raw_tb * raw_mask_b * (1.0 - sequence_mask_b)
+                    + sequence_tb * sequence_mask_b * (1.0 - raw_mask_b)
+                )
+                target_available_a = (raw_mask_a + sequence_mask_a).clamp(max=1.0)
+                target_available_b = (raw_mask_b + sequence_mask_b).clamp(max=1.0)
+            elif sequence_ta is not None and sequence_tb is not None:
+                ta, tb = sequence_ta, sequence_tb
+                target_available_a, target_available_b = sequence_mask_a, sequence_mask_b
+            elif raw_ta is not None and raw_tb is not None:
+                ta, tb = raw_ta, raw_tb
+                target_available_a, target_available_b = raw_mask_a, raw_mask_b
             else:
-                ta_rep = torch.zeros((ea.size(0), self.target_hidden_channels), device=ea.device, dtype=ea.dtype)
-                tb_rep = torch.zeros((eb.size(0), self.target_hidden_channels), device=eb.device, dtype=eb.dtype)
+                ta = torch.zeros((ea.size(0), self.target_hidden_channels), device=ea.device, dtype=ea.dtype)
+                tb = torch.zeros((eb.size(0), self.target_hidden_channels), device=eb.device, dtype=eb.dtype)
+                target_available_a = torch.zeros((ea.size(0), 1), device=ea.device, dtype=ea.dtype)
+                target_available_b = torch.zeros((eb.size(0), 1), device=eb.device, dtype=eb.dtype)
+
+            ta_rep = self.target_gate(ta) * target_available_a * ta
+            tb_rep = self.target_gate(tb) * target_available_b * tb
             ea_for_risk = torch.cat((ea_for_risk, ta_rep), dim=1)
             eb_for_risk = torch.cat((eb_for_risk, tb_rep), dim=1)
 

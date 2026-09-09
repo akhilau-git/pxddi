@@ -51,8 +51,10 @@ def test_sequence_target_attention_cross_modal_regression():
         target_hidden_channels=64,
         use_target_encoder=True,
         use_protein_sequence_encoder=True,
+        use_target_sequence_fusion=True,
         use_cross_modal_attention=True,
         use_cross_modal_target_attention=True,
+        use_cross_modal_sequence_attention=True,
     )
 
     # 1. Forward with valid primary protein sequences (tests the 64-dim sequence attention path)
@@ -61,6 +63,8 @@ def test_sequence_target_attention_cross_modal_regression():
         drug_b=db,
         fp_a=torch.randn(2, 1024),
         fp_b=torch.randn(2, 1024),
+        target_a=torch.randn(2, 50),
+        target_b=torch.randn(2, 50),
         target_seq_a=[cyp3a4_seq, egfr_seq],
         target_seq_b=[egfr_seq, cyp3a4_seq],
         target_mask_a=torch.tensor([1.0, 1.0]),
@@ -69,6 +73,8 @@ def test_sequence_target_attention_cross_modal_regression():
     assert out.shape == (2,)
     loss = out.sum()
     loss.backward()
+    assert model.target_sequence_fusion is not None
+    assert model.target_sequence_fusion[0].weight.grad is not None
 
     # 2. Forward with empty sequences (tests fallback to multi-hot target vectors without crashing)
     model.zero_grad()
@@ -85,4 +91,3 @@ def test_sequence_target_attention_cross_modal_regression():
         target_mask_b=torch.tensor([1.0, 1.0]),
     )
     assert out_fallback.shape == (2,)
-
