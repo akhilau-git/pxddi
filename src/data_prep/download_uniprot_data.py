@@ -353,7 +353,13 @@ def pull_realtime_uniprot_dataset(
     sorted_targets = sorted(targets)
     total_targets = len(sorted_targets)
 
+    NON_CODING_LOCI = {"C5ORF56", "CARINH", "IRF1-AS1"}
+
     for idx, acc in enumerate(sorted_targets, start=1):
+        if acc in NON_CODING_LOCI:
+            print(f"[{idx}/{total_targets}] Target {acc} is a validated non-coding RNA locus (no protein sequence; skipped).")
+            continue
+
         canon_alias = CANONICAL_TARGET_TO_UNIPROT.get(acc, acc)
         fasta_file = fastas_dir / f"{canon_alias}.fasta"
         if not fasta_file.is_file():
@@ -364,14 +370,19 @@ def pull_realtime_uniprot_dataset(
             try:
                 cached_text = fasta_file.read_text(encoding="utf-8")
                 seq = parse_fasta_string(cached_text)
-                catalog[acc] = seq
-                catalog[canon_alias] = seq
                 header = cached_text.strip().splitlines()[0]
-                master_fasta_entries.append(cached_text.strip())
                 cached_gene = ""
                 gene_match = re.search(r"\bGN=([A-Za-z0-9_-]+)", header)
                 if gene_match:
                     cached_gene = gene_match.group(1).upper()
+
+                # Guard against corrupted cache from old synonym collision (e.g. CES1 pointing to MT2A)
+                if cached_gene and acc not in CANONICAL_TARGET_TO_UNIPROT and cached_gene != acc:
+                    raise ValueError(f"Cache mismatch for {acc}: found {cached_gene}")
+
+                catalog[acc] = seq
+                catalog[canon_alias] = seq
+                master_fasta_entries.append(cached_text.strip())
                 metadata_rows.append({
                     "uniprot_id": canon_alias if canon_alias != acc else acc,
                     "gene_symbol": cached_gene or acc,
@@ -400,6 +411,8 @@ def pull_realtime_uniprot_dataset(
 
                 # Write individual clean FASTA
                 resolved_fasta_file.write_text(fasta_raw, encoding="utf-8")
+                if acc != resolved_acc:
+                    (fastas_dir / f"{acc}.fasta").write_text(fasta_raw, encoding="utf-8")
                 catalog[resolved_acc] = seq
                 catalog[acc] = seq
                 master_fasta_entries.append(fasta_raw.strip())

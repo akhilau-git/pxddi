@@ -104,6 +104,12 @@ CANONICAL_TARGET_TO_UNIPROT: dict[str, str] = {
     'AGAP1': 'Q9UPQ3',
     'ARHGEF28': 'Q8N1W1',
     'ETFRF1': 'Q86V54',
+    'CYCSP5': 'Q6MZN7',
+    'HCP5': 'Q6MZN7',
+    'ADRA1A': 'P35348',
+    'ARSA': 'P15289',
+    'CEP68': 'Q76N32',
+    'CES1': 'P23141',
 }
 
 # Representative curated offline fallback sequences (truncated for fast testing)

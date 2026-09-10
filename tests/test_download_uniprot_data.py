@@ -106,4 +106,13 @@ def test_select_best_uniprot_match():
     assert best_acc == "P23141"
 
 
+def test_resolve_cycsp5_canonical():
+    from src.data_prep.download_uniprot_data import resolve_uniprot_identifier
+
+    # CYCSP5 (HCP5) must resolve to Q6MZN7
+    entry = resolve_uniprot_identifier("CYCSP5")
+    assert entry.get("uniprot_id") == "Q6MZN7"
+    assert entry.get("sequence_length") == 132
+
+
 
