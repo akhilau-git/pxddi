@@ -64,8 +64,12 @@ def test_update_master_nodes_with_uniprot(tmp_path):
     # Mock master nodes
     nodes_csv = tmp_path / "master_nodes.csv"
     df = pd.DataFrame({
-        "drug_id": ["ASPIRIN", "CODEINE", "GENERIC_DRUG"],
+        "drug_id": ["DRUG_A", "DRUG_B", "GENERIC_DRUG"],
         "canonical_smiles": ["CC(=O)OC1=CC=CC=C1C(=O)O", "CC1=CC=C2C=C1", "C1CCCCC1"],
+        "bindingdb_targets_json": [json.dumps({"PTGS2": 1.0}), json.dumps({"CYP2D6": 2.0}), "{}"],
+        # A legacy generic CYP3A4 assignment must not be recycled as evidence.
+        "uniprot_target_id": ["", "", "P08684"],
+        "target_sequence": ["", "", "MALIPDLAMETWLLLAVSLVLLYLYGTHSHGLFK"],
     })
     df.to_csv(nodes_csv, index=False)
 
@@ -84,4 +88,6 @@ def test_update_master_nodes_with_uniprot(tmp_path):
     assert len(enriched["target_sequence"].iloc[0]) > 0
     assert enriched["uniprot_target_id"].iloc[0] == "P35354"
     assert enriched["uniprot_target_id"].iloc[1] == "P10635"
-    assert enriched["uniprot_target_id"].iloc[2] == "P08684"
+    assert enriched["uniprot_target_id"].iloc[2] == ""
+    assert enriched["target_sequence"].iloc[2] == ""
+    assert enriched["target_sequence_source"].iloc[2] == "unmapped"

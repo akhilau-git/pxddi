@@ -133,11 +133,21 @@ def extract_target_accessions_from_workspace(
                 if any(k in lower_col for k in ["uniprot", "target", "gene", "protein"]):
                     sample = df_nodes[col].dropna().astype(str)
                     for val in sample:
-                        # Find valid UniProt accessions (e.g., P08684, Q14524, O60674)
-                        matches = re.findall(r"\b[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}\b", val)
-                        for m in matches:
-                            if isinstance(m, str) and len(m) >= 6:
-                                targets.add(m.upper().strip())
+                        # Find complete UniProt primary accessions.  ``findall``
+                        # with a capture group previously returned only a
+                        # fragment for many six-character accessions.
+                        matches = re.findall(
+                            r"\b(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\b",
+                            val.upper(),
+                        )
+                        targets.update(matches)
+
+                        # Exact gene symbols from observed target fields can
+                        # be resolved through the small curated mapping.  This
+                        # deliberately does not infer targets from drug names.
+                        for gene, acc in CANONICAL_TARGET_TO_UNIPROT.items():
+                            if re.search(rf"\b{re.escape(gene)}\b", val.upper()):
+                                targets.add(acc)
         except Exception as exc:
             LOGGER.warning(f"Could not parse extra targets from master nodes: {exc}")
 
@@ -202,9 +212,13 @@ def pull_realtime_uniprot_dataset(
                 catalog[acc] = seq
                 header = cached_text.strip().splitlines()[0]
                 master_fasta_entries.append(cached_text.strip())
+                cached_gene = ""
+                gene_match = re.search(r"\bGN=([A-Za-z0-9_-]+)", header)
+                if gene_match:
+                    cached_gene = gene_match.group(1).upper()
                 metadata_rows.append({
                     "uniprot_id": acc,
-                    "gene_symbol": acc,
+                    "gene_symbol": cached_gene or acc,
                     "protein_name": header.lstrip(">"),
                     "organism": "Homo sapiens",
                     "sequence_length": len(seq),

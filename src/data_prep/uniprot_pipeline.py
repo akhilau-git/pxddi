@@ -3,7 +3,7 @@
 Provides:
 1. Standard mapping from drug target symbols / accessions to canonical UniProt IDs.
 2. Leakage-safe online fetching and local caching of FASTA primary amino acid sequences.
-3. Offline fallback sequences for top pharmacological targets (CYP enzymes, receptors, kinases).
+3. Offline fallback sequences for a small set of explicitly identified targets.
 4. Generating target sequence catalogs for inductive sequence-level protein language modeling (ESM-2).
 """
 
@@ -180,12 +180,13 @@ def fetch_uniprot_sequence(
                 c_path.write_text(fasta_data, encoding='utf-8')
             return seq
     except Exception as exc:
-        # Graceful synthetic fallback based on accession seed
-        seed_seq = (
-            'MALIPDLAMETWLLLAVSLVLLYLYGTHSHGLFKKLGIPGPTPLPFLGNILSYHKGFCMFDMECHKKYGK'
-            'VWGFYDGQQPVLAITDPDMIKTVLVKECYSVFTNRRPFGPVGFMKSAISIAEDEEWKRLRSLLSPTFTS'
-        )
-        return seed_seq
+        # A sequence must belong to the requested accession.  Returning a
+        # generic protein here makes a sequence model appear to have coverage
+        # while giving it biologically meaningless input.
+        raise RuntimeError(
+            f"Could not retrieve a verified UniProt sequence for {accession}. "
+            "Provide it in the local cache or retry when UniProt is reachable."
+        ) from exc
 
 
 def build_target_sequence_catalog(
@@ -216,12 +217,48 @@ def build_target_sequence_catalog(
     return catalog
 
 
+def _normalise_accession(value: Any) -> str:
+    """Return a supported UniProt accession or an empty string."""
+    candidate = str(value).strip().upper()
+    if candidate in CANONICAL_TARGET_TO_UNIPROT:
+        return CANONICAL_TARGET_TO_UNIPROT[candidate]
+    # Reviewed and unreviewed UniProt primary accession formats.
+    if re.fullmatch(r"[A-Z0-9][0-9][A-Z0-9]{3}[0-9](?:-[0-9]+)?", candidate):
+        return candidate.split("-", maxsplit=1)[0]
+    return ""
+
+
+def _tokens_from_target_value(value: Any) -> list[str]:
+    """Extract exact target identifiers; never infer a target from drug name."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return []
+    if isinstance(value, dict):
+        return [str(key) for key in value]
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return []
+    try:
+        decoded = json.loads(text)
+        if isinstance(decoded, dict):
+            return [str(key) for key in decoded]
+        if isinstance(decoded, list):
+            return [str(item) for item in decoded]
+    except (TypeError, json.JSONDecodeError):
+        pass
+    return [part.strip() for part in re.split(r"[;,|/]", text) if part.strip()]
+
+
 def update_master_nodes_with_uniprot(
     master_nodes_path: str | Path,
     uniprot_dir: str | Path = "/content/drive/MyDrive/pxddi-data/uniprot",
     output_path: str | Path | None = None,
 ) -> pd.DataFrame:
-    """Enrich master_drug_nodes.csv with real-time UniProt primary sequences."""
+    """Add only source-supported drug-target UniProt sequences to master nodes.
+
+    Drugs without an explicit target accession/gene are deliberately left
+    unmapped.  This prevents a generic enzyme sequence from being assigned to
+    every drug, which would invalidate protein-sequence benchmarking.
+    """
     nodes_p = Path(master_nodes_path)
     if not nodes_p.is_file():
         raise FileNotFoundError(f"Master nodes file not found: {nodes_p}")
@@ -249,73 +286,74 @@ def update_master_nodes_with_uniprot(
         except Exception:
             pass
 
-    # Standard representative sequences
-    cyp3a4_seq = catalog.get("P08684", OFFLINE_SEQUENCE_FALLBACKS.get("P08684", ""))
-    cyp2d6_seq = catalog.get("P10635", OFFLINE_SEQUENCE_FALLBACKS.get("P10635", ""))
-    cyp2c9_seq = catalog.get("P11712", "")
-    ptgs2_seq = catalog.get("P35354", OFFLINE_SEQUENCE_FALLBACKS.get("P35354", ""))
+    # The catalog can be keyed by a gene symbol or an accession.  Normalize it
+    # once so subsequent mapping only uses an explicitly observed target.
+    catalog_by_acc: dict[str, str] = {}
+    for key, sequence in catalog.items():
+        acc = _normalise_accession(key)
+        if acc and isinstance(sequence, str) and len(sequence.strip()) > 20:
+            catalog_by_acc[acc] = sequence.strip()
 
     assigned_sequences: list[str] = []
     assigned_accessions: list[str] = []
+    assignment_sources: list[str] = []
 
     for _, row in df.iterrows():
         assigned_seq = ""
         assigned_acc = ""
 
-        # Check existing sequence column
-        for col in ["target_sequence", "uniprot_sequence", "protein_sequence"]:
-            if col in row and pd.notna(row[col]) and len(str(row[col]).strip()) > 20:
-                assigned_seq = str(row[col]).strip()
+        # Prefer direct accession fields.  ``uniprot_target_id`` is only
+        # reused when it was produced by this verified mapper: older files
+        # used that column for the now-removed generic CYP3A4 assignment.
+        accession_columns = ["uniprot_id", "uniprot_accession", "target_uniprot"]
+        existing_source = str(row.get("target_sequence_source", "")).lower()
+        if ":exact_" in existing_source:
+            accession_columns.insert(0, "uniprot_target_id")
+        for col in accession_columns:
+            if col not in df.columns:
+                continue
+            for token in _tokens_from_target_value(row[col]):
+                acc = _normalise_accession(token)
+                if acc in catalog_by_acc:
+                    assigned_seq, assigned_acc = catalog_by_acc[acc], acc
+                    assignment_sources.append(f"{col}:exact_accession")
+                    break
+            if assigned_seq:
                 break
 
+        # Then accept exact target gene symbols from observed target data.  A
+        # BindingDB target dictionary is source data; a drug-name guess is not.
         if not assigned_seq:
-            # Check UniProt ID column
-            for col in ["uniprot_id", "uniprot_accession", "target_uniprot"]:
-                if col in row and pd.notna(row[col]):
-                    cand_acc = str(row[col]).strip().upper()
-                    if cand_acc in catalog:
-                        assigned_seq = catalog[cand_acc]
-                        assigned_acc = cand_acc
+            for col in ["bindingdb_targets_json", "target_gene", "gene_symbol", "genes", "primary_target"]:
+                if col not in df.columns:
+                    continue
+                for token in _tokens_from_target_value(row[col]):
+                    gene = token.strip().upper()
+                    acc = _normalise_accession(gene) or gene_to_acc.get(gene, "")
+                    if acc in catalog_by_acc:
+                        assigned_seq, assigned_acc = catalog_by_acc[acc], acc
+                        assignment_sources.append(f"{col}:exact_target")
                         break
+                if assigned_seq:
+                    break
 
         if not assigned_seq:
-            # Check gene columns
-            for col in ["target_gene", "gene_symbol", "genes", "primary_target"]:
-                if col in row and pd.notna(row[col]):
-                    cand_gene = str(row[col]).strip().upper()
-                    acc = gene_to_acc.get(cand_gene)
-                    if acc and acc in catalog:
-                        assigned_seq = catalog[acc]
-                        assigned_acc = acc
-                        break
-
-        if not assigned_seq:
-            # Check drug identifier heuristics
-            drug_name = str(row.get("drug_id", row.get("canonical_smiles", ""))).upper()
-            if any(k in drug_name for k in ["ASPIRIN", "IBUPROFEN", "CELECOXIB", "DICLOFENAC"]):
-                assigned_seq = ptgs2_seq
-                assigned_acc = "P35354"
-            elif any(k in drug_name for k in ["CODEINE", "FLUOXETINE", "METOPROLOL", "HALOPERIDOL"]):
-                assigned_seq = cyp2d6_seq
-                assigned_acc = "P10635"
-            elif any(k in drug_name for k in ["WARFARIN", "PHENYTOIN"]):
-                assigned_seq = cyp2c9_seq or cyp3a4_seq
-                assigned_acc = "P11712"
-            else:
-                # Canonical primary metabolic target: CYP3A4
-                assigned_seq = cyp3a4_seq
-                assigned_acc = "P08684"
+            assignment_sources.append("unmapped")
 
         assigned_sequences.append(assigned_seq)
         assigned_accessions.append(assigned_acc)
 
     df["target_sequence"] = assigned_sequences
     df["uniprot_target_id"] = assigned_accessions
+    df["target_sequence_source"] = assignment_sources
 
     target_out = Path(output_path) if output_path is not None else nodes_p
     target_out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(target_out, index=False)
 
     n_with_seq = sum(1 for s in assigned_sequences if len(s) > 0)
-    print(f"Enriched master nodes with UniProt sequences: {n_with_seq}/{len(df)} drugs mapped.")
+    print(
+        f"Enriched master nodes with verified UniProt sequences: {n_with_seq}/{len(df)} drugs mapped. "
+        "Unmapped drugs were left blank."
+    )
     return df

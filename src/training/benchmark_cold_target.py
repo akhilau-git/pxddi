@@ -284,6 +284,18 @@ def run_cold_target_study(
     use_esm = bool(kwargs.pop("use_esm", False))
     require_esm = bool(kwargs.pop("require_esm", use_esm))
     use_target_attention = bool(kwargs.pop("use_cross_modal_target_attention", False))
+    unique_sequences = {
+        sequence.strip()
+        for sequence in target_seqs.values()
+        if isinstance(sequence, str) and len(sequence.strip()) > 20
+    }
+    if (use_esm or include_target_sequence_fusion) and len(unique_sequences) < 2:
+        raise ValueError(
+            "Protein-sequence benchmark aborted: fewer than two distinct target sequences "
+            f"were found ({len(unique_sequences)}). This usually indicates an invalid generic "
+            "target assignment, so ESM/S1 results would not be interpretable. Rebuild a verified "
+            "master-node file with update_master_nodes_with_uniprot and use that file here."
+        )
     configs = [
         ("multimodal_without_seq", False, False),
         ("auditddi_protein_seq", True, False),
