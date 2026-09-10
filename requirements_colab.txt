@@ -17,4 +17,8 @@ matplotlib>=3.8,<4
 # Required only for the explicit ESM-2 cold-target candidate.  The benchmark
 # records whether ESM-2 or the learned residue-CNN was used and can be set to
 # fail rather than silently falling back when ESM-2 is requested.
-transformers>=4.40,<5
+# Current Colab images ship Diffusers/Gradio on Hugging Face Hub 1.x.  The
+# legacy Transformers 4.x line downgrades that shared dependency and leaves
+# pip with an inconsistent environment; ESM remains available in Transformers
+# 5.x.
+transformers>=5.0,<6
