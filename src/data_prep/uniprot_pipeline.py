@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 import re
@@ -80,6 +81,17 @@ CANONICAL_TARGET_TO_UNIPROT: dict[str, str] = {
     'MTOR': 'P42345',
     'PIK3CA': 'P42336',
     'JAK2': 'O60674',
+    'P2RY12': 'Q9H244',
+    'ABCB1': 'P12270',
+    'SLCO1B1': 'Q9Y6L6',
+    'CYP2B6': 'P20813',
+    'CYP3A5': 'P20815',
+    'CYP2A6': 'P11509',
+    'CYP2C8': 'P10632',
+    'DPYD': 'Q12882',
+    'TPMT': 'P51580',
+    'G6PD': 'P11413',
+    'ITGB3': 'P05106',
 }
 
 # Representative curated offline fallback sequences (truncated for fast testing)
@@ -222,8 +234,13 @@ def _normalise_accession(value: Any) -> str:
     candidate = str(value).strip().upper()
     if candidate in CANONICAL_TARGET_TO_UNIPROT:
         return CANONICAL_TARGET_TO_UNIPROT[candidate]
-    # Reviewed and unreviewed UniProt primary accession formats.
-    if re.fullmatch(r"[A-Z0-9][0-9][A-Z0-9]{3}[0-9](?:-[0-9]+)?", candidate):
+    # Standard UniProt primary accession formats:
+    # 6-character: [OPQ][0-9][A-Z0-9]{3}[0-9] or [A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]
+    # 10-character: [A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9][A-Z][A-Z0-9]{2}[0-9]
+    if re.fullmatch(
+        r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9](?:[A-Z][A-Z0-9]{2}[0-9])?)(?:-[0-9]+)?",
+        candidate,
+    ):
         return candidate.split("-", maxsplit=1)[0]
     return ""
 
@@ -234,18 +251,29 @@ def _tokens_from_target_value(value: Any) -> list[str]:
         return []
     if isinstance(value, dict):
         return [str(key) for key in value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value]
     text = str(value).strip()
-    if not text or text.lower() == "nan":
+    if not text or text.lower() in ("nan", "none", "null", "[]", "{}"):
         return []
     try:
         decoded = json.loads(text)
         if isinstance(decoded, dict):
             return [str(key) for key in decoded]
-        if isinstance(decoded, list):
+        if isinstance(decoded, (list, tuple, set)):
             return [str(item) for item in decoded]
     except (TypeError, json.JSONDecodeError):
         pass
-    return [part.strip() for part in re.split(r"[;,|/]", text) if part.strip()]
+    try:
+        evaluated = ast.literal_eval(text)
+        if isinstance(evaluated, dict):
+            return [str(key) for key in evaluated]
+        if isinstance(evaluated, (list, tuple, set)):
+            return [str(item) for item in evaluated]
+    except Exception:
+        pass
+    cleaned_text = re.sub(r"[\[\]'\"\{\}]", "", text)
+    return [part.strip() for part in re.split(r"[;,|/\s]+", cleaned_text) if part.strip()]
 
 
 def update_master_nodes_with_uniprot(
@@ -298,6 +326,17 @@ def update_master_nodes_with_uniprot(
     assigned_accessions: list[str] = []
     assignment_sources: list[str] = []
 
+    target_gene_columns = [
+        "bindingdb_targets_json",
+        "bindingdb_targets",
+        "gene_symbols_json",
+        "gene_symbols",
+        "target_gene",
+        "gene_symbol",
+        "genes",
+        "primary_target",
+    ]
+
     for _, row in df.iterrows():
         assigned_seq = ""
         assigned_acc = ""
@@ -322,9 +361,10 @@ def update_master_nodes_with_uniprot(
                 break
 
         # Then accept exact target gene symbols from observed target data.  A
-        # BindingDB target dictionary is source data; a drug-name guess is not.
+        # BindingDB target dictionary or PharmGKB gene list is source data;
+        # a drug-name guess is not.
         if not assigned_seq:
-            for col in ["bindingdb_targets_json", "target_gene", "gene_symbol", "genes", "primary_target"]:
+            for col in target_gene_columns:
                 if col not in df.columns:
                     continue
                 for token in _tokens_from_target_value(row[col]):
@@ -332,6 +372,11 @@ def update_master_nodes_with_uniprot(
                     acc = _normalise_accession(gene) or gene_to_acc.get(gene, "")
                     if acc in catalog_by_acc:
                         assigned_seq, assigned_acc = catalog_by_acc[acc], acc
+                        assignment_sources.append(f"{col}:exact_target")
+                        break
+                    if gene in catalog and len(str(catalog[gene]).strip()) > 20:
+                        assigned_seq = str(catalog[gene]).strip()
+                        assigned_acc = acc or gene
                         assignment_sources.append(f"{col}:exact_target")
                         break
                 if assigned_seq:

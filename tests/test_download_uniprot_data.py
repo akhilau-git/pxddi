@@ -51,3 +51,14 @@ def test_pull_realtime_uniprot_dataset_local_test(tmp_path, monkeypatch):
     df_meta = pd.read_csv(out_dir / "uniprot_targets_metadata.csv")
     assert len(df_meta["uniprot_id"]) == len(df_meta["uniprot_id"].unique())
     assert manifest["total_sequences_saved"] > 0
+
+
+def test_resolve_uniprot_identifier():
+    from src.data_prep.download_uniprot_data import resolve_uniprot_identifier
+
+    # P2RY12 is canonical and should resolve to Q9H244
+    entry = resolve_uniprot_identifier("P2RY12")
+    assert entry.get("uniprot_id") == "Q9H244"
+    assert len(entry.get("sequence", "")) > 50
+    assert "Homo sapiens" in entry.get("organism", "")
+

@@ -75,9 +75,12 @@ yarn-error.log*
 backend/artifacts/
 backend/plots/
 backend/pxddi-results/
-backend/checkpoints/*_before_*.pt
-backend/checkpoints/*_run_*.pt
-backend/checkpoints/candidates/
+backend/checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
 backend/latest_results/
 
 # Experiment run artifacts — large CSVs, figures, checkpoints — live in Drive only.

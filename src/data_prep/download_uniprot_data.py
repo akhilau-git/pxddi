@@ -66,7 +66,7 @@ def fetch_realtime_uniprot_entry(
     req_fasta = urllib.request.Request(fasta_url, headers=headers)
     try:
         with urllib.request.urlopen(req_fasta, timeout=timeout) as resp:
-        fasta_text = resp.read().decode("utf-8")
+            fasta_text = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         if e.code == 404:
             if log_not_found:
@@ -118,36 +118,56 @@ def resolve_uniprot_identifier(identifier: str, timeout: float = 10.0) -> dict[s
     """Resolve an observed target gene/accession to one human UniProt record.
 
     BindingDB target exports commonly use gene symbols (for example P2RY12),
-    some of which look like six-character UniProt accessions.  We first try
-    the identifier as an accession, then use UniProt's exact-gene search.  No
-    drug-name inference or generic fallback is permitted.
+    some of which look like six-character UniProt accessions. We first try
+    canonical mapping, then candidate as accession, then UniProt's exact-gene search.
     """
     candidate = str(identifier).strip().upper()
     if not candidate:
         return {}
-    entry = fetch_realtime_uniprot_entry(candidate, timeout=timeout, log_not_found=False)
-    if entry:
-        return entry
 
-    query = urllib.parse.urlencode({
-        "query": f"gene_exact:{candidate} AND organism_id:9606",
-        "format": "json",
-        "fields": "accession,gene_names",
-        "size": 2,
-    })
-    url = f"https://rest.uniprot.org/uniprotkb/search?{query}"
-    req = urllib.request.Request(url, headers={"User-Agent": "AuditDDI-Research/2.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        matches = payload.get("results", [])
-        if len(matches) != 1:
+    # 1. Curated canonical mapping (immediate and verified)
+    if candidate in CANONICAL_TARGET_TO_UNIPROT:
+        canon_acc = CANONICAL_TARGET_TO_UNIPROT[candidate]
+        entry = fetch_realtime_uniprot_entry(canon_acc, timeout=timeout, log_not_found=False)
+        if entry:
+            return entry
+
+    # 2. If candidate matches standard UniProt accession format, try direct fetch
+    is_accession_like = bool(re.fullmatch(
+        r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9](?:[A-Z][A-Z0-9]{2}[0-9])?)(?:-[0-9]+)?",
+        candidate,
+    ))
+    if is_accession_like:
+        entry = fetch_realtime_uniprot_entry(candidate.split("-")[0], timeout=timeout, log_not_found=False)
+        if entry:
+            return entry
+
+    # 3. Exact human gene search on UniProtKB REST API
+    # Prioritize reviewed (Swiss-Prot) records to ensure high-confidence sequences
+    for reviewed_filter in [" AND reviewed:true", ""]:
+        query = urllib.parse.urlencode({
+            "query": f"gene_exact:{candidate} AND organism_id:9606{reviewed_filter}",
+            "format": "json",
+            "fields": "accession,gene_names",
+            "size": 5,
+        })
+        url = f"https://rest.uniprot.org/uniprotkb/search?{query}"
+        req = urllib.request.Request(url, headers={"User-Agent": "AuditDDI-Research/2.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            matches = payload.get("results", [])
+            if matches:
+                accession = str(matches[0].get("primaryAccession", "")).strip().upper()
+                if accession:
+                    entry = fetch_realtime_uniprot_entry(accession, timeout=timeout, log_not_found=False)
+                    if entry:
+                        return entry
+        except Exception as exc:
+            LOGGER.warning("Could not resolve target identifier '%s': %s", candidate, exc)
             return {}
-        accession = str(matches[0].get("primaryAccession", "")).strip().upper()
-        return fetch_realtime_uniprot_entry(accession, timeout=timeout) if accession else {}
-    except Exception as exc:
-        LOGGER.warning("Could not resolve target identifier '%s': %s", candidate, exc)
-        return {}
+
+    return {}
 
 
 def extract_target_accessions_from_workspace(
@@ -162,6 +182,11 @@ def extract_target_accessions_from_workspace(
     for gene, acc in CANONICAL_TARGET_TO_UNIPROT.items():
         targets.add(acc.upper().strip())
 
+    non_gene_tokens = {
+        "TRUE", "FALSE", "NULL", "NONE", "NAN", "NAME", "VALUE", "TARGET",
+        "GENE", "GENES", "SCORE", "TYPE", "ID", "DRUG", "UNMAPPED", "MISSING",
+    }
+
     # 2. Extract from master_drug_nodes.csv if provided
     if master_nodes_path is not None and Path(master_nodes_path).is_file():
         try:
@@ -174,28 +199,25 @@ def extract_target_accessions_from_workspace(
                 if any(k in lower_col for k in ["uniprot", "target", "gene", "protein"]):
                     sample = df_nodes[col].dropna().astype(str)
                     for val in sample:
-                        # Find complete UniProt primary accessions.  ``findall``
-                        # with a capture group previously returned only a
-                        # fragment for many six-character accessions.
+                        # Find complete UniProt primary accessions.
                         matches = re.findall(
                             r"\b(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\b",
                             val.upper(),
                         )
                         targets.update(matches)
 
-                        # Exact gene symbols from observed target fields can
-                        # be resolved through the small curated mapping.  This
-                        # deliberately does not infer targets from drug names.
+                        # Exact gene symbols from observed target fields
                         for gene, acc in CANONICAL_TARGET_TO_UNIPROT.items():
                             if re.search(rf"\b{re.escape(gene)}\b", val.upper()):
                                 targets.add(acc)
 
-                        # BindingDB target IDs are often gene symbols not
-                        # covered by the small canonical map. Keep compact
-                        # observed identifiers so they can be resolved against
-                        # UniProt's exact human-gene endpoint below.
+                        # BindingDB or PharmGKB gene symbols not in canonical map
                         for token in re.findall(r"\b[A-Z][A-Z0-9-]{1,14}\b", val.upper()):
-                            targets.add(token)
+                            if token not in non_gene_tokens and not token.isdigit():
+                                if token in CANONICAL_TARGET_TO_UNIPROT:
+                                    targets.add(CANONICAL_TARGET_TO_UNIPROT[token])
+                                else:
+                                    targets.add(token)
         except Exception as exc:
             LOGGER.warning(f"Could not parse extra targets from master nodes: {exc}")
 
@@ -250,7 +272,10 @@ def pull_realtime_uniprot_dataset(
     total_targets = len(sorted_targets)
 
     for idx, acc in enumerate(sorted_targets, start=1):
-        fasta_file = fastas_dir / f"{acc}.fasta"
+        canon_alias = CANONICAL_TARGET_TO_UNIPROT.get(acc, acc)
+        fasta_file = fastas_dir / f"{canon_alias}.fasta"
+        if not fasta_file.is_file():
+            fasta_file = fastas_dir / f"{acc}.fasta"
 
         # Check if already fetched and valid (no duplicates or repeated downloads)
         if fasta_file.is_file() and fasta_file.stat().st_size > 50:
@@ -258,6 +283,7 @@ def pull_realtime_uniprot_dataset(
                 cached_text = fasta_file.read_text(encoding="utf-8")
                 seq = parse_fasta_string(cached_text)
                 catalog[acc] = seq
+                catalog[canon_alias] = seq
                 header = cached_text.strip().splitlines()[0]
                 master_fasta_entries.append(cached_text.strip())
                 cached_gene = ""
@@ -265,7 +291,7 @@ def pull_realtime_uniprot_dataset(
                 if gene_match:
                     cached_gene = gene_match.group(1).upper()
                 metadata_rows.append({
-                    "uniprot_id": acc,
+                    "uniprot_id": canon_alias if canon_alias != acc else acc,
                     "gene_symbol": cached_gene or acc,
                     "protein_name": header.lstrip(">"),
                     "organism": "Homo sapiens",
@@ -293,6 +319,7 @@ def pull_realtime_uniprot_dataset(
                 # Write individual clean FASTA
                 resolved_fasta_file.write_text(fasta_raw, encoding="utf-8")
                 catalog[resolved_acc] = seq
+                catalog[acc] = seq
                 master_fasta_entries.append(fasta_raw.strip())
 
                 metadata_rows.append({
@@ -303,7 +330,7 @@ def pull_realtime_uniprot_dataset(
                     "sequence_length": entry["sequence_length"],
                     "sha256": entry["sha256"],
                     "source": entry["source"],
-                    "file_path": str(fasta_file.name),
+                    "file_path": str(resolved_fasta_file.name),
                 })
                 success_count += 1
                 LOGGER.info(f"[{idx}/{total_targets}] Successfully fetched {acc} ({entry['gene_symbol']}) - {len(seq)} AAs")

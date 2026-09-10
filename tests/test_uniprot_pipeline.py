@@ -91,3 +91,42 @@ def test_update_master_nodes_with_uniprot(tmp_path):
     assert enriched["uniprot_target_id"].iloc[2] == ""
     assert enriched["target_sequence"].iloc[2] == ""
     assert enriched["target_sequence_source"].iloc[2] == "unmapped"
+
+
+def test_update_master_nodes_with_pharmgkb_gene_symbols(tmp_path):
+    from src.data_prep.uniprot_pipeline import update_master_nodes_with_uniprot
+    import pandas as pd
+
+    # Master nodes containing PharmGKB gene_symbols_json and gene_symbols (Python repr)
+    nodes_csv = tmp_path / "master_nodes_pharmgkb.csv"
+    df = pd.DataFrame({
+        "drug_id": ["CLOPIDOGREL", "ASPIRIN", "METOPROLOL", "NO_TARGET_DRUG"],
+        "canonical_smiles": ["C1", "C2", "C3", "C4"],
+        "gene_symbols_json": [json.dumps(["P2RY12"]), json.dumps(["PTGS1", "PTGS2"]), "[]", "[]"],
+        "gene_symbols": ["['P2RY12']", "['PTGS1', 'PTGS2']", "['CYP2D6']", "[]"],
+        "bindingdb_targets_json": ["{}", "{}", "{}", "{}"],
+    })
+    df.to_csv(nodes_csv, index=False)
+
+    u_dir = tmp_path / "uniprot"
+    u_dir.mkdir()
+    (u_dir / "target_sequences.json").write_text(json.dumps({
+        "Q9H244": "MAKTLIALLSLLFLHCLGLDAEGVSGFLNRFDF",  # P2RY12
+        "P23219": "MLARALLLCAVLALSHTANPCCSHPCQNRGVCMS",  # PTGS1
+        "P10635": "MGLEALVPLAVIVAIFLLLVDLMHRRQRWAARYP",  # CYP2D6
+    }), encoding="utf-8")
+
+    enriched = update_master_nodes_with_uniprot(nodes_csv, uniprot_dir=u_dir)
+    assert enriched["uniprot_target_id"].iloc[0] == "Q9H244"
+    assert enriched["target_sequence_source"].iloc[0] == "gene_symbols_json:exact_target"
+    assert len(enriched["target_sequence"].iloc[0]) > 20
+
+    assert enriched["uniprot_target_id"].iloc[1] == "P23219"
+    assert enriched["target_sequence_source"].iloc[1] == "gene_symbols_json:exact_target"
+
+    assert enriched["uniprot_target_id"].iloc[2] == "P10635"
+    assert enriched["target_sequence_source"].iloc[2] == "gene_symbols:exact_target"
+
+    assert enriched["uniprot_target_id"].iloc[3] == ""
+    assert enriched["target_sequence_source"].iloc[3] == "unmapped"
+
