@@ -37,6 +37,7 @@ import pandas as pd
 
 from src.data_prep.uniprot_pipeline import (
     CANONICAL_TARGET_TO_UNIPROT,
+    _tokens_from_target_value,
     clean_protein_sequence,
     parse_fasta_string,
     update_master_nodes_with_uniprot,
@@ -114,7 +115,7 @@ def fetch_realtime_uniprot_entry(
     }
 
 
-def resolve_uniprot_identifier(identifier: str, timeout: float = 10.0) -> dict[str, Any]:
+def resolve_uniprot_identifier(identifier: str, timeout: float = 15.0) -> dict[str, Any]:
     """Resolve an observed target gene/accession to one human UniProt record.
 
     BindingDB target exports commonly use gene symbols (for example P2RY12),
@@ -122,10 +123,40 @@ def resolve_uniprot_identifier(identifier: str, timeout: float = 10.0) -> dict[s
     canonical mapping, then candidate as accession, then UniProt's exact-gene search.
     """
     candidate = str(identifier).strip().upper()
-    if not candidate:
+    if not candidate or len(candidate) < 2:
         return {}
 
-    # 1. Curated canonical mapping (immediate and verified)
+    # Discard non-gene tokens upfront (e.g. mutations, protein descriptions)
+    if re.fullmatch(r"[A-Z]\d+[A-Z]", candidate):
+        return {}
+    if candidate in {
+        "AMINE", "CONTAINING", "DEPENDENT", "DERIVED", "DIMER", "ENDOTHELIAL",
+        "EPIDERMAL", "EPOXIDE", "EPSILON", "CATALYTIC", "UNMAPPED", "MISSING",
+        "GROWTH", "FACTOR", "RECEPTOR", "PROTEIN", "SUBUNIT", "HOMOLOG",
+    }:
+        return {}
+
+    # Normalize common hyphenated aliases (e.g. CASPASE-1 -> CASP1, ERBB-2 -> ERBB2)
+    alias_map = {
+        "CASPASE-1": "CASP1",
+        "CASPASE-2": "CASP2",
+        "CASPASE-3": "CASP3",
+        "CASPASE-4": "CASP4",
+        "CASPASE-5": "CASP5",
+        "CASPASE-6": "CASP6",
+        "CASPASE-7": "CASP7",
+        "CASPASE-8": "CASP8",
+        "CASPASE-9": "CASP9",
+        "ERBB-2": "ERBB2",
+        "CYCLIN-A2": "CCNA2",
+        "CYCLIN-B": "CCNB1",
+        "CYCLIN-D1": "CCND1",
+        "CYCLIN-E1": "CCNE1",
+    }
+    if candidate in alias_map:
+        candidate = alias_map[candidate]
+
+    # 1. Curated canonical mapping (immediate and verified, no network latency)
     if candidate in CANONICAL_TARGET_TO_UNIPROT:
         canon_acc = CANONICAL_TARGET_TO_UNIPROT[candidate]
         entry = fetch_realtime_uniprot_entry(canon_acc, timeout=timeout, log_not_found=False)
@@ -153,19 +184,25 @@ def resolve_uniprot_identifier(identifier: str, timeout: float = 10.0) -> dict[s
         })
         url = f"https://rest.uniprot.org/uniprotkb/search?{query}"
         req = urllib.request.Request(url, headers={"User-Agent": "AuditDDI-Research/2.0"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            matches = payload.get("results", [])
-            if matches:
-                accession = str(matches[0].get("primaryAccession", "")).strip().upper()
-                if accession:
-                    entry = fetch_realtime_uniprot_entry(accession, timeout=timeout, log_not_found=False)
-                    if entry:
-                        return entry
-        except Exception as exc:
-            LOGGER.warning("Could not resolve target identifier '%s': %s", candidate, exc)
-            return {}
+        # Retry once if a transient read timeout occurs
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                matches = payload.get("results", [])
+                if matches:
+                    accession = str(matches[0].get("primaryAccession", "")).strip().upper()
+                    if accession:
+                        entry = fetch_realtime_uniprot_entry(accession, timeout=timeout, log_not_found=False)
+                        if entry:
+                            return entry
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    time.sleep(1.0)
+                    continue
+                LOGGER.warning("Could not resolve target identifier '%s': %s", candidate, exc)
+                return {}
 
     return {}
 
@@ -185,6 +222,9 @@ def extract_target_accessions_from_workspace(
     non_gene_tokens = {
         "TRUE", "FALSE", "NULL", "NONE", "NAN", "NAME", "VALUE", "TARGET",
         "GENE", "GENES", "SCORE", "TYPE", "ID", "DRUG", "UNMAPPED", "MISSING",
+        "AMINE", "CONTAINING", "DEPENDENT", "DERIVED", "DIMER", "ENDOTHELIAL",
+        "EPIDERMAL", "EPOXIDE", "EPSILON", "CATALYTIC", "GROWTH", "FACTOR",
+        "RECEPTOR", "PROTEIN", "SUBUNIT", "HOMOLOG",
     }
 
     # 2. Extract from master_drug_nodes.csv if provided
@@ -193,31 +233,41 @@ def extract_target_accessions_from_workspace(
             df_nodes = pd.read_csv(master_nodes_path)
             LOGGER.info(f"Scanning master nodes at {master_nodes_path} for target identifiers...")
 
-            # Search potential target columns
-            for col in df_nodes.columns:
-                lower_col = col.lower()
-                if any(k in lower_col for k in ["uniprot", "target", "gene", "protein"]):
-                    sample = df_nodes[col].dropna().astype(str)
-                    for val in sample:
-                        # Find complete UniProt primary accessions.
-                        matches = re.findall(
-                            r"\b(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})\b",
-                            val.upper(),
-                        )
-                        targets.update(matches)
+            # Select dedicated target/gene columns; ignore free-text description columns
+            target_cols = [
+                col for col in df_nodes.columns
+                if col.lower() in [
+                    "gene_symbols_json", "gene_symbols", "bindingdb_targets_json",
+                    "bindingdb_targets", "uniprot_id", "uniprot_accession",
+                    "target_uniprot", "uniprot_target_id", "target_gene",
+                    "gene_symbol", "genes", "primary_target",
+                ]
+            ]
+            if not target_cols:
+                target_cols = [
+                    col for col in df_nodes.columns
+                    if any(k in col.lower() for k in ["uniprot", "gene"])
+                    and not any(bad in col.lower() for bad in ["name", "desc", "vector", "score", "report", "pathway", "synonym"])
+                ]
 
-                        # Exact gene symbols from observed target fields
-                        for gene, acc in CANONICAL_TARGET_TO_UNIPROT.items():
-                            if re.search(rf"\b{re.escape(gene)}\b", val.upper()):
-                                targets.add(acc)
-
-                        # BindingDB or PharmGKB gene symbols not in canonical map
-                        for token in re.findall(r"\b[A-Z][A-Z0-9-]{1,14}\b", val.upper()):
-                            if token not in non_gene_tokens and not token.isdigit():
-                                if token in CANONICAL_TARGET_TO_UNIPROT:
-                                    targets.add(CANONICAL_TARGET_TO_UNIPROT[token])
-                                else:
-                                    targets.add(token)
+            for col in target_cols:
+                for val in df_nodes[col].dropna():
+                    tokens = _tokens_from_target_value(val)
+                    for token in tokens:
+                        t = token.strip().upper()
+                        # Direct UniProt primary accession
+                        if re.fullmatch(r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})", t):
+                            targets.add(t)
+                        # Canonical gene symbol
+                        elif t in CANONICAL_TARGET_TO_UNIPROT:
+                            targets.add(CANONICAL_TARGET_TO_UNIPROT[t])
+                        # Common gene symbol alias
+                        elif t.replace("-", "") in CANONICAL_TARGET_TO_UNIPROT:
+                            targets.add(CANONICAL_TARGET_TO_UNIPROT[t.replace("-", "")])
+                        # Valid HGNC gene symbol (exclude mutations like A555V)
+                        elif re.fullmatch(r"[A-Z][A-Z0-9]{1,7}", t) and not re.fullmatch(r"[A-Z]\d+[A-Z]", t):
+                            if t not in non_gene_tokens:
+                                targets.add(t)
         except Exception as exc:
             LOGGER.warning(f"Could not parse extra targets from master nodes: {exc}")
 

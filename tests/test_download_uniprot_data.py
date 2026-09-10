@@ -62,3 +62,27 @@ def test_resolve_uniprot_identifier():
     assert len(entry.get("sequence", "")) > 50
     assert "Homo sapiens" in entry.get("organism", "")
 
+
+def test_extract_target_accessions_filters_noise(tmp_path):
+    dummy_csv = tmp_path / "dummy_nodes_noise.csv"
+    df = pd.DataFrame({
+        "drug_id": ["DB001", "DB002"],
+        "gene_symbols_json": [json.dumps(["CYP3A4", "P2RY12"]), "[]"],
+        "bindingdb_targets_json": ["{}", json.dumps({"PTGS2": 1.0})],
+        "protein_description": ["CATALYTIC SUBUNIT WITH MUTATION A555V AND ENDOTHELIAL EPIDERMAL", "DIMER"],
+    })
+    df.to_csv(dummy_csv, index=False)
+
+    targets = extract_target_accessions_from_workspace(master_nodes_path=dummy_csv)
+    # True canonical accessions must be present
+    assert "P08684" in targets  # CYP3A4
+    assert "Q9H244" in targets  # P2RY12
+    assert "P35354" in targets  # PTGS2
+    # Non-gene tokens, mutations, and description words must NOT be present
+    assert "A555V" not in targets
+    assert "CATALYTIC" not in targets
+    assert "ENDOTHELIAL" not in targets
+    assert "EPIDERMAL" not in targets
+    assert "DIMER" not in targets
+
+

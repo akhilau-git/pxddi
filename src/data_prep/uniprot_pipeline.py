@@ -92,6 +92,18 @@ CANONICAL_TARGET_TO_UNIPROT: dict[str, str] = {
     'TPMT': 'P51580',
     'G6PD': 'P11413',
     'ITGB3': 'P05106',
+    'CYP1B1': 'Q16678',
+    'CYP1A1': 'P04798',
+    'ERBB2': 'P04626',
+    'CASP1': 'P29466',
+    'CASP3': 'P42574',
+    'CASP8': 'Q14790',
+    'DOT1L': 'Q8TEK3',
+    'CCL5': 'P13501',
+    'CNTN4': 'Q8IWV2',
+    'AGAP1': 'Q9UPQ3',
+    'ARHGEF28': 'Q8N1W1',
+    'ETFRF1': 'Q86V54',
 }
 
 # Representative curated offline fallback sequences (truncated for fast testing)
