@@ -46,7 +46,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 LOGGER = logging.getLogger("uniprot_ingestion")
 
 
-def fetch_realtime_uniprot_entry(accession: str, timeout: float = 10.0) -> dict[str, Any]:
+def fetch_realtime_uniprot_entry(
+    accession: str,
+    timeout: float = 10.0,
+    log_not_found: bool = True,
+) -> dict[str, Any]:
     """Fetch complete real-time record from UniProt REST API without mock or dummy data."""
     clean_acc = str(accession).strip().upper()
 
@@ -62,10 +66,11 @@ def fetch_realtime_uniprot_entry(accession: str, timeout: float = 10.0) -> dict[
     req_fasta = urllib.request.Request(fasta_url, headers=headers)
     try:
         with urllib.request.urlopen(req_fasta, timeout=timeout) as resp:
-            fasta_text = resp.read().decode("utf-8")
+        fasta_text = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            LOGGER.warning(f"UniProt accession '{clean_acc}' not found (HTTP 404).")
+            if log_not_found:
+                LOGGER.warning(f"UniProt accession '{clean_acc}' not found (HTTP 404).")
             return {}
         raise
 
@@ -120,7 +125,7 @@ def resolve_uniprot_identifier(identifier: str, timeout: float = 10.0) -> dict[s
     candidate = str(identifier).strip().upper()
     if not candidate:
         return {}
-    entry = fetch_realtime_uniprot_entry(candidate, timeout=timeout)
+    entry = fetch_realtime_uniprot_entry(candidate, timeout=timeout, log_not_found=False)
     if entry:
         return entry
 
