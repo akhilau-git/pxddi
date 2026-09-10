@@ -121,6 +121,30 @@ def fetch_realtime_uniprot_entry(
     }
 
 
+def _select_best_uniprot_match(matches: list[dict[str, Any]], candidate: str) -> str:
+    """Select the accession where candidate matches the primary geneName, else fallback to synonym."""
+    candidate_upper = candidate.strip().upper()
+    if not matches:
+        return ""
+
+    # Pass 1: Prioritize entry where primary official geneName matches candidate exactly
+    for m in matches:
+        for g in m.get("genes", []):
+            gn = g.get("geneName", {}).get("value", "").strip().upper()
+            if gn == candidate_upper:
+                return str(m.get("primaryAccession", "")).strip().upper()
+
+    # Pass 2: Match synonym exactly
+    for m in matches:
+        for g in m.get("genes", []):
+            synonyms = [s.get("value", "").strip().upper() for s in g.get("synonyms", [])]
+            if candidate_upper in synonyms:
+                return str(m.get("primaryAccession", "")).strip().upper()
+
+    # Pass 3: Fallback to the first match's primary accession
+    return str(matches[0].get("primaryAccession", "")).strip().upper()
+
+
 def resolve_uniprot_identifier(identifier: str, timeout: float = 15.0) -> dict[str, Any]:
     """Resolve an observed target gene/accession to one human UniProt record.
 
@@ -197,7 +221,7 @@ def resolve_uniprot_identifier(identifier: str, timeout: float = 15.0) -> dict[s
                     payload = json.loads(response.read().decode("utf-8"))
                 matches = payload.get("results", [])
                 if matches:
-                    accession = str(matches[0].get("primaryAccession", "")).strip().upper()
+                    accession = _select_best_uniprot_match(matches, candidate)
                     if accession:
                         entry = fetch_realtime_uniprot_entry(accession, timeout=timeout, log_not_found=False)
                         if entry:

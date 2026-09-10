@@ -86,3 +86,24 @@ def test_extract_target_accessions_filters_noise(tmp_path):
     assert "DIMER" not in targets
 
 
+def test_select_best_uniprot_match():
+    from src.data_prep.download_uniprot_data import _select_best_uniprot_match
+
+    # Mock UniProt search results where matches[0] has candidate as synonym (MT2A),
+    # and matches[1] has candidate as primary geneName (CES1)
+    matches = [
+        {
+            "primaryAccession": "P02795",
+            "genes": [{"geneName": {"value": "MT2A"}, "synonyms": [{"value": "CES1"}]}],
+        },
+        {
+            "primaryAccession": "P23141",
+            "genes": [{"geneName": {"value": "CES1"}, "synonyms": [{"value": "SES1"}]}],
+        },
+    ]
+    # Must select P23141 because CES1 is its primary geneName!
+    best_acc = _select_best_uniprot_match(matches, "CES1")
+    assert best_acc == "P23141"
+
+
+
