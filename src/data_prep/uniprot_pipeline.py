@@ -110,6 +110,16 @@ CANONICAL_TARGET_TO_UNIPROT: dict[str, str] = {
     'ARSA': 'P15289',
     'CEP68': 'Q76N32',
     'CES1': 'P23141',
+    'DAO': 'P14920',
+    'FAAH': 'O00519',
+    'FMO2': 'Q99518',
+    'GAL': 'P22466',
+    'GCK': 'P35557',
+    'HTT': 'P42858',
+    'LEPR': 'P48357',
+    'NAT1': 'P18440',
+    'NOS3': 'P29474',
+    'PTGER2': 'P43116',
 }
 
 # Representative curated offline fallback sequences (truncated for fast testing)

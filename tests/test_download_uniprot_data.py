@@ -115,4 +115,21 @@ def test_resolve_cycsp5_canonical():
     assert entry.get("sequence_length") == 132
 
 
+def test_mirna_and_pseudogene_filtering(tmp_path):
+    dummy_csv = tmp_path / "dummy_nodes_mirna.csv"
+    df = pd.DataFrame({
+        "drug_id": ["DB001"],
+        "gene_symbols_json": [json.dumps(["CYP3A4", "MIR146A", "CYP2A7P1", "C5ORF56"])],
+    })
+    df.to_csv(dummy_csv, index=False)
+
+    targets = extract_target_accessions_from_workspace(master_nodes_path=dummy_csv)
+    # CYP3A4 should be extracted
+    assert "P08684" in targets
+    # Non-protein microRNAs and pseudogenes must NOT be extracted
+    assert "MIR146A" not in targets
+    assert "CYP2A7P1" not in targets
+    assert "C5ORF56" not in targets
+
+
 

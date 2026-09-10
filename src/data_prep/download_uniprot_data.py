@@ -159,10 +159,15 @@ def resolve_uniprot_identifier(identifier: str, timeout: float = 15.0) -> dict[s
     # Discard non-gene tokens upfront (e.g. mutations, protein descriptions)
     if re.fullmatch(r"[A-Z]\d+[A-Z]", candidate):
         return {}
+    # Discard microRNAs, lncRNAs, and non-protein pseudogenes
+    if re.match(r"^MIR\d+", candidate) or re.match(r"^LINC\d+", candidate):
+        return {}
     if candidate in {
         "AMINE", "CONTAINING", "DEPENDENT", "DERIVED", "DIMER", "ENDOTHELIAL",
         "EPIDERMAL", "EPOXIDE", "EPSILON", "CATALYTIC", "UNMAPPED", "MISSING",
         "GROWTH", "FACTOR", "RECEPTOR", "PROTEIN", "SUBUNIT", "HOMOLOG",
+        "C5ORF56", "CARINH", "IRF1-AS1", "PSORS1C3", "CYP2A7P1", "CYP2B7P1",
+        "PSMB3P", "OR10AE3P",
     }:
         return {}
 
@@ -294,8 +299,15 @@ def extract_target_accessions_from_workspace(
                         # Common gene symbol alias
                         elif t.replace("-", "") in CANONICAL_TARGET_TO_UNIPROT:
                             targets.add(CANONICAL_TARGET_TO_UNIPROT[t.replace("-", "")])
-                        # Valid HGNC gene symbol (exclude mutations like A555V)
+                        # Valid HGNC gene symbol (exclude mutations, microRNAs, and non-protein loci)
                         elif re.fullmatch(r"[A-Z][A-Z0-9]{1,7}", t) and not re.fullmatch(r"[A-Z]\d+[A-Z]", t):
+                            if re.match(r"^MIR\d+", t) or re.match(r"^LINC\d+", t):
+                                continue
+                            if t in {
+                                "C5ORF56", "CARINH", "IRF1-AS1", "PSORS1C3", "CYP2A7P1",
+                                "CYP2B7P1", "PSMB3P", "OR10AE3P",
+                            }:
+                                continue
                             if t not in non_gene_tokens:
                                 targets.add(t)
         except Exception as exc:
@@ -353,11 +365,14 @@ def pull_realtime_uniprot_dataset(
     sorted_targets = sorted(targets)
     total_targets = len(sorted_targets)
 
-    NON_CODING_LOCI = {"C5ORF56", "CARINH", "IRF1-AS1"}
+    NON_CODING_LOCI = {
+        "C5ORF56", "CARINH", "IRF1-AS1", "PSORS1C3", "CYP2A7P1",
+        "CYP2B7P1", "PSMB3P", "OR10AE3P",
+    }
 
     for idx, acc in enumerate(sorted_targets, start=1):
-        if acc in NON_CODING_LOCI:
-            print(f"[{idx}/{total_targets}] Target {acc} is a validated non-coding RNA locus (no protein sequence; skipped).")
+        if acc in NON_CODING_LOCI or re.match(r"^MIR\d+", acc) or re.match(r"^LINC\d+", acc):
+            print(f"[{idx}/{total_targets}] Target {acc} is a validated non-coding RNA/pseudogene locus (no protein sequence; skipped).")
             continue
 
         canon_alias = CANONICAL_TARGET_TO_UNIPROT.get(acc, acc)
