@@ -45,6 +45,12 @@ from src.data_prep.uniprot_pipeline import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger("uniprot_ingestion")
+LOGGER.setLevel(logging.INFO)
+if not any(isinstance(h, logging.StreamHandler) for h in LOGGER.handlers):
+    _sh = logging.StreamHandler(sys.stdout)
+    _sh.setLevel(logging.INFO)
+    _sh.setFormatter(logging.Formatter("%(message)s"))
+    LOGGER.addHandler(_sh)
 
 
 def fetch_realtime_uniprot_entry(
@@ -297,16 +303,18 @@ def pull_realtime_uniprot_dataset(
     fastas_dir = out_dir / "fastas"
     fastas_dir.mkdir(parents=True, exist_ok=True)
 
-    LOGGER.info("=" * 80)
-    LOGGER.info(f"STARTING REAL-TIME UNIPROT DATASET INGESTION")
-    LOGGER.info(f"Target Google Drive Folder: {out_dir}")
-    LOGGER.info("=" * 80)
+    print("=" * 80)
+    print(f"STARTING REAL-TIME UNIPROT DATASET INGESTION")
+    print(f"Target Google Drive Folder: {out_dir}")
+    print("=" * 80)
 
     # 1. Resolve target set
     if target_subset is not None:
         targets = set(str(t).strip().upper() for t in target_subset if t)
     else:
         targets = extract_target_accessions_from_workspace(master_nodes_path=master_nodes_path)
+
+    print(f"Identified {len(targets)} unique, verified target accessions to ingest.")
 
     # 2. Fetch records
     catalog: dict[str, str] = {}
@@ -352,7 +360,7 @@ def pull_realtime_uniprot_dataset(
                 })
                 skipped_count += 1
                 if idx % 10 == 0 or idx == total_targets:
-                    LOGGER.info(f"[{idx}/{total_targets}] Loaded existing {acc} ({len(seq)} AAs)")
+                    print(f"[{idx}/{total_targets}] Loaded cached {acc} ({len(seq)} AAs)")
                 continue
             except Exception:
                 pass
@@ -383,28 +391,28 @@ def pull_realtime_uniprot_dataset(
                     "file_path": str(resolved_fasta_file.name),
                 })
                 success_count += 1
-                LOGGER.info(f"[{idx}/{total_targets}] Successfully fetched {acc} ({entry['gene_symbol']}) - {len(seq)} AAs")
+                print(f"[{idx}/{total_targets}] Successfully fetched {acc} ({entry['gene_symbol']}) - {len(seq)} AAs")
             else:
                 fail_count += 1
-                LOGGER.warning(f"[{idx}/{total_targets}] Could not fetch {acc} from live UniProt.")
+                print(f"[{idx}/{total_targets}] Target {acc} left unmapped (no reviewed human match).")
 
             if rate_limit_delay > 0:
                 time.sleep(rate_limit_delay)
 
         except Exception as err:
             fail_count += 1
-            LOGGER.error(f"[{idx}/{total_targets}] Error fetching {acc}: {err}")
+            print(f"[{idx}/{total_targets}] Error fetching {acc}: {err}")
 
     # 3. Export Consolidated Multi-FASTA file
     with open(master_fasta_path, "w", encoding="utf-8") as f:
         f.write("\n\n".join(master_fasta_entries) + "\n")
-    LOGGER.info(f"Wrote consolidated multi-FASTA: {master_fasta_path} ({len(master_fasta_entries)} sequences)")
+    print(f"Wrote consolidated multi-FASTA: {master_fasta_path} ({len(master_fasta_entries)} sequences)")
 
     # 4. Export JSON Key-Value Lookup
     json_path = out_dir / "target_sequences.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(catalog, f, indent=2)
-    LOGGER.info(f"Wrote JSON sequence lookup: {json_path} ({len(catalog)} sequences)")
+    print(f"Wrote JSON sequence lookup: {json_path} ({len(catalog)} sequences)")
 
     # 5. Export Metadata Catalog Table
     df_meta = pd.DataFrame(metadata_rows)
@@ -412,7 +420,7 @@ def pull_realtime_uniprot_dataset(
     df_meta = df_meta.drop_duplicates(subset=["uniprot_id"]).reset_index(drop=True)
     meta_csv_path = out_dir / "uniprot_targets_metadata.csv"
     df_meta.to_csv(meta_csv_path, index=False)
-    LOGGER.info(f"Wrote metadata catalog: {meta_csv_path} ({len(df_meta)} records)")
+    print(f"Wrote metadata catalog: {meta_csv_path} ({len(df_meta)} records)")
 
     # 6. Export Cryptographic Manifest
     manifest = {
@@ -432,10 +440,10 @@ def pull_realtime_uniprot_dataset(
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
-    LOGGER.info(f"Wrote audit manifest: {manifest_path}")
-    LOGGER.info("=" * 80)
-    LOGGER.info(f"✅ UNIPROT INGESTION COMPLETE: {len(catalog)} real-time protein sequences stored in Google Drive.")
-    LOGGER.info("=" * 80)
+    print(f"Wrote audit manifest: {manifest_path}")
+    print("=" * 80)
+    print(f"✅ UNIPROT INGESTION COMPLETE: {len(catalog)} real-time protein sequences stored in Google Drive.")
+    print("=" * 80)
 
     return manifest
 
