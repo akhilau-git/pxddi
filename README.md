@@ -136,11 +136,11 @@ Colab-compatible non-PyTorch packages from `requirements_colab.txt`, set
 `PXDDI_DATA_BASE` to the Drive data directory when needed, and run
 `src/training/train_full_pipeline_v2.py`. ChemBERTa remains disabled.
 
-`requirements_colab.txt` fixes `torch-geometric` at version 2.7.0, the version
-used by the reviewed candidate run. If a Colab runtime previously imported a
+`requirements_colab.txt` fixes `torch-geometric` at version 2.8.0.post1 for
+current Colab Python/PyTorch runtimes. If a Colab runtime previously imported a
 different PyG version or reports a circular-import error, restart the runtime
-after installing the requirements before starting training. The run manifest
-records the resolved package versions, so the installed environment remains
+after force-reinstalling PyG before starting training. The run manifest records
+the resolved package versions, so the installed environment remains
 auditable.
 
 Google Drive shortcuts may be read-only even when the source data inside them

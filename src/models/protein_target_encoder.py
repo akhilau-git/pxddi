@@ -35,6 +35,10 @@ class ProteinTargetSequenceEncoder(nn.Module):
         self.use_esm = use_esm
         self.esm_model = None
         self.esm_tokenizer = None
+        # ESM-2 is frozen in this project.  Cache only its pooled backbone
+        # output, not the trainable projection, so repeated drug sequences do
+        # not trigger a transformer forward pass for every DDI pair batch.
+        self._esm_backbone_cache: dict[str, torch.Tensor] = {}
 
         if use_esm:
             try:
@@ -44,6 +48,7 @@ class ProteinTargetSequenceEncoder(nn.Module):
                 # Freeze ESM-2 backbone to prevent catastrophic forgetting
                 for param in self.esm_model.parameters():
                     param.requires_grad = False
+                self.esm_model.eval()
                 embedding_dim = self.esm_model.config.hidden_size
             except Exception:
                 self.esm_model = None
@@ -80,6 +85,65 @@ class ProteinTargetSequenceEncoder(nn.Module):
             tensor = tensor.to(device)
         return tensor
 
+    def _esm_pool_sequences(
+        self,
+        sequences: list[str],
+        *,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Return frozen ESM backbone embeddings for a non-empty sequence batch."""
+        if self.esm_model is None or self.esm_tokenizer is None:
+            raise RuntimeError('ESM pooling requested before ESM-2 was loaded.')
+        # Calling parent_model.train() recursively changes child modules to
+        # train mode.  Frozen ESM must remain deterministic and dropout-free.
+        self.esm_model.eval()
+        inputs = self.esm_tokenizer(
+            sequences,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=1024,
+        ).to(device)
+        with torch.no_grad():
+            outputs = self.esm_model(**inputs)
+            attention_mask = inputs["attention_mask"].unsqueeze(-1)
+            token_embeddings = outputs.last_hidden_state
+            return (
+                (token_embeddings * attention_mask).sum(dim=1)
+                / attention_mask.sum(dim=1).clamp(min=1e-9)
+            )
+
+    def precompute_esm_backbone_embeddings(
+        self,
+        sequences: list[str],
+        *,
+        batch_size: int = 32,
+        device: torch.device | None = None,
+    ) -> int:
+        """Cache unique frozen ESM embeddings and return newly cached count.
+
+        The cache is intentionally not part of the checkpoint: it is a runtime
+        acceleration for a fixed input catalogue, while the projection head
+        remains trainable and is always applied at forward time.
+        """
+        if not self.use_esm or self.esm_model is None or self.esm_tokenizer is None:
+            return 0
+        if batch_size < 1:
+            raise ValueError('batch_size must be positive.')
+        if device is None:
+            device = next(self.parameters()).device
+        missing = list(dict.fromkeys(
+            sequence.strip() for sequence in sequences
+            if isinstance(sequence, str) and sequence.strip()
+            and sequence.strip() not in self._esm_backbone_cache
+        ))
+        for start in range(0, len(missing), batch_size):
+            batch = missing[start:start + batch_size]
+            pooled = self._esm_pool_sequences(batch, device=device)
+            for sequence, embedding in zip(batch, pooled):
+                self._esm_backbone_cache[sequence] = embedding.detach().cpu()
+        return len(missing)
+
     def forward(self, sequences: list[str], device: torch.device | None = None) -> torch.Tensor:
         """Encode a batch of amino acid sequences into output representations.
 
@@ -97,19 +161,21 @@ class ProteinTargetSequenceEncoder(nn.Module):
             device = next(self.parameters()).device
 
         if self.use_esm and self.esm_model is not None and self.esm_tokenizer is not None:
-            inputs = self.esm_tokenizer(
-                sequences,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=1024,
-            ).to(device)
-            with torch.no_grad():
-                outputs = self.esm_model(**inputs)
-                # Mean pool over sequence length excluding padding
-                attention_mask = inputs["attention_mask"].unsqueeze(-1)
-                token_embeddings = outputs.last_hidden_state
-                pooled = (token_embeddings * attention_mask).sum(dim=1) / attention_mask.sum(dim=1).clamp(min=1e-9)
+            normalized = [sequence.strip() if isinstance(sequence, str) else '' for sequence in sequences]
+            uncached = list(dict.fromkeys(
+                sequence for sequence in normalized
+                if sequence and sequence not in self._esm_backbone_cache
+            ))
+            # A caller may use arbitrary inference sequences; populate missing
+            # entries safely, while the benchmark pre-warms all known sequences.
+            if uncached:
+                self.precompute_esm_backbone_embeddings(uncached, device=device)
+            hidden_size = int(self.esm_model.config.hidden_size)
+            pooled = torch.stack([
+                self._esm_backbone_cache[sequence].to(device)
+                if sequence else torch.zeros(hidden_size, device=device)
+                for sequence in normalized
+            ])
         else:
             # Fallback 1D CNN over amino-acid embeddings
             tokens = self._tokenize_sequences(sequences, max_len=512, device=device)

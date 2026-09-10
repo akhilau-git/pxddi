@@ -1,5 +1,6 @@
 import pytest
 import torch
+import torch.nn as nn
 
 from src.models.protein_target_encoder import ProteinTargetSequenceEncoder
 
@@ -27,6 +28,31 @@ def test_protein_target_sequence_encoder_forward():
     # Verify invariance to sequence length
     single_out = encoder([cyp3a4_seq])
     assert single_out.shape == (1, 64)
+
+
+def test_frozen_esm_cache_reuses_backbone_embeddings_without_a_second_forward():
+    """A cached ESM catalogue must bypass the costly transformer call per batch."""
+    encoder = ProteinTargetSequenceEncoder(output_dim=8, use_esm=False)
+
+    class NeverCalledESM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = type("Config", (), {"hidden_size": 320})()
+
+        def forward(self, **_kwargs):
+            raise AssertionError("cached ESM sequence unexpectedly ran the backbone")
+
+    seq_a, seq_b = "MPEPTIDE", "MSEQUENCE"
+    encoder.use_esm = True
+    encoder.esm_model = NeverCalledESM()
+    encoder.esm_tokenizer = object()
+    encoder._esm_backbone_cache = {
+        seq_a: torch.ones(320),
+        seq_b: torch.zeros(320),
+    }
+
+    output = encoder([seq_a, seq_b])
+    assert output.shape == (2, 8)
 
 
 def test_sequence_target_attention_cross_modal_regression():

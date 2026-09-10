@@ -356,6 +356,21 @@ def run_cold_target_study(
                 "dependencies (including transformers) and ensure the model download is available, "
                 "or set use_esm=False to benchmark the learned residue-CNN explicitly."
             )
+        if model.protein_sequence_encoder is not None and model.protein_sequence_encoder.use_esm:
+            sequence_cache_batch_size = int(kwargs.get("esm_cache_batch_size", 32))
+            if sequence_cache_batch_size < 1:
+                raise ValueError("esm_cache_batch_size must be positive.")
+            all_sequences = list(getattr(cache, "target_sequences", {}).values())
+            started_cache = time.time()
+            newly_cached = model.protein_sequence_encoder.precompute_esm_backbone_embeddings(
+                all_sequences,
+                batch_size=sequence_cache_batch_size,
+                device=device,
+            )
+            print(
+                f"Cached {newly_cached} unique frozen ESM-2 sequence embeddings in "
+                f"{time.time() - started_cache:.1f}s; training will reuse them."
+            )
 
         criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], device=device))
         optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
@@ -404,8 +419,14 @@ def run_cold_target_study(
         s1_probs[model_name] = s1_p
         s1_labels = s1_y
 
-        # Evaluate on Cold-Target Cohort
-        ct_m, ct_p, ct_y = evaluate_loader_predictions(model, cold_target_loader, device, threshold=best_thresh)
+        # When every S1 pair has sequence coverage, avoid evaluating the exact
+        # same cohort twice and label the result honestly in exported artifacts.
+        if cold_target_equals_s1:
+            ct_m, ct_p, ct_y = s1_m, s1_p, s1_y
+        else:
+            ct_m, ct_p, ct_y = evaluate_loader_predictions(
+                model, cold_target_loader, device, threshold=best_thresh
+            )
         cold_target_probs[model_name] = ct_p
         cold_target_labels = ct_y
 
