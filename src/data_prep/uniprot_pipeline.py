@@ -130,6 +130,8 @@ CANONICAL_TARGET_TO_UNIPROT: dict[str, str] = {
     'C5ORF56': 'P15311',
     'CARINH': 'P15311',
     'IRF1-AS1': 'P15311',
+    'UGT1A': 'P22309',
+    'VENTXP7': 'O95231',
     'SNORA59B': 'Q96FL8',
     'SNORD68': 'O15360',
     # MicroRNAs to primary validated pharmacological targets
