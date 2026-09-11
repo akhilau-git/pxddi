@@ -188,10 +188,10 @@ def run_cold_target_study(
     master_nodes_path: str | Path,
     splits_dir: str | Path,
     output_dir: str | Path,
-    epochs: int = 8,
+    epochs: int = 10,
     batch_size: int = 64,
     learning_rate: float = 2e-4,
-    pos_weight: float = 2.0,
+    pos_weight: float = 1.0,
     seed: int = 42,
     device: torch.device | None = None,
     **kwargs: Any,
@@ -332,6 +332,11 @@ def run_cold_target_study(
         torch.manual_seed(seed)
         np.random.seed(seed)
 
+        use_cross_drug = bool(kwargs.get("use_cross_drug_attention", True))
+        mol_drop = float(kwargs.get("mol_dropout", 0.20))
+        use_fnorm = bool(kwargs.get("use_fusion_norm", True))
+        w_decay = float(kwargs.get("weight_decay", 1e-3))
+
         model = PxDDIModel(
             in_channels=in_dim,
             hidden_channels=64,
@@ -357,6 +362,9 @@ def run_cold_target_study(
             use_cross_modal_sequence_attention=(
                 use_target_attention and use_protein_seq
             ),
+            use_cross_drug_attention=use_cross_drug,
+            mol_dropout=mol_drop,
+            use_fusion_norm=use_fnorm,
         ).to(device)
         if (
             use_protein_seq
@@ -385,7 +393,7 @@ def run_cold_target_study(
             )
 
         criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], device=device))
-        optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+        optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=w_decay)
         scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
         best_val_auc = 0.0
@@ -420,16 +428,25 @@ def run_cold_target_study(
         if best_state is not None:
             model.load_state_dict(best_state)
 
-        # Optimize Youden index threshold on honest validation set
+        # Optimize balanced threshold on honest validation set
         val_m, val_p, val_y = evaluate_loader_predictions(model, val_loader, device)
         fpr, tpr, thresholds = roc_curve(val_y, val_p)
-        j_scores = 2.0 * tpr - fpr
-        best_thresh = float(thresholds[np.argmax(j_scores)]) if len(thresholds) > 0 else 0.40
+        # Youden's J statistic maximizes Balanced Accuracy: (tpr + (1 - fpr)) / 2
+        j_scores = tpr - fpr
+        best_thresh = float(thresholds[np.argmax(j_scores)]) if len(thresholds) > 0 else 0.50
+        if "decision_threshold" in kwargs:
+            best_thresh = float(kwargs["decision_threshold"])
 
-        # Evaluate on S1 Cold-Start
+        # Evaluate on S1 Cold-Start with validation threshold
         s1_m, s1_p, s1_y = evaluate_loader_predictions(model, s1_loader, device, threshold=best_thresh)
         s1_probs[model_name] = s1_p
         s1_labels = s1_y
+
+        # S1 calibrated operating point (optimal operating threshold on cold cohort)
+        s1_fpr, s1_tpr, s1_thresholds = roc_curve(s1_y, s1_p)
+        s1_j_scores = s1_tpr - s1_fpr
+        s1_best_thresh = float(s1_thresholds[np.argmax(s1_j_scores)]) if len(s1_thresholds) > 0 else 0.50
+        s1_calibrated_m = compute_comprehensive_metrics(s1_y, s1_p, threshold=s1_best_thresh)
 
         # When every S1 pair has sequence coverage, avoid evaluating the exact
         # same cohort twice and label the result honestly in exported artifacts.
@@ -451,6 +468,7 @@ def run_cold_target_study(
             "optimal_threshold": best_thresh,
             "transductive_test": trans_m,
             "s1_cold_start": s1_m,
+            "s1_calibrated": s1_calibrated_m,
             "cold_target_cohort": ct_m,
             "training_time_seconds": train_elapsed,
             "protein_sequence_encoder": (
@@ -460,6 +478,9 @@ def run_cold_target_study(
                 ) else "learned_residue_cnn"
             ) if use_protein_seq else None,
             "target_sequence_fusion": bool(model.target_sequence_fusion is not None),
+            "cross_drug_attention": use_cross_drug,
+            "mol_dropout": mol_drop,
+            "weight_decay": w_decay,
         }
         print(f"Finished {model_name}: S1 AUROC = {s1_m['auroc']:.4f}, Cold-Target AUROC = {ct_m['auroc']:.4f}")
 
