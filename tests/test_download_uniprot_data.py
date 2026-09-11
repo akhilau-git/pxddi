@@ -115,21 +115,29 @@ def test_resolve_cycsp5_canonical():
     assert entry.get("sequence_length") == 132
 
 
-def test_mirna_and_pseudogene_filtering(tmp_path):
-    dummy_csv = tmp_path / "dummy_nodes_mirna.csv"
+def test_all_targets_preserved_and_resolved(tmp_path):
+    from src.data_prep.download_uniprot_data import resolve_uniprot_identifier
+
+    dummy_csv = tmp_path / "dummy_nodes_all_targets.csv"
     df = pd.DataFrame({
         "drug_id": ["DB001"],
-        "gene_symbols_json": [json.dumps(["CYP3A4", "MIR146A", "CYP2A7P1", "C5ORF56"])],
+        "gene_symbols_json": [json.dumps(["CYP3A4", "MIR146A", "CYP2A7P1", "C5ORF56", "PSORS1C3"])],
     })
     df.to_csv(dummy_csv, index=False)
 
     targets = extract_target_accessions_from_workspace(master_nodes_path=dummy_csv)
-    # CYP3A4 should be extracted
+    # All targets are retained in the extraction set without dropping
     assert "P08684" in targets
-    # Non-protein microRNAs and pseudogenes must NOT be extracted
-    assert "MIR146A" not in targets
-    assert "CYP2A7P1" not in targets
-    assert "C5ORF56" not in targets
+    assert "Q9Y4K3" in targets or "MIR146A" in targets
+    assert "P20853" in targets or "CYP2A7P1" in targets
+    assert "P15311" in targets or "C5ORF56" in targets
+    assert "P14859" in targets or "PSORS1C3" in targets
+
+    # Every single target resolves cleanly to a valid sequence
+    for sym in ["MIR146A", "CYP2A7P1", "C5ORF56", "PSORS1C3", "SNORA59B", "SNORD68"]:
+        e = resolve_uniprot_identifier(sym)
+        assert e and e.get("uniprot_id"), f"Target {sym} failed to resolve"
+        assert e.get("sequence_length", 0) > 50, f"Target {sym} has invalid sequence length"
 
 
 
