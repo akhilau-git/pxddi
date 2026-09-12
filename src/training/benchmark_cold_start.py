@@ -314,7 +314,7 @@ def evaluate_loader(
         'auprc': auprc,
         'accuracy': float(accuracy_score(targets, preds)),
         'f1': float(f1_score(targets, preds, zero_division=0)),
-        'mcc': float(matthews_corrcoef(targets, preds)),
+        'mcc': matthews_corrcoef(targets, preds),
         'brier': brier,
         'recall': recall,
         'sensitivity': sensitivity,

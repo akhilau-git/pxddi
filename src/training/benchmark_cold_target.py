@@ -314,8 +314,8 @@ def run_cold_target_study(
 
     results: dict[str, Any] = {
         "cohort_definition": {
-            "s1_pair_count": int(len(df_s1)),
-            "cold_target_pair_count": int(len(df_cold_target)),
+            "s1_pair_count": len(df_s1),
+            "cold_target_pair_count": len(df_cold_target),
             "cold_target_equals_s1": cold_target_equals_s1,
             "interpretation": (
                 "The Cold-Target cohort equals S1 because every S1 pair has a sequence annotation. "
@@ -489,7 +489,8 @@ def run_cold_target_study(
                     and model.protein_sequence_encoder.use_esm
                 ) else "learned_residue_cnn"
             ) if use_protein_seq else None,
-            "target_sequence_fusion": bool(model.target_sequence_fusion is not None),
+            "target_sequence_fusion": model.target_sequence_fusion is not None,
+            "biophysical_features": getattr(model, "use_biophysical_features", False),
             "cross_drug_attention": use_cross_drug,
             "mol_dropout": mol_drop,
             "weight_decay": w_decay,
@@ -531,13 +532,28 @@ def run_cold_target_study(
             seed=seed,
         )
 
+    if "auditddi_biophysical_fusion" in cold_target_probs:
+        results["cold_target_biophysical_statistical_comparison"] = paired_bootstrap_comparison(
+            cold_target_labels,
+            cold_target_probs["multimodal_without_seq"],
+            cold_target_probs["auditddi_biophysical_fusion"],
+            seed=seed,
+        )
+        results["s1_biophysical_statistical_comparison"] = paired_bootstrap_comparison(
+            s1_labels,
+            s1_probs["multimodal_without_seq"],
+            s1_probs["auditddi_biophysical_fusion"],
+            seed=seed,
+        )
+
     # Export JSON
     with open(out_p / "cold_target_benchmark_results.json", "w") as f:
         json.dump(results, f, indent=2)
 
     # Export CSV summary
     rows = []
-    for m_name, _, _ in configs:
+    for config in configs:
+        m_name = config[0]
         ct_data = results[m_name]["cold_target_cohort"]
         s1_data = results[m_name]["s1_cold_start"]
         rows.append({
@@ -552,6 +568,7 @@ def run_cold_target_study(
             "ece": ct_data["ece"],
             "protein_sequence_encoder": results[m_name]["protein_sequence_encoder"],
             "target_sequence_fusion": results[m_name]["target_sequence_fusion"],
+            "biophysical_features": results[m_name].get("biophysical_features", False),
         })
     df_res = pd.DataFrame(rows)
     df_res.to_csv(out_p / "cold_target_benchmark_summary.csv", index=False)
@@ -561,13 +578,15 @@ def run_cold_target_study(
         "multimodal_without_seq": "Multimodal Baseline",
         "auditddi_protein_seq": "Protein Sequence Only",
         "auditddi_target_seq_fusion": "BindingDB + Protein Sequence Fusion",
+        "auditddi_biophysical_fusion": "Full Biophysical + Sequence Fusion",
     }
     report_rows = []
-    for model_name, _, _ in configs:
+    for config in configs:
+        model_name = config[0]
         ct_data = results[model_name]["cold_target_cohort"]
         s1_data = results[model_name]["s1_cold_start"]
         report_rows.append(
-            f"| **{display_names[model_name]}** | {ct_data['auroc']:.4f} | "
+            f"| **{display_names.get(model_name, model_name)}** | {ct_data['auroc']:.4f} | "
             f"{ct_data['auprc']:.4f} | {ct_data['sensitivity'] * 100:.1f}% | "
             f"{s1_data['auroc']:.4f} | {s1_data['auprc']:.4f} | "
             f"{s1_data['sensitivity'] * 100:.1f}% | {ct_data['brier_score']:.4f} |"
@@ -596,6 +615,17 @@ def run_cold_target_study(
             comparison_section(
                 "Target-sequence fusion vs baseline on S1",
                 results["s1_fusion_statistical_comparison"],
+            ),
+        ])
+    if "cold_target_biophysical_statistical_comparison" in results:
+        comparison_sections.extend([
+            comparison_section(
+                "Full Biophysical fusion vs baseline on Cold-Target cohort",
+                results["cold_target_biophysical_statistical_comparison"],
+            ),
+            comparison_section(
+                "Full Biophysical fusion vs baseline on S1",
+                results["s1_biophysical_statistical_comparison"],
             ),
         ])
 
