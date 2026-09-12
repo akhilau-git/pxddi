@@ -228,6 +228,7 @@ def run_cold_target_study(
     device: torch.device | None = None,
     models: list[str] | None = None,
     resume: bool = True,
+    force_retrain: bool = False,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Execute complete cold-target / protein sequence benchmark comparing Baseline vs Protein Sequence Enhanced."""
@@ -386,7 +387,7 @@ def run_cold_target_study(
         ckpt_file = out_p / f"checkpoint_{model_name}.pt"
 
         # 1. Check if checkpoint exists and resume is enabled
-        if resume and ckpt_file.is_file():
+        if resume and not force_retrain and ckpt_file.is_file():
             print(f"\nReusing saved checkpoint for {model_name} from: {ckpt_file}")
             try:
                 try:
@@ -783,6 +784,8 @@ if __name__ == "__main__":
     parser.add_argument("--include_biophysical", action="store_true", default=True, help="Include auditddi_biophysical_fusion")
     parser.add_argument("--models", nargs="+", default=None, help="Specific models to run (e.g. auditddi_target_seq_fusion auditddi_biophysical_fusion)")
     parser.add_argument("--resume", action="store_true", default=True, help="Resume execution from existing checkpoints in output_dir")
+    parser.add_argument("--force_retrain", action="store_true", default=False, help="Force retraining of models even if a checkpoint exists")
+    parser.add_argument("--no_resume", dest="resume", action="store_false", help="Disable checkpoint resumption")
     args = parser.parse_args()
 
     data_p = Path(args.data_dir)
@@ -861,4 +864,5 @@ if __name__ == "__main__":
         eval_every=args.eval_every,
         models=args.models,
         resume=args.resume,
+        force_retrain=args.force_retrain,
     )
