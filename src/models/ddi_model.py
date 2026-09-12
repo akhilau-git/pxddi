@@ -430,7 +430,8 @@ class PxDDIModel(nn.Module):
         else:
             self.biophysical_encoder = None
             self.biophysical_gate = None
-        biophysical_channels = (self.biophysical_hidden_channels * 2) if self.biophysical_encoder is not None else 0
+        # 2 * hidden_channels (sum + diff) + 10 explicit pairwise interaction collision terms
+        biophysical_channels = (self.biophysical_hidden_channels * 2 + 10) if self.biophysical_encoder is not None else 0
 
         risk_input_channels = pair_embedding_channels * pair_feature_multiplier + (
             2 if use_toxicity_pair_features else 0
@@ -920,6 +921,32 @@ class PxDDIModel(nn.Module):
             if biophysical_a is not None and biophysical_b is not None:
                 b_a = biophysical_a.float().view(ea.size(0), -1)
                 b_b = biophysical_b.float().view(eb.size(0), -1)
+
+                # Explicit first-principles pharmacokinetic clearance collision terms:
+                # 1. CYP450 5-enzyme pairwise cross-product collision (CYP3A4, CYP2D6, CYP2C9, CYP1A2, CYP2C19)
+                cyp_collision = b_a[:, :5] * b_b[:, :5]
+                # 2. Total metabolic clearance clash sum
+                total_cyp_clash = torch.sum(cyp_collision, dim=1, keepdim=True)
+                # 3. Plasma protein binding mutual displacement risk: |fu_a - fu_b| * (1 - fu_a) * (1 - fu_b)
+                fu_a = b_a[:, 11:12]
+                fu_b = b_b[:, 11:12]
+                ppb_displacement = torch.abs(fu_a - fu_b) * (1.0 - fu_a) * (1.0 - fu_b)
+                # 4. Molecular weight ratio
+                mw_ratio = torch.min(b_a[:, 5:6], b_b[:, 5:6]) / (torch.max(b_a[:, 5:6], b_b[:, 5:6]) + 1e-4)
+                # 5. Lipophilicity delta
+                logp_diff = torch.abs(b_a[:, 6:7] - b_b[:, 6:7])
+                # 6. Polar surface area overlap ratio
+                tpsa_overlap = torch.min(b_a[:, 7:8], b_b[:, 7:8]) / (torch.max(b_a[:, 7:8], b_b[:, 7:8]) + 1e-4)
+
+                pair_collision_terms = torch.cat([
+                    cyp_collision,      # 5 dims
+                    total_cyp_clash,    # 1 dim
+                    ppb_displacement,   # 1 dim
+                    mw_ratio,           # 1 dim
+                    logp_diff,          # 1 dim
+                    tpsa_overlap,       # 1 dim
+                ], dim=1)  # 10 explicit pairwise collision features
+
                 if self.biophysical_encoder is not None and self.biophysical_gate is not None:
                     b_enc_a = self.biophysical_encoder(b_a)
                     b_enc_b = self.biophysical_encoder(b_b)
@@ -927,11 +954,11 @@ class PxDDIModel(nn.Module):
                     bb_g = self.biophysical_gate(b_enc_b)
                     b_rep_a = ba_g * b_enc_a
                     b_rep_b = bb_g * b_enc_b
-                    features.append(torch.cat([b_rep_a + b_rep_b, torch.abs(b_rep_a - b_rep_b)], dim=1))
+                    features.append(torch.cat([b_rep_a + b_rep_b, torch.abs(b_rep_a - b_rep_b), pair_collision_terms], dim=1))
                 else:
-                    features.append(torch.cat([b_a + b_b, torch.abs(b_a - b_b)], dim=1))
+                    features.append(torch.cat([b_a + b_b, torch.abs(b_a - b_b), pair_collision_terms], dim=1))
             else:
-                bio_dim_count = (self.biophysical_hidden_channels * 2) if self.biophysical_encoder is not None else 12
+                bio_dim_count = (self.biophysical_hidden_channels * 2 + 10) if self.biophysical_encoder is not None else 22
                 features.append(torch.zeros((ea.size(0), bio_dim_count), device=ea.device, dtype=ea.dtype))
 
         combined = torch.cat(features, dim=1)

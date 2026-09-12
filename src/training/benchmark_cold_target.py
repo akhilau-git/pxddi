@@ -443,6 +443,7 @@ def run_cold_target_study(
             use_esm=use_protein_seq and use_esm,
             use_target_sequence_fusion=use_target_sequence_fusion,
             use_biophysical_features=use_biophysical,
+            use_inductive_bio_features=use_biophysical or kwargs.get("use_inductive_bio_features", False),
             use_pdb_encoder=True,
             pdb_feature_dim=cache.pdb_dim,
             pdb_hidden_channels=64,
