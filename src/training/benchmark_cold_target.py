@@ -407,8 +407,9 @@ def extract_inductive_pair_features(
                 if has_a and has_b:
                     s_emb_a = seq_encoder(target_seq_a, device=device)
                     s_emb_b = seq_encoder(target_seq_b, device=device)
-                    cos_sim = F.cosine_similarity(s_emb_a, s_emb_b, dim=-1).clamp(-1.0, 1.0)
-                    seq_sim = cos_sim.cpu().numpy().reshape(batch_sz, 1)
+                    if isinstance(s_emb_a, torch.Tensor) and isinstance(s_emb_b, torch.Tensor):
+                        cos_sim = F.cosine_similarity(s_emb_a, s_emb_b, dim=-1).clamp(-1.0, 1.0)
+                        seq_sim = cos_sim.cpu().numpy().reshape(batch_sz, 1)
 
             # 4. Fingerprint similarity (Cosine + Tanimoto)
             fp_a = batch.get("fp_a")
