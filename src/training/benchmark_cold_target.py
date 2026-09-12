@@ -1424,6 +1424,24 @@ def run_cold_target_study(
                 break
         tree_model_name = "auditddi_inductive_hybrid" if "auditddi_inductive_hybrid" in s1_probs else None
 
+        # If not present in memory, load tree model predictions from checkpoint
+        if tree_model_name is None:
+            t_p = out_p / "checkpoint_auditddi_inductive_hybrid.pt"
+            if t_p.is_file():
+                try:
+                    t_data = torch.load(t_p, map_location="cpu", weights_only=False)
+                    s1_probs["auditddi_inductive_hybrid"] = t_data["s1_probs"]
+                    cold_target_probs["auditddi_inductive_hybrid"] = t_data["cold_target_probs"]
+                    if "s2_probs" in t_data and t_data["s2_probs"] is not None:
+                        s2_probs["auditddi_inductive_hybrid"] = t_data["s2_probs"]
+                    if "val_probs" in t_data and t_data["val_probs"] is not None:
+                        val_probs["auditddi_inductive_hybrid"] = t_data["val_probs"]
+                    if "trans_probs" in t_data and t_data["trans_probs"] is not None:
+                        trans_probs["auditddi_inductive_hybrid"] = t_data["trans_probs"]
+                    tree_model_name = "auditddi_inductive_hybrid"
+                except Exception:
+                    pass
+
         # If not present in memory, load from checkpoints
         for c_name in ["auditddi_regularized_fusion", "auditddi_protein_seq", "auditddi_biophysical_fusion", "auditddi_target_seq_fusion"]:
             if c_name not in s1_probs:
