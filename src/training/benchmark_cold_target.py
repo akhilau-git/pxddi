@@ -15,8 +15,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 import time
 from typing import Any
+
+# Ensure repository root is on sys.path when run directly as a script
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np
 import pandas as pd
@@ -611,3 +617,53 @@ This study compares the standard BindingDB target-profile model, a sequence-only
 
     print(f"\nCold-Target benchmark artifacts generated in: {out_p}")
     return results
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Cold-Target / Protein Sequence Generalization Benchmark Study")
+    parser.add_argument("--data_dir", type=str, default="data", help="Path to pxddi-data directory or data folder")
+    parser.add_argument("--master_nodes", type=str, default=None, help="Path to master nodes CSV")
+    parser.add_argument("--splits_dir", type=str, default=None, help="Path to benchmark splits directory")
+    parser.add_argument("--output_dir", type=str, default="benchmark_cold_target_results", help="Output directory")
+    parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size")
+    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    parser.add_argument("--eval_every", type=int, default=1, help="Evaluation interval")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--include_biophysical", action="store_true", default=True, help="Include auditddi_biophysical_fusion")
+    args = parser.parse_args()
+
+    data_p = Path(args.data_dir)
+    if args.master_nodes:
+        master_nodes_p = Path(args.master_nodes)
+    elif (data_p / "master_nodes_enriched.csv").is_file():
+        master_nodes_p = data_p / "master_nodes_enriched.csv"
+    elif (data_p / "master_nodes.csv").is_file():
+        master_nodes_p = data_p / "master_nodes.csv"
+    elif (Path("data") / "master_nodes.csv").is_file():
+        master_nodes_p = Path("data") / "master_nodes.csv"
+    else:
+        matches = list(data_p.glob("*master_nodes*.csv"))
+        master_nodes_p = matches[0] if matches else data_p / "master_nodes.csv"
+
+    if args.splits_dir:
+        splits_p = Path(args.splits_dir)
+    elif (data_p / "splits").is_dir():
+        splits_p = data_p / "splits"
+    elif (data_p / "benchmark_splits").is_dir():
+        splits_p = data_p / "benchmark_splits"
+    else:
+        splits_p = data_p / "splits"
+
+    run_cold_target_study(
+        master_nodes_path=master_nodes_p,
+        splits_dir=splits_p,
+        output_dir=args.output_dir,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.lr,
+        seed=args.seed,
+        include_biophysical=args.include_biophysical,
+        eval_every=args.eval_every,
+    )
