@@ -389,7 +389,10 @@ def run_cold_target_study(
         if resume and ckpt_file.is_file():
             print(f"\nReusing saved checkpoint for {model_name} from: {ckpt_file}")
             try:
-                ckpt_payload = torch.load(ckpt_file, map_location="cpu")
+                try:
+                    ckpt_payload = torch.load(ckpt_file, map_location="cpu", weights_only=False)
+                except TypeError:
+                    ckpt_payload = torch.load(ckpt_file, map_location="cpu")
                 results[model_name] = ckpt_payload["metrics"]
                 s1_probs[model_name] = ckpt_payload["s1_probs"]
                 s1_labels = ckpt_payload["s1_labels"]
