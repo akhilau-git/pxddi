@@ -361,7 +361,7 @@ def run_cold_target_study(
     if include_target_sequence_fusion:
         configs.append(("auditddi_target_seq_fusion", True, True, False))
     if include_biophysical:
-        configs.append(("auditddi_biophysical_fusion", True, True, True))
+        configs.append(("auditddi_biophysical_fusion", True, False, True))
 
     results: dict[str, Any] = {
         "cohort_definition": {
@@ -447,7 +447,7 @@ def run_cold_target_study(
             use_esm=use_protein_seq and use_esm,
             use_target_sequence_fusion=use_target_sequence_fusion,
             use_biophysical_features=use_biophysical,
-            use_inductive_bio_features=use_biophysical or kwargs.get("use_inductive_bio_features", False),
+            use_inductive_bio_features=bool(kwargs.get("use_inductive_bio_features", False)),
             use_pdb_encoder=True,
             pdb_feature_dim=cache.pdb_dim,
             pdb_hidden_channels=64,

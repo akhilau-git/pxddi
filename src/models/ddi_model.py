@@ -430,8 +430,8 @@ class PxDDIModel(nn.Module):
         else:
             self.biophysical_encoder = None
             self.biophysical_gate = None
-        # 2 * hidden_channels (sum + diff) + 10 explicit pairwise interaction collision terms
-        biophysical_channels = (self.biophysical_hidden_channels * 2 + 10) if self.biophysical_encoder is not None else 0
+        # 2 * hidden_channels (sum + diff) + 11 explicit pairwise interaction collision terms
+        biophysical_channels = (self.biophysical_hidden_channels * 2 + 11) if self.biophysical_encoder is not None else 0
 
         risk_input_channels = pair_embedding_channels * pair_feature_multiplier + (
             2 if use_toxicity_pair_features else 0
@@ -929,25 +929,28 @@ class PxDDIModel(nn.Module):
                 cyp_collision = b_a[:, :5] * b_b[:, :5]
                 # 2. Total metabolic clearance clash sum
                 total_cyp_clash = torch.sum(cyp_collision, dim=1, keepdim=True)
-                # 3. Plasma protein binding mutual displacement risk: |fu_a - fu_b| * (1 - fu_a) * (1 - fu_b)
-                fu_a = b_a[:, 11:12]
-                fu_b = b_b[:, 11:12]
-                ppb_displacement = torch.abs(fu_a - fu_b) * (1.0 - fu_a) * (1.0 - fu_b)
-                # 4. Molecular weight ratio
-                mw_ratio = torch.min(b_a[:, 5:6], b_b[:, 5:6]) / (torch.max(b_a[:, 5:6], b_b[:, 5:6]) + 1e-4)
-                # 5. Lipophilicity delta
-                logp_diff = torch.abs(b_a[:, 6:7] - b_b[:, 6:7])
-                # 6. Polar surface area overlap ratio
-                tpsa_overlap = torch.min(b_a[:, 7:8], b_b[:, 7:8]) / (torch.max(b_a[:, 7:8], b_b[:, 7:8]) + 1e-4)
+                # 3. Plasma protein binding mutual competition risk: (1 - fu_a) * (1 - fu_b) (both low free fraction = high displacement)
+                fu_a = b_a[:, 6:7]
+                fu_b = b_b[:, 6:7]
+                ppb_displacement = (1.0 - fu_a) * (1.0 - fu_b)
+                # 4. Hepatic clearance co-dependence collision
+                hepatic_overlap = b_a[:, 11:12] * b_b[:, 11:12]
+                # 5. Molecular weight ratio
+                mw_ratio = torch.min(b_a[:, 9:10], b_b[:, 9:10]) / (torch.max(b_a[:, 9:10], b_b[:, 9:10]) + 1e-4)
+                # 6. Lipophilicity delta
+                logp_diff = torch.abs(b_a[:, 7:8] - b_b[:, 7:8])
+                # 7. Polar surface area overlap ratio
+                tpsa_overlap = torch.min(b_a[:, 8:9], b_b[:, 8:9]) / (torch.max(b_a[:, 8:9], b_b[:, 8:9]) + 1e-4)
 
                 pair_collision_terms = torch.cat([
-                    cyp_collision,      # 5 dims
-                    total_cyp_clash,    # 1 dim
-                    ppb_displacement,   # 1 dim
-                    mw_ratio,           # 1 dim
-                    logp_diff,          # 1 dim
-                    tpsa_overlap,       # 1 dim
-                ], dim=1)  # 10 explicit pairwise collision features
+                    cyp_collision,       # 5 dims
+                    total_cyp_clash,     # 1 dim
+                    ppb_displacement,    # 1 dim
+                    hepatic_overlap,     # 1 dim
+                    mw_ratio,            # 1 dim
+                    logp_diff,           # 1 dim
+                    tpsa_overlap,        # 1 dim
+                ], dim=1)  # 11 explicit pairwise collision features
 
                 if self.biophysical_encoder is not None and self.biophysical_gate is not None:
                     b_enc_a = self.biophysical_encoder(b_a)
@@ -960,7 +963,7 @@ class PxDDIModel(nn.Module):
                 else:
                     features.append(torch.cat([b_a + b_b, torch.abs(b_a - b_b), pair_collision_terms], dim=1))
             else:
-                bio_dim_count = (self.biophysical_hidden_channels * 2 + 10) if self.biophysical_encoder is not None else 22
+                bio_dim_count = (self.biophysical_hidden_channels * 2 + 11) if self.biophysical_encoder is not None else 35
                 features.append(torch.zeros((ea.size(0), bio_dim_count), device=ea.device, dtype=ea.dtype))
 
         combined = torch.cat(features, dim=1)
