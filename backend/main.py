@@ -1086,6 +1086,22 @@ def explain_ddi(req: DDIRequest):
     }
 
 
+@app.post('/api/audit/dossier')
+@app.post('/audit/dossier')
+def audit_dossier(req: DDIRequest):
+    """Generate complete biophysical, pharmacokinetic, and calibrated audit dossier."""
+    from evaluation.clinical_audit_report import generate_clinical_audit_report
+    try:
+        report = generate_clinical_audit_report(
+            drug_a_smiles=req.smiles_a,
+            drug_b_smiles=req.smiles_b,
+            model=model,
+        )
+        return report
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.get('/health')
 def health():
     bridge_error = readiness_error()

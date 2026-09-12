@@ -25,6 +25,7 @@ from torch_geometric.data import Batch, Data
 from torch.utils.data import DataLoader
 
 from .prepare_twosides import FEATURE_SCHEMA_RICH, smiles_to_graph
+from .biophysical_engine import compute_biophysical_vector, BIOPHYSICAL_DIM
 
 _MORGAN_GEN = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024, includeChirality=True)
 
@@ -50,6 +51,7 @@ class MolecularCache:
         self.pdb_vectors: dict[str, torch.Tensor] = {}
         self.pdb_masks: dict[str, torch.Tensor] = {}
         self.target_sequences: dict[str, str] = {}
+        self.biophysical_vectors: dict[str, torch.Tensor] = {}
 
     def register_drug(
         self,
@@ -101,7 +103,7 @@ class MolecularCache:
 
         # FAERS Clinical Toxicity Score
         if toxicity_score is not None and not pd.isna(toxicity_score):
-            self.toxicity_scalars[smiles] = torch.tensor(float(toxicity_score), dtype=torch.float32)
+            self.toxicity_scalars[smiles] = torch.tensor(toxicity_score, dtype=torch.float32)
             self.toxicity_masks[smiles] = torch.tensor(1.0, dtype=torch.float32)
         else:
             self.toxicity_scalars[smiles] = torch.tensor(0.0, dtype=torch.float32)
@@ -159,6 +161,10 @@ class MolecularCache:
         else:
             self.pdb_vectors[smiles] = torch.zeros(self.pdb_dim, dtype=torch.float32)
             self.pdb_masks[smiles] = torch.tensor(0.0, dtype=torch.float32)
+
+        # Biophysical Pharmacokinetic Vector (12-dim)
+        bio_vec = compute_biophysical_vector(smiles)
+        self.biophysical_vectors[smiles] = torch.from_numpy(bio_vec)
 
         return True
 
@@ -316,7 +322,8 @@ class MolecularCache:
             f"[Graphs: {len(self.graphs)}, ECFP: {len(self.fingerprints)}, "
             f"PharmGKB: {n_genes} (dim={self.gene_dim}), FAERS: {n_tox}, "
             f"BindingDB: {n_targets} (dim={self.target_dim}), GEO: {n_geo} (dim={self.geo_dim}), "
-            f"PDB: {n_pdb} (dim={self.pdb_dim}), UniProt: {n_seqs}]"
+            f"PDB: {n_pdb} (dim={self.pdb_dim}), UniProt: {n_seqs}, "
+            f"Biophysical: {len(self.biophysical_vectors)} (dim={BIOPHYSICAL_DIM})]"
         )
         return count
 
@@ -421,6 +428,8 @@ class CachedDDIPairDataset(Dataset):
             'pdb_mask_b': self.cache.pdb_masks.get(sb, torch.tensor(0.0, dtype=torch.float32)),
             'target_seq_a': self.cache.target_sequences.get(sa, ""),
             'target_seq_b': self.cache.target_sequences.get(sb, ""),
+            'biophysical_a': self.cache.biophysical_vectors.get(sa, torch.zeros(BIOPHYSICAL_DIM, dtype=torch.float32)),
+            'biophysical_b': self.cache.biophysical_vectors.get(sb, torch.zeros(BIOPHYSICAL_DIM, dtype=torch.float32)),
             'label': torch.tensor(lbl, dtype=torch.float32),
         }
         if self.memory_features and index < len(self.memory_features):
@@ -462,6 +471,8 @@ def multimodal_collate_fn(batch_items: list[dict[str, Any]]) -> dict[str, Any]:
         'pdb_b': torch.stack([item['pdb_b'] for item in batch_items]),
         'pdb_mask_a': torch.stack([item['pdb_mask_a'] for item in batch_items]),
         'pdb_mask_b': torch.stack([item['pdb_mask_b'] for item in batch_items]),
+        'biophysical_a': torch.stack([item['biophysical_a'] for item in batch_items]),
+        'biophysical_b': torch.stack([item['biophysical_b'] for item in batch_items]),
         'labels': torch.stack([item['label'] for item in batch_items]),
     }
     if 'memory_features' in batch_items[0]:

@@ -296,12 +296,15 @@ def run_cold_target_study(
             "target assignment, so ESM/S1 results would not be interpretable. Rebuild a verified "
             "master-node file with update_master_nodes_with_uniprot and use that file here."
         )
+    include_biophysical = bool(kwargs.pop("include_biophysical", kwargs.pop("use_biophysical", True)))
     configs = [
-        ("multimodal_without_seq", False, False),
-        ("auditddi_protein_seq", True, False),
+        ("multimodal_without_seq", False, False, False),
+        ("auditddi_protein_seq", True, False, False),
     ]
     if include_target_sequence_fusion:
-        configs.append(("auditddi_target_seq_fusion", True, True))
+        configs.append(("auditddi_target_seq_fusion", True, True, False))
+    if include_biophysical:
+        configs.append(("auditddi_biophysical_fusion", True, True, True))
 
     results: dict[str, Any] = {
         "cohort_definition": {
@@ -321,8 +324,10 @@ def run_cold_target_study(
     cold_target_probs: dict[str, np.ndarray] = {}
     cold_target_labels: np.ndarray | None = None
 
-    for model_name, use_protein_seq, use_target_sequence_fusion in configs:
-        if use_target_sequence_fusion:
+    for model_name, use_protein_seq, use_target_sequence_fusion, use_biophysical in configs:
+        if use_biophysical:
+            tag = "PROTEIN SEQUENCES + BINDINGDB + BIOPHYSICAL PK/CYP ENGINE"
+        elif use_target_sequence_fusion:
             tag = "BINDINGDB TARGET PROFILES + PROTEIN SEQUENCES"
         elif use_protein_seq:
             tag = "PROTEIN SEQUENCES ONLY"
@@ -352,6 +357,7 @@ def run_cold_target_study(
             use_protein_sequence_encoder=use_protein_seq,
             use_esm=use_protein_seq and use_esm,
             use_target_sequence_fusion=use_target_sequence_fusion,
+            use_biophysical_features=use_biophysical,
             use_pdb_encoder=True,
             pdb_feature_dim=cache.pdb_dim,
             pdb_hidden_channels=64,

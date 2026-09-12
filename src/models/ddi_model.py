@@ -413,6 +413,25 @@ class PxDDIModel(nn.Module):
         self.mol_dropout = float(kwargs.get('mol_dropout', 0.15))
         self.use_fusion_norm = bool(kwargs.get('use_fusion_norm', False))
 
+        self.use_biophysical_features = bool(kwargs.get('use_biophysical_features', kwargs.get('use_biophysical', False)))
+        self.biophysical_dim = int(kwargs.get('biophysical_dim', 12))
+        self.biophysical_hidden_channels = int(kwargs.get('biophysical_hidden_channels', 16))
+        if self.use_biophysical_features:
+            self.biophysical_encoder = nn.Sequential(
+                nn.Linear(self.biophysical_dim, self.biophysical_hidden_channels),
+                nn.LayerNorm(self.biophysical_hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(0.15),
+            )
+            self.biophysical_gate = nn.Sequential(
+                nn.Linear(self.biophysical_hidden_channels, 1),
+                nn.Sigmoid(),
+            )
+        else:
+            self.biophysical_encoder = None
+            self.biophysical_gate = None
+        biophysical_channels = (self.biophysical_hidden_channels * 2) if self.biophysical_encoder is not None else 0
+
         risk_input_channels = pair_embedding_channels * pair_feature_multiplier + (
             2 if use_toxicity_pair_features else 0
         ) + (
@@ -423,6 +442,8 @@ class PxDDIModel(nn.Module):
             geo_feature_channels
         ) + (
             inductive_channels
+        ) + (
+            biophysical_channels
         )
 
         if self.use_fusion_norm:
@@ -527,6 +548,8 @@ class PxDDIModel(nn.Module):
         pdb_b=None,
         pdb_mask_a=None,
         pdb_mask_b=None,
+        biophysical_a=None,
+        biophysical_b=None,
         **kwargs,
     ):
         cross_a: torch.Tensor | None = None
@@ -892,6 +915,24 @@ class PxDDIModel(nn.Module):
             inductive_feats.extend([g_ind, t_ind, p_ind])
 
             features.append(torch.cat(inductive_feats, dim=1))
+
+        if self.use_biophysical_features:
+            if biophysical_a is not None and biophysical_b is not None:
+                b_a = biophysical_a.float().view(ea.size(0), -1)
+                b_b = biophysical_b.float().view(eb.size(0), -1)
+                if self.biophysical_encoder is not None and self.biophysical_gate is not None:
+                    b_enc_a = self.biophysical_encoder(b_a)
+                    b_enc_b = self.biophysical_encoder(b_b)
+                    ba_g = self.biophysical_gate(b_enc_a)
+                    bb_g = self.biophysical_gate(b_enc_b)
+                    b_rep_a = ba_g * b_enc_a
+                    b_rep_b = bb_g * b_enc_b
+                    features.append(torch.cat([b_rep_a + b_rep_b, torch.abs(b_rep_a - b_rep_b)], dim=1))
+                else:
+                    features.append(torch.cat([b_a + b_b, torch.abs(b_a - b_b)], dim=1))
+            else:
+                bio_dim_count = (self.biophysical_hidden_channels * 2) if self.biophysical_encoder is not None else 12
+                features.append(torch.zeros((ea.size(0), bio_dim_count), device=ea.device, dtype=ea.dtype))
 
         combined = torch.cat(features, dim=1)
 

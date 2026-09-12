@@ -234,6 +234,9 @@ def safe_forward_multimodal(
         if ('target_seq_a' in sig or has_var_kwargs) and 'target_seq_a' in batch and batch['target_seq_a'] is not None:
             kwargs['target_seq_a'] = batch['target_seq_a']
             kwargs['target_seq_b'] = batch['target_seq_b']
+        if ('biophysical_a' in sig or has_var_kwargs) and 'biophysical_a' in batch and batch['biophysical_a'] is not None:
+            kwargs['biophysical_a'] = batch['biophysical_a'].to(device)
+            kwargs['biophysical_b'] = batch['biophysical_b'].to(device)
     except Exception:
         pass
     return model(**kwargs)

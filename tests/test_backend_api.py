@@ -510,3 +510,21 @@ def test_backend_predict_with_auditable_memory(monkeypatch):
     assert payload['auditable_evidence']['status'] == 'available'
     assert 'neighbor_interaction_density' in payload['auditable_evidence']
     assert len(payload['auditable_evidence']['audit_trail']) > 0
+
+
+def test_backend_audit_dossier_endpoint():
+    response = CLIENT.post(
+        '/api/audit/dossier',
+        json={'smiles_a': ASPIRIN, 'smiles_b': ACETAMINOPHEN},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert 'drug_a' in payload
+    assert 'drug_b' in payload
+    assert 'metabolic_collision' in payload
+    assert 'risk' in payload
+    assert 'decision' in payload
+    assert 'markdown' in payload
+    assert 'CYP' in payload['metabolic_collision']['dominant_cyp']
+    assert payload['risk']['ddi_probability'] >= 0.0
+    assert payload['risk']['ddi_probability'] <= 1.0
