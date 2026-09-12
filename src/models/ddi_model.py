@@ -644,6 +644,13 @@ class PxDDIModel(nn.Module):
             ea_for_risk = ea_for_risk + torch.randn_like(ea_for_risk) * self.embedding_noise_std
             eb_for_risk = eb_for_risk + torch.randn_like(eb_for_risk) * self.embedding_noise_std
 
+        if self.training and getattr(self, 'cold_sim_dropout', 0.0) > 0.0:
+            # Cold-start simulation: stochastic dropout of GNN topological shortcut embeddings
+            drop_mask_a = (torch.rand((ea_for_risk.size(0), 1), device=ea_for_risk.device) >= self.cold_sim_dropout).float()
+            drop_mask_b = (torch.rand((eb_for_risk.size(0), 1), device=eb_for_risk.device) >= self.cold_sim_dropout).float()
+            ea_for_risk = ea_for_risk * drop_mask_a
+            eb_for_risk = eb_for_risk * drop_mask_b
+
         if self.fp_encoder is not None:
             if fp_a is not None and fp_b is not None:
                 enc_fp_a = self.fp_encoder(fp_a.float().view(-1, 1024))
