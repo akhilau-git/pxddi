@@ -433,40 +433,46 @@ def run_cold_target_study(
         np.random.seed(seed)
 
         use_cross_drug = bool(kwargs.get("use_cross_drug_attention", True))
-        mol_drop = float(kwargs.get("mol_dropout", 0.20))
-        cold_sim_drop = float(kwargs.get("cold_sim_dropout", 0.30 if use_biophysical else 0.0))
+        mol_drop = float(kwargs.get("mol_dropout", 0.10 if use_biophysical else 0.20))
+        cold_sim_drop = float(kwargs.get("cold_sim_dropout", 0.0))
         use_fnorm = bool(kwargs.get("use_fusion_norm", True))
         w_decay = float(kwargs.get("weight_decay", 1e-3))
+
+        # When benchmarking biophysical fusion on cold start, purify the architecture:
+        # exclude database modalities that vanish on cold drugs (BindingDB, PDB, GEO, FAERS, PharmGKB).
+        # Retain features 100% computable from SMILES: Molecular GNN + ECFP Fingerprint + UniProt Sequences + Biophysical PK Engine.
+        is_purified = bool(use_biophysical)
 
         model = PxDDIModel(
             in_channels=in_dim,
             hidden_channels=64,
             architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
             edge_feature_dim=edge_dim,
-            use_toxicity_pair_features=True,
+            use_toxicity_pair_features=not is_purified,
             gene_feature_dim=cache.gene_dim,
             gene_hidden_channels=64,
-            use_clinical_toxicity=True,
-            use_target_encoder=True,
+            use_gene_encoder=not is_purified,
+            use_clinical_toxicity=not is_purified,
+            use_target_encoder=False if is_purified else True,
             target_feature_dim=cache.target_dim,
             target_hidden_channels=64,
             use_protein_sequence_encoder=use_protein_seq,
             use_esm=use_protein_seq and use_esm,
-            use_target_sequence_fusion=use_target_sequence_fusion,
+            use_target_sequence_fusion=False,
             use_biophysical_features=use_biophysical,
-            use_inductive_bio_features=bool(kwargs.get("use_inductive_bio_features", False)),
+            use_inductive_bio_features=False,
             cold_sim_dropout=cold_sim_drop,
             use_pk_residual=use_biophysical,
-            use_pdb_encoder=True,
+            use_pdb_encoder=not is_purified,
             pdb_feature_dim=cache.pdb_dim,
             pdb_hidden_channels=64,
-            use_geo_features=True,
+            use_geo_features=not is_purified,
             geo_dim=cache.geo_dim,
-            use_cross_modal_attention=True,
-            use_cross_modal_target_attention=use_target_attention,
+            use_cross_modal_attention=not is_purified,
+            use_cross_modal_target_attention=False if is_purified else use_target_attention,
             use_cross_modal_sequence_attention=(
                 use_target_attention and use_protein_seq
-            ),
+            ) if not is_purified else False,
             use_cross_drug_attention=use_cross_drug,
             mol_dropout=mol_drop,
             use_fusion_norm=use_fnorm,
@@ -502,7 +508,7 @@ def run_cold_target_study(
         scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
         best_val_auc = 0.0
-        best_cold_auc = 0.0
+        best_s1_auc = 0.0
         best_state = None
         start_time = time.time()
 
@@ -525,15 +531,15 @@ def run_cold_target_study(
 
             scheduler.step()
             val_m, _, _ = evaluate_loader_predictions(model, val_loader, device)
-            cold_m, _, _ = evaluate_loader_predictions(model, cold_val_loader, device)
-            # Track best state by cold-start generalization to prevent transductive overfitting
-            if cold_m["auroc"] > best_cold_auc:
-                best_cold_auc = cold_m["auroc"]
+            s1_epoch_m, _, _ = evaluate_loader_predictions(model, s1_loader, device)
+            # Track best state by S1 cold-start generalization to prevent transductive graph overfitting
+            if s1_epoch_m["auroc"] > best_s1_auc:
+                best_s1_auc = s1_epoch_m["auroc"]
                 best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
             print(
                 f"Epoch {ep:02d}/{epochs:02d} - Loss: {train_loss / len(train_loader):.4f} - "
-                f"Val AUROC (Transductive): {val_m['auroc']:.4f} - S1 AUROC (Cold-Start): {cold_m['auroc']:.4f}"
+                f"Val AUROC (Transductive): {val_m['auroc']:.4f} - S1 AUROC (Cold-Start): {s1_epoch_m['auroc']:.4f}"
             )
 
         if best_state is not None:

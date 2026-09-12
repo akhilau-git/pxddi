@@ -217,9 +217,12 @@ class PxDDIModel(nn.Module):
         self.gene_hidden_channels = gene_hidden_channels
         self.memory_dropout = float(kwargs.get('memory_dropout', 0.50))
         self.embedding_noise_std = float(kwargs.get('embedding_noise_std', 0.0))
-        self.use_clinical_toxicity = use_clinical_toxicity or (
-            architecture_version in {MODEL_ARCHITECTURE_MULTIMODAL, MODEL_ARCHITECTURE_ABLATION_FAERS}
-        )
+        if 'use_clinical_toxicity' in kwargs:
+            self.use_clinical_toxicity = bool(kwargs['use_clinical_toxicity'])
+        else:
+            self.use_clinical_toxicity = use_clinical_toxicity or (
+                architecture_version in {MODEL_ARCHITECTURE_MULTIMODAL, MODEL_ARCHITECTURE_ABLATION_FAERS}
+            )
 
         if use_chemberta:
             from .encoder import MolecularEncoderChemBERTa
@@ -260,7 +263,10 @@ class PxDDIModel(nn.Module):
         else:
             self.fp_encoder = None
 
-        if architecture_requires_multimodal_features(architecture_version):
+        self.use_gene_encoder = bool(
+            kwargs.get('use_gene_encoder', architecture_requires_multimodal_features(architecture_version))
+        )
+        if self.use_gene_encoder:
             self.gene_encoder = nn.Sequential(
                 nn.Linear(gene_feature_dim, gene_hidden_channels),
                 nn.ReLU(),
@@ -338,11 +344,15 @@ class PxDDIModel(nn.Module):
             else None
         )
 
-        self.use_pdb_encoder = bool(
-            kwargs.get('use_pdb_encoder', False)
-            or (kwargs.get('use_pdb', False) and architecture_requires_multimodal_features(architecture_version))
-            or (architecture_version == MODEL_ARCHITECTURE_MULTIMODAL and kwargs.get('use_pdb', True))
-        )
+        if 'use_pdb_encoder' in kwargs:
+            self.use_pdb_encoder = bool(kwargs['use_pdb_encoder'])
+        elif 'use_pdb' in kwargs:
+            self.use_pdb_encoder = bool(kwargs['use_pdb'])
+        else:
+            self.use_pdb_encoder = bool(
+                architecture_requires_multimodal_features(architecture_version)
+                or architecture_version == MODEL_ARCHITECTURE_MULTIMODAL
+            )
         self.pdb_feature_dim = int(kwargs.get('pdb_feature_dim') or kwargs.get('pdb_dim') or 50)
         self.pdb_hidden_channels = int(kwargs.get('pdb_hidden_channels', 64))
         if self.use_pdb_encoder and architecture_requires_multimodal_features(architecture_version):
