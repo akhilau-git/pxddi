@@ -794,48 +794,56 @@ def run_cold_target_study(
                     if trans_labels is None and "trans_labels" in ckpt_payload:
                         trans_labels = ckpt_payload["trans_labels"]
 
+                # Ensure model instance is loaded and retained in trained_models for downstream hybrid feature extraction
+                if "model_state_dict" in ckpt_payload and model_name not in trained_models:
+                    try:
+                        saved_kwargs = ckpt_payload.get("model_kwargs")
+                        is_pur = (model_name == "auditddi_biophysical_fusion")
+                        if saved_kwargs:
+                            loaded_m = PxDDIModel(**saved_kwargs).to(device)
+                        else:
+                            loaded_m = PxDDIModel(
+                                in_channels=in_dim,
+                                hidden_channels=64,
+                                architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+                                edge_feature_dim=edge_dim,
+                                use_toxicity_pair_features=not is_pur,
+                                gene_feature_dim=cache.gene_dim,
+                                gene_hidden_channels=64,
+                                use_gene_encoder=not is_pur,
+                                use_clinical_toxicity=not is_pur,
+                                use_target_encoder=False if is_pur else True,
+                                target_feature_dim=cache.target_dim,
+                                target_hidden_channels=64,
+                                use_protein_sequence_encoder=use_protein_seq,
+                                use_esm=False,
+                                use_target_sequence_fusion=use_target_sequence_fusion if not is_pur else False,
+                                use_biophysical_features=use_biophysical,
+                                use_inductive_bio_features=False,
+                                cold_sim_dropout=0.0,
+                                use_pk_residual=use_biophysical,
+                                use_pdb_encoder=not is_pur,
+                                pdb_feature_dim=cache.pdb_dim,
+                                pdb_hidden_channels=64,
+                                use_geo_features=not is_pur,
+                                geo_dim=cache.geo_dim,
+                                use_cross_modal_attention=not is_pur,
+                                use_cross_drug_attention=True,
+                                mol_dropout=0.10,
+                                use_fusion_norm=True,
+                            ).to(device)
+                        loaded_m.load_state_dict(ckpt_payload["model_state_dict"], strict=False)
+                        loaded_m.eval()
+                        trained_models[model_name] = loaded_m
+                    except Exception as me:
+                        print(f"Notice loading model instance for {model_name}: {me}")
+
                 # Auto-evaluate on S2 Semi-Inductive cohort if checkpoint was generated before S2 tracking
                 if s2_loader is not None and (model_name not in s2_probs or s2_probs[model_name] is None):
                     s2_count = len(df_s2) if df_s2 is not None else 0
                     print(f"Evaluating loaded {model_name} on S2 cohort ({s2_count} pairs)...", flush=True)
-                    saved_kwargs = ckpt_payload.get("model_kwargs")
-                    is_pur = (model_name == "auditddi_biophysical_fusion")
-                    if saved_kwargs:
-                        loaded_m = PxDDIModel(**saved_kwargs).to(device)
-                    else:
-                        loaded_m = PxDDIModel(
-                            in_channels=in_dim,
-                            hidden_channels=64,
-                            architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
-                            edge_feature_dim=edge_dim,
-                            use_toxicity_pair_features=not is_pur,
-                            gene_feature_dim=cache.gene_dim,
-                            gene_hidden_channels=64,
-                            use_gene_encoder=not is_pur,
-                            use_clinical_toxicity=not is_pur,
-                            use_target_encoder=False if is_pur else True,
-                            target_feature_dim=cache.target_dim,
-                            target_hidden_channels=64,
-                            use_protein_sequence_encoder=use_protein_seq,
-                            use_esm=False,
-                            use_target_sequence_fusion=use_target_sequence_fusion if not is_pur else False,
-                            use_biophysical_features=use_biophysical,
-                            use_inductive_bio_features=False,
-                            cold_sim_dropout=0.0,
-                            use_pk_residual=use_biophysical,
-                            use_pdb_encoder=not is_pur,
-                            pdb_feature_dim=cache.pdb_dim,
-                            pdb_hidden_channels=64,
-                            use_geo_features=not is_pur,
-                            geo_dim=cache.geo_dim,
-                            use_cross_modal_attention=not is_pur,
-                            use_cross_drug_attention=True,
-                            mol_dropout=0.10,
-                            use_fusion_norm=True,
-                        ).to(device)
-                    if "model_state_dict" in ckpt_payload:
-                        loaded_m.load_state_dict(ckpt_payload["model_state_dict"], strict=False)
-                        loaded_m.eval()
+                    loaded_m = trained_models.get(model_name)
+                    if loaded_m is not None:
                         opt_thresh = results[model_name].get("optimal_threshold", 0.50)
                         s2_m, s2_p, s2_y = evaluate_loader_predictions(loaded_m, s2_loader, device, threshold=opt_thresh)
                         s2_fpr, s2_tpr, s2_thresholds = roc_curve(s2_y, s2_p)
@@ -854,7 +862,6 @@ def run_cold_target_study(
                             torch.save(ckpt_payload, ckpt_file)
                         except Exception:
                             pass
-                        trained_models[model_name] = loaded_m
 
                 s2_stat_msg = f", S2 AUROC = {results[model_name].get('s2_semi_inductive', {}).get('auroc', 0.0):.4f}" if results[model_name].get('s2_semi_inductive') else ""
                 print(f"Loaded {model_name}: S1 AUROC = {results[model_name]['s1_cold_start']['auroc']:.4f}{s2_stat_msg}")
@@ -1245,9 +1252,12 @@ def run_cold_target_study(
                             use_cross_modal_target_attention=False if is_pur else use_target_attention,
                             use_cross_modal_sequence_attention=False if is_pur else use_target_attention,
                             use_cross_modal_pdb_attention=False if is_pur else use_target_attention,
+                            use_cross_drug_attention=True,
+                            mol_dropout=0.10,
+                            use_fusion_norm=True,
                             num_side_effects=1,
                         ).to(device)
-                    cand_model.load_state_dict(ckpt_data["model_state_dict"])
+                    cand_model.load_state_dict(ckpt_data["model_state_dict"], strict=False)
                     cand_model.eval()
                     best_deep_model = cand_model
                     print(f"Loaded checkpoint for {candidate_name} as deep sequence & logit feature generator for Inductive Hybrid.")
@@ -1441,9 +1451,27 @@ def run_cold_target_study(
             print("COMPUTING MULTIMODAL STACKING ENSEMBLE BLEND (MULTI-DEEP CONSENSUS + PURE INDUCTIVE GBDT)")
             print("=" * 80)
 
-            # 1. Multi-architecture deep consensus component
-            deep_candidates = [m for m in ["auditddi_regularized_fusion", "auditddi_protein_seq", "auditddi_biophysical_fusion", "auditddi_target_seq_fusion"] if m in s1_probs]
-            if len(deep_candidates) >= 2:
+            # 1. Multi-architecture deep consensus component (prioritizing regularized fusion champion)
+            deep_candidates = [m for m in ["auditddi_regularized_fusion", "auditddi_protein_seq", "auditddi_target_seq_fusion", "auditddi_biophysical_fusion"] if m in s1_probs]
+            if "auditddi_regularized_fusion" in s1_probs:
+                d_main = "auditddi_regularized_fusion"
+                # If protein_seq is also present, ensemble the two strongest representations
+                if "auditddi_protein_seq" in s1_probs:
+                    d_sec = "auditddi_protein_seq"
+                    p_deep_s1 = 0.70 * s1_probs[d_main] + 0.30 * s1_probs[d_sec]
+                    p_deep_ct = 0.70 * cold_target_probs[d_main] + 0.30 * cold_target_probs[d_sec]
+                    p_deep_s2 = (0.70 * s2_probs[d_main] + 0.30 * s2_probs[d_sec]) if (d_main in s2_probs and d_sec in s2_probs) else s2_probs.get(d_main)
+                    p_deep_val = (0.70 * val_probs[d_main] + 0.30 * val_probs[d_sec]) if (d_main in val_probs and d_sec in val_probs) else val_probs.get(d_main)
+                    p_deep_trans = (0.70 * trans_probs[d_main] + 0.30 * trans_probs[d_sec]) if (d_main in trans_probs and d_sec in trans_probs) else trans_probs.get(d_main)
+                    print(f"Deep champion component: weighted consensus of {d_main} (70%) and {d_sec} (30%)")
+                else:
+                    p_deep_s1 = s1_probs[d_main]
+                    p_deep_ct = cold_target_probs[d_main]
+                    p_deep_s2 = s2_probs.get(d_main)
+                    p_deep_val = val_probs.get(d_main)
+                    p_deep_trans = trans_probs.get(d_main)
+                    print(f"Deep champion component: {d_main}")
+            elif len(deep_candidates) >= 2:
                 d1, d2 = deep_candidates[0], deep_candidates[1]
                 p_deep_s1 = 0.50 * s1_probs[d1] + 0.50 * s1_probs[d2]
                 p_deep_ct = 0.50 * cold_target_probs[d1] + 0.50 * cold_target_probs[d2]
@@ -1468,7 +1496,8 @@ def run_cold_target_study(
                 p_deep_trans = trans_probs.get(fallback_name)
 
             # 2. Balanced soft-voting blend across orthogonal model paradigms
-            best_alpha = 0.50
+            # Anchor primarily (65%) to deep sequence champion, enriched with 35% invariant tree signal
+            best_alpha = 0.65
             p_s1_blend = best_alpha * p_deep_s1 + (1.0 - best_alpha) * s1_probs[tree_model_name]
             s1_probs["auditddi_ensemble_blend"] = p_s1_blend
 
