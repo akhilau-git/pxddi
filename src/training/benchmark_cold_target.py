@@ -1396,8 +1396,8 @@ def run_cold_target_study(
                 b_payload = torch.load(blend_ckpt_file, map_location="cpu", weights_only=False)
             except TypeError:
                 b_payload = torch.load(blend_ckpt_file, map_location="cpu")
-            if b_payload.get("version") != "v3_tri_blend":
-                print("Saved ensemble checkpoint is outdated (requires v3 multi-architecture consensus blend). Recomputing...", flush=True)
+            if b_payload.get("version") != "v4_tri_consensus":
+                print("Saved ensemble checkpoint is outdated (requires v4 calibrated tri-consensus blend). Recomputing...", flush=True)
                 run_blend = True
             elif s2_loader is not None and ("s2_probs" not in b_payload or b_payload["s2_probs"] is None):
                 print("Saved ensemble checkpoint lacks S2 predictions. Recomputing ensemble blend...", flush=True)
@@ -1583,7 +1583,7 @@ def run_cold_target_study(
 
             try:
                 torch.save({
-                    "version": "v3_tri_blend",
+                    "version": "v4_tri_consensus",
                     "s1_probs": p_s1_blend,
                     "s1_labels": s1_labels,
                     "s2_probs": s2_probs.get("auditddi_ensemble_blend"),
