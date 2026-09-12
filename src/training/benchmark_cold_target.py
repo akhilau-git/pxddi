@@ -1154,19 +1154,23 @@ def run_cold_target_study(
         except Exception as save_err:
             print(f"Checkpoint save notice: {save_err}")
 
-    # Option 2: Inductive Tabular Tree-Hybrid Model (HistGradientBoosting on Invariant PK Collisions + Sequence Similarity + Deep Model Logits)
-    run_hybrid = (models_to_run is None or "auditddi_inductive_hybrid" in models_to_run)
+    # Option 2: Inductive Tabular Tree-Hybrid (Hist-Gradient Boosting on Domain-Invariant Features)
+    run_hybrid = (models_to_run is None or "auditddi_inductive_hybrid" in models_to_run or "tabular_hybrid" in models_to_run)
     hybrid_ckpt_file = out_p / "checkpoint_auditddi_inductive_hybrid.pt"
+    force_retrain_hybrid = bool(kwargs.get("force_retrain_hybrid", False))
 
     if run_hybrid:
-        if resume and not force_retrain and hybrid_ckpt_file.is_file():
-            print(f"\nReusing saved checkpoint for auditddi_inductive_hybrid from: {hybrid_ckpt_file}")
+        if resume and not force_retrain and not force_retrain_hybrid and hybrid_ckpt_file.is_file():
+            print(f"\nChecking saved checkpoint for auditddi_inductive_hybrid from: {hybrid_ckpt_file}")
             try:
                 try:
                     ckpt_payload = torch.load(hybrid_ckpt_file, map_location="cpu", weights_only=False)
                 except TypeError:
                     ckpt_payload = torch.load(hybrid_ckpt_file, map_location="cpu")
-                if s2_loader is not None and ("s2_probs" not in ckpt_payload or ckpt_payload["s2_probs"] is None):
+                if ckpt_payload.get("version") != "v3_pure_inductive":
+                    print("Saved hybrid checkpoint is outdated (lacks v3 pure inductive features). Re-fitting...", flush=True)
+                    run_hybrid = True
+                elif s2_loader is not None and ("s2_probs" not in ckpt_payload or ckpt_payload["s2_probs"] is None):
                     print("Saved hybrid checkpoint lacks S2 predictions. Re-fitting with inductive K-NN and physical features...", flush=True)
                     run_hybrid = True
                 else:
@@ -1235,16 +1239,18 @@ def run_cold_target_study(
                             use_geo_features=not is_pur,
                             geo_dim=cache.geo_dim,
                             use_cross_modal_attention=not is_pur,
-                            use_cross_drug_attention=True,
-                            use_fusion_norm=True,
+                            use_cross_modal_target_attention=False if is_pur else use_target_attention,
+                            use_cross_modal_sequence_attention=False if is_pur else use_target_attention,
+                            use_cross_modal_pdb_attention=False if is_pur else use_target_attention,
+                            num_side_effects=1,
                         ).to(device)
-                    cand_model.load_state_dict(ckpt_data["model_state_dict"], strict=False)
+                    cand_model.load_state_dict(ckpt_data["model_state_dict"])
                     cand_model.eval()
                     best_deep_model = cand_model
-                    print(f"Loaded {candidate_name} from checkpoint as deep sequence & logit feature generator for Inductive Hybrid.")
+                    print(f"Loaded checkpoint for {candidate_name} as deep sequence & logit feature generator for Inductive Hybrid.")
                     break
-                except Exception as ex:
-                    print(f"Notice loading {candidate_name}: {ex}")
+                except Exception as e:
+                    print(f"Could not load checkpoint for {candidate_name}: {e}")
 
         # If not loaded from checkpoint, check if last trained model is available
         if best_deep_model is None and 'model' in locals():
@@ -1273,20 +1279,32 @@ def run_cold_target_study(
             X_ct, y_ct, _ = extract_inductive_pair_features(best_deep_model, cold_target_loader, device, train_index=train_index)
 
         print(f"Extracted {X_train.shape[1]} invariant features for {len(X_train)} training pairs.")
+
+        # Train HistGradientBoosting strictly on the 22 domain-invariant physical & chemical features (excluding in-sample overfitted deep logits)
+        feat_dim_invariant = 22 if X_train.shape[1] >= 22 else X_train.shape[1]
+        X_tr_in = X_train[:, :feat_dim_invariant]
+        X_va_in = X_val[:, :feat_dim_invariant]
+        X_s1_in = X_s1[:, :feat_dim_invariant]
+        X_tr_test_in = X_trans[:, :feat_dim_invariant]
+        X_s2_in = X_s2[:, :feat_dim_invariant] if X_s2 is not None else None
+        X_ct_in = X_ct[:, :feat_dim_invariant] if X_ct is not None else None
+
+        print(f"Fitting HistGradientBoostingClassifier on {feat_dim_invariant} pure domain-invariant physical, chemical & sequence features...")
         tree_clf = HistGradientBoostingClassifier(
-            max_iter=100,
-            learning_rate=0.05,
+            max_iter=150,
+            learning_rate=0.04,
             max_depth=5,
-            min_samples_leaf=20,
+            min_samples_leaf=25,
+            l2_regularization=1.0,
             random_state=seed,
         )
-        tree_clf.fit(X_train, y_train)
+        tree_clf.fit(X_tr_in, y_train)
 
-        p_val = tree_clf.predict_proba(X_val)[:, 1]
-        p_s1 = tree_clf.predict_proba(X_s1)[:, 1]
-        p_trans = tree_clf.predict_proba(X_trans)[:, 1]
-        p_ct = p_s1 if cold_target_equals_s1 else tree_clf.predict_proba(X_ct)[:, 1]
-        p_s2 = tree_clf.predict_proba(X_s2)[:, 1] if X_s2 is not None else None
+        p_val = tree_clf.predict_proba(X_va_in)[:, 1]
+        p_s1 = tree_clf.predict_proba(X_s1_in)[:, 1]
+        p_trans = tree_clf.predict_proba(X_tr_test_in)[:, 1]
+        p_ct = p_s1 if cold_target_equals_s1 else tree_clf.predict_proba(X_ct_in)[:, 1]
+        p_s2 = tree_clf.predict_proba(X_s2_in)[:, 1] if X_s2_in is not None else None
 
         val_fpr, val_tpr, val_threshs = roc_curve(y_val, p_val)
         val_j = val_tpr - val_fpr
@@ -1340,6 +1358,7 @@ def run_cold_target_study(
 
         try:
             torch.save({
+                "version": "v3_pure_inductive",
                 "s1_probs": p_s1,
                 "s1_labels": y_s1,
                 "s2_probs": p_s2,
@@ -1360,13 +1379,16 @@ def run_cold_target_study(
     run_blend = (models_to_run is None or "auditddi_ensemble_blend" in models_to_run or "ensemble" in models_to_run)
     blend_ckpt_file = out_p / "checkpoint_auditddi_ensemble_blend.pt"
 
-    if run_blend and resume and not force_retrain and blend_ckpt_file.is_file() and "auditddi_ensemble_blend" not in results:
+    if run_blend and resume and not force_retrain and not force_retrain_hybrid and blend_ckpt_file.is_file() and "auditddi_ensemble_blend" not in results:
         try:
             try:
                 b_payload = torch.load(blend_ckpt_file, map_location="cpu", weights_only=False)
             except TypeError:
                 b_payload = torch.load(blend_ckpt_file, map_location="cpu")
-            if s2_loader is not None and ("s2_probs" not in b_payload or b_payload["s2_probs"] is None):
+            if b_payload.get("version") != "v3_tri_blend":
+                print("Saved ensemble checkpoint is outdated (requires v3 multi-architecture consensus blend). Recomputing...", flush=True)
+                run_blend = True
+            elif s2_loader is not None and ("s2_probs" not in b_payload or b_payload["s2_probs"] is None):
                 print("Saved ensemble checkpoint lacks S2 predictions. Recomputing ensemble blend...", flush=True)
                 run_blend = True
             else:
@@ -1383,7 +1405,7 @@ def run_cold_target_study(
             run_blend = True
 
     if run_blend and "auditddi_ensemble_blend" not in results:
-        # Find candidate deep model predictions
+        # Collect all available candidate deep model predictions
         deep_model_name = None
         for c_name in ["auditddi_regularized_fusion", "auditddi_protein_seq", "auditddi_biophysical_fusion", "auditddi_target_seq_fusion", "multimodal_without_seq"]:
             if c_name in s1_probs:
@@ -1392,8 +1414,8 @@ def run_cold_target_study(
         tree_model_name = "auditddi_inductive_hybrid" if "auditddi_inductive_hybrid" in s1_probs else None
 
         # If not present in memory, load from checkpoints
-        if not deep_model_name:
-            for c_name in ["auditddi_regularized_fusion", "auditddi_protein_seq", "auditddi_biophysical_fusion"]:
+        for c_name in ["auditddi_regularized_fusion", "auditddi_protein_seq", "auditddi_biophysical_fusion", "auditddi_target_seq_fusion"]:
+            if c_name not in s1_probs:
                 c_p = out_p / f"checkpoint_{c_name}.pt"
                 if c_p.is_file():
                     try:
@@ -1406,44 +1428,53 @@ def run_cold_target_study(
                             val_probs[c_name] = c_data["val_probs"]
                         if "trans_probs" in c_data and c_data["trans_probs"] is not None:
                             trans_probs[c_name] = c_data["trans_probs"]
-                        deep_model_name = c_name
-                        break
+                        if not deep_model_name:
+                            deep_model_name = c_name
                     except Exception:
                         pass
 
-        if deep_model_name and tree_model_name:
+        if (deep_model_name or "auditddi_regularized_fusion" in s1_probs) and tree_model_name:
             print("\n" + "=" * 80)
-            print(f"COMPUTING MULTIMODAL STACKING ENSEMBLE BLEND ({deep_model_name} + {tree_model_name})")
+            print("COMPUTING MULTIMODAL STACKING ENSEMBLE BLEND (MULTI-DEEP CONSENSUS + PURE INDUCTIVE GBDT)")
             print("=" * 80)
 
-            p_deep_val = val_probs.get(deep_model_name)
-            p_tree_val = val_probs.get(tree_model_name)
-
-            best_alpha = 0.50
-            if p_deep_val is not None and p_tree_val is not None and val_labels is not None:
-                best_auc = -1.0
-                for a in np.linspace(0.1, 0.9, 17):
-                    p_mix = a * p_deep_val + (1.0 - a) * p_tree_val
-                    try:
-                        score = roc_auc_score(val_labels, p_mix)
-                        if score > best_auc:
-                            best_auc = score
-                            best_alpha = float(a)
-                    except Exception:
-                        pass
-                print(f"Optimal ensemble blending weight: alpha={best_alpha:.2f} ({deep_model_name}) + {1.0 - best_alpha:.2f} ({tree_model_name}) [Val AUROC: {best_auc:.4f}]")
+            # 1. Multi-architecture deep consensus component
+            deep_candidates = [m for m in ["auditddi_regularized_fusion", "auditddi_protein_seq", "auditddi_biophysical_fusion", "auditddi_target_seq_fusion"] if m in s1_probs]
+            if len(deep_candidates) >= 2:
+                d1, d2 = deep_candidates[0], deep_candidates[1]
+                p_deep_s1 = 0.50 * s1_probs[d1] + 0.50 * s1_probs[d2]
+                p_deep_ct = 0.50 * cold_target_probs[d1] + 0.50 * cold_target_probs[d2]
+                p_deep_s2 = (0.50 * s2_probs[d1] + 0.50 * s2_probs[d2]) if (d1 in s2_probs and d2 in s2_probs) else s2_probs.get(d1)
+                p_deep_val = (0.50 * val_probs[d1] + 0.50 * val_probs[d2]) if (d1 in val_probs and d2 in val_probs) else val_probs.get(d1)
+                p_deep_trans = (0.50 * trans_probs[d1] + 0.50 * trans_probs[d2]) if (d1 in trans_probs and d2 in trans_probs) else trans_probs.get(d1)
+                print(f"Deep consensus component: consensus average of {d1} and {d2}")
+            elif deep_candidates:
+                d1 = deep_candidates[0]
+                p_deep_s1 = s1_probs[d1]
+                p_deep_ct = cold_target_probs[d1]
+                p_deep_s2 = s2_probs.get(d1)
+                p_deep_val = val_probs.get(d1)
+                p_deep_trans = trans_probs.get(d1)
+                print(f"Deep component: {d1}")
             else:
-                print("Using balanced 0.50 / 0.50 soft-voting blend across modalities.")
+                p_deep_s1 = s1_probs[deep_model_name]
+                p_deep_ct = cold_target_probs[deep_model_name]
+                p_deep_s2 = s2_probs.get(deep_model_name)
+                p_deep_val = val_probs.get(deep_model_name)
+                p_deep_trans = trans_probs.get(deep_model_name)
 
-            p_s1_blend = best_alpha * s1_probs[deep_model_name] + (1.0 - best_alpha) * s1_probs[tree_model_name]
+            # 2. Balanced soft-voting blend across orthogonal model paradigms
+            best_alpha = 0.50
+            p_s1_blend = best_alpha * p_deep_s1 + (1.0 - best_alpha) * s1_probs[tree_model_name]
             s1_probs["auditddi_ensemble_blend"] = p_s1_blend
 
-            p_ct_blend = best_alpha * cold_target_probs[deep_model_name] + (1.0 - best_alpha) * cold_target_probs[tree_model_name]
+            p_ct_blend = best_alpha * p_deep_ct + (1.0 - best_alpha) * cold_target_probs[tree_model_name]
             cold_target_probs["auditddi_ensemble_blend"] = p_ct_blend
 
             # Validation threshold
-            if p_deep_val is not None and p_tree_val is not None and val_labels is not None:
-                p_val_blend = best_alpha * p_deep_val + (1.0 - best_alpha) * p_tree_val
+            p_val_blend = None
+            if p_deep_val is not None and tree_model_name in val_probs and val_labels is not None:
+                p_val_blend = best_alpha * p_deep_val + (1.0 - best_alpha) * val_probs[tree_model_name]
                 val_fpr, val_tpr, val_threshs = roc_curve(val_labels, p_val_blend)
                 val_j = val_tpr - val_fpr
                 best_thresh_blend = float(val_threshs[np.argmax(val_j)]) if len(val_threshs) > 0 else 0.50
@@ -1453,8 +1484,9 @@ def run_cold_target_study(
                 val_m_blend = {"auroc": 0.9510}
 
             # Transductive
-            if deep_model_name in trans_probs and tree_model_name in trans_probs and trans_labels is not None:
-                p_trans_blend = best_alpha * trans_probs[deep_model_name] + (1.0 - best_alpha) * trans_probs[tree_model_name]
+            p_trans_blend = None
+            if p_deep_trans is not None and tree_model_name in trans_probs and trans_labels is not None:
+                p_trans_blend = best_alpha * p_deep_trans + (1.0 - best_alpha) * trans_probs[tree_model_name]
                 trans_m_blend = compute_comprehensive_metrics(trans_labels, p_trans_blend, threshold=best_thresh_blend)
             else:
                 trans_m_blend = results.get(deep_model_name, {}).get("transductive_test", {"auroc": 0.9510})
@@ -1471,8 +1503,9 @@ def run_cold_target_study(
             # S2 Semi-Inductive
             s2_m_blend = None
             s2_cal_m_blend = None
-            if deep_model_name in s2_probs and tree_model_name in s2_probs and s2_labels is not None:
-                p_s2_blend = best_alpha * s2_probs[deep_model_name] + (1.0 - best_alpha) * s2_probs[tree_model_name]
+            p_s2_blend = None
+            if p_deep_s2 is not None and tree_model_name in s2_probs and s2_labels is not None:
+                p_s2_blend = best_alpha * p_deep_s2 + (1.0 - best_alpha) * s2_probs[tree_model_name]
                 s2_probs["auditddi_ensemble_blend"] = p_s2_blend
                 s2_m_blend = compute_comprehensive_metrics(s2_labels, p_s2_blend, threshold=best_thresh_blend)
                 s2_fpr, s2_tpr, s2_threshs = roc_curve(s2_labels, p_s2_blend)
@@ -1490,7 +1523,7 @@ def run_cold_target_study(
                 "s1_calibrated": s1_cal_m_blend,
                 "cold_target_cohort": ct_m_blend,
                 "alpha_blend_weight": best_alpha,
-                "base_models": [deep_model_name, tree_model_name],
+                "base_models": deep_candidates + [tree_model_name],
                 "protein_sequence_encoder": "multimodal_stacking_ensemble",
                 "target_sequence_fusion": True,
                 "biophysical_features": True,
@@ -1502,17 +1535,24 @@ def run_cold_target_study(
 
             try:
                 torch.save({
+                    "version": "v3_tri_blend",
                     "s1_probs": p_s1_blend,
                     "s1_labels": s1_labels,
                     "s2_probs": s2_probs.get("auditddi_ensemble_blend"),
                     "s2_labels": s2_labels,
                     "cold_target_probs": p_ct_blend,
                     "cold_target_labels": cold_target_labels,
+                    "val_probs": p_val_blend,
+                    "val_labels": val_labels,
+                    "trans_probs": p_trans_blend,
+                    "trans_labels": trans_labels,
                     "metrics": results["auditddi_ensemble_blend"],
+                    "alpha": best_alpha,
+                    "best_threshold": best_thresh_blend,
                 }, blend_ckpt_file)
-                print(f"Saved ensemble checkpoint to: {blend_ckpt_file}")
-            except Exception as se:
-                print(f"Notice saving ensemble checkpoint: {se}")
+                print(f"Saved ensemble blend checkpoint to: {blend_ckpt_file}")
+            except Exception as bse:
+                print(f"Notice saving ensemble blend checkpoint: {bse}")
 
     # Bootstrap hypothesis testing (where prediction arrays are available)
     stat_ct = None
@@ -1829,6 +1869,7 @@ if __name__ == "__main__":
     parser.add_argument("--models", nargs="+", default=None, help="Specific models to run (e.g. auditddi_regularized_fusion auditddi_inductive_hybrid auditddi_ensemble_blend)")
     parser.add_argument("--resume", action="store_true", default=True, help="Resume execution from existing checkpoints in output_dir")
     parser.add_argument("--force_retrain", action="store_true", default=False, help="Force retraining of models even if a checkpoint exists")
+    parser.add_argument("--force_retrain_hybrid", action="store_true", default=False, help="Force retraining of inductive hybrid and ensemble blend even when deep models are resumed")
     parser.add_argument("--no_resume", dest="resume", action="store_false", help="Disable checkpoint resumption")
     parser.add_argument("--cold_sim_dropout", type=float, default=0.30, help="Cold-start simulation graph dropout rate (Solution A)")
     parser.add_argument("--use_esm", action="store_true", default=False, help="Use pre-trained ESM-2 embeddings for protein sequences")
@@ -1843,55 +1884,30 @@ if __name__ == "__main__":
     elif (data_p / "benchmark_splits").is_dir():
         splits_p = data_p / "benchmark_splits"
     else:
-        splits_p = data_p / "splits"
+        splits_p = data_p
 
     master_nodes_p = None
-    if args.master_nodes and Path(args.master_nodes).is_file():
+    if args.master_nodes:
         master_nodes_p = Path(args.master_nodes)
+    elif (data_p / "unified_graph" / "master_drug_nodes_verified_targets.csv").is_file():
+        master_nodes_p = data_p / "unified_graph" / "master_drug_nodes_verified_targets.csv"
+    elif (data_p / "master_drug_nodes_verified_targets.csv").is_file():
+        master_nodes_p = data_p / "master_drug_nodes_verified_targets.csv"
+    elif (data_p / "master_drug_nodes.csv").is_file():
+        master_nodes_p = data_p / "master_drug_nodes.csv"
     else:
-        candidates = [
-            data_p / "master_drug_nodes_enriched.csv",
-            data_p / "master_drug_nodes.csv",
-            data_p / "master_nodes_enriched.csv",
-            data_p / "master_nodes_with_uniprot.csv",
-            data_p / "master_nodes.csv",
-            data_p / "graph" / "master_drug_nodes.csv",
-            data_p / "graph" / "master_nodes.csv",
-            splits_p / "master_drug_nodes.csv",
-            splits_p / "master_nodes.csv",
-            Path("data") / "master_drug_nodes.csv",
-            Path("data") / "master_nodes.csv",
-        ]
-        for c in candidates:
-            if c.is_file():
-                master_nodes_p = c
-                break
-
-    if master_nodes_p is None:
-        node_matches = [
-            p for p in data_p.glob("**/*node*.csv") if p.is_file() and not p.name.startswith(".")
-        ]
-        if node_matches:
-            master_nodes_p = node_matches[0]
-
-    if master_nodes_p is None or not master_nodes_p.is_file():
-        print(f"Master nodes file not found in {data_p}. Auto-generating from split CSVs in {splits_p}...")
+        # Fallback: create minimal master nodes from splits
         all_drugs = set()
         for s_file in splits_p.glob("*.csv"):
             try:
-                df_s = pd.read_csv(s_file)
-                for col in ["drug_a_id", "drug_b_id", "drug_a", "drug_b", "drug_1", "drug_2"]:
-                    if col in df_s.columns:
-                        all_drugs.update(df_s[col].dropna().astype(str).str.strip().tolist())
+                df_temp = pd.read_csv(s_file)
+                sc = "drug_a_id" if "drug_a_id" in df_temp.columns else df_temp.columns[0]
+                tc = "drug_b_id" if "drug_b_id" in df_temp.columns else df_temp.columns[1]
+                all_drugs.update(df_temp[sc].dropna().astype(str).unique())
+                all_drugs.update(df_temp[tc].dropna().astype(str).unique())
             except Exception:
                 pass
-
-        if not all_drugs:
-            raise FileNotFoundError(
-                f"Could not locate master_drug_nodes.csv or valid splits in {data_p}."
-            )
-
-        out_nodes = Path(args.output_dir) / "master_drug_nodes.csv"
+        out_nodes = Path(args.output_dir) / "minimal_master_nodes.csv"
         out_nodes.parent.mkdir(parents=True, exist_ok=True)
         df_new = pd.DataFrame({"drug_id": sorted(all_drugs), "canonical_smiles": sorted(all_drugs)})
         df_new.to_csv(out_nodes, index=False)
@@ -1911,6 +1927,7 @@ if __name__ == "__main__":
         models=args.models,
         resume=args.resume,
         force_retrain=args.force_retrain,
+        force_retrain_hybrid=args.force_retrain_hybrid,
         cold_sim_dropout=args.cold_sim_dropout,
         use_esm=args.use_esm,
     )
