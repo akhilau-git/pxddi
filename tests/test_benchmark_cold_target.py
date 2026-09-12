@@ -116,7 +116,7 @@ def test_extract_inductive_pair_features_and_hybrid_flow(tmp_path):
     device = torch.device("cpu")
     X, y, deep_p = extract_inductive_pair_features(model, loader, device)
     assert X.shape[0] == 4
-    assert X.shape[1] == 18
+    assert X.shape[1] == 19  # Includes continuous Tanimoto similarity
     assert len(y) == 4
     assert len(deep_p) == 4
     assert not np.isnan(X).any()
@@ -126,3 +126,33 @@ def test_extract_inductive_pair_features_and_hybrid_flow(tmp_path):
     probs = clf.predict_proba(X)[:, 1]
     assert len(probs) == 4
     assert np.all((probs >= 0.0) & (probs <= 1.0))
+
+
+def test_ensemble_blend_and_calibrated_threshold():
+    from sklearn.metrics import roc_curve
+    y_true = np.array([1, 1, 1, 1, 0, 0, 0, 0])
+    
+    # Model A (deep network logits, slightly conservative on positives)
+    probs_a = np.array([0.55, 0.62, 0.48, 0.70, 0.30, 0.25, 0.40, 0.15])
+    
+    # Model B (invariant GBDT, catches different positives)
+    probs_b = np.array([0.65, 0.45, 0.60, 0.58, 0.20, 0.35, 0.18, 0.22])
+    
+    # Soft blend
+    alpha = 0.50
+    probs_blend = alpha * probs_a + (1.0 - alpha) * probs_b
+    assert len(probs_blend) == len(y_true)
+    
+    # Standard threshold 0.50
+    m_std = compute_comprehensive_metrics(y_true, probs_blend, threshold=0.50)
+    assert m_std["auroc"] >= 0.90
+    
+    # Calibrated threshold via Youden's J
+    fpr, tpr, threshs = roc_curve(y_true, probs_blend)
+    j_scores = tpr - fpr
+    best_thresh = float(threshs[np.argmax(j_scores)])
+    m_cal = compute_comprehensive_metrics(y_true, probs_blend, threshold=best_thresh)
+    
+    # Calibrated threshold maximizes balanced accuracy and recall
+    assert m_cal["sensitivity"] >= m_std["sensitivity"]
+    assert m_cal["sensitivity"] == 1.0
