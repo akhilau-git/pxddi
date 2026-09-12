@@ -669,7 +669,7 @@ class PxDDIModel(nn.Module):
 
             raw_ta = raw_tb = None
             raw_mask_a = raw_mask_b = None
-            if raw_target_available:
+            if raw_target_available and self.target_encoder is not None:
                 t_in_a = target_a.float().view(-1, self.target_feature_dim)
                 t_in_b = target_b.float().view(-1, self.target_feature_dim)
                 raw_ta = self.target_encoder(t_in_a)
@@ -694,7 +694,7 @@ class PxDDIModel(nn.Module):
 
             sequence_ta = sequence_tb = None
             sequence_mask_a = sequence_mask_b = None
-            if has_valid_seqs:
+            if has_valid_seqs and self.protein_sequence_encoder is not None:
                 sequence_ta = self.protein_sequence_encoder(target_seq_a, device=ea.device)
                 sequence_tb = self.protein_sequence_encoder(target_seq_b, device=eb.device)
                 sequence_mask_a = torch.tensor(
