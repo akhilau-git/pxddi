@@ -1462,6 +1462,14 @@ def run_cold_target_study(
                     p_deep_val = (0.70 * val_probs[d_main] + 0.30 * val_probs[d_sec]) if (d_main in val_probs and d_sec in val_probs) else val_probs.get(d_main)
                     p_deep_trans = (0.70 * trans_probs[d_main] + 0.30 * trans_probs[d_sec]) if (d_main in trans_probs and d_sec in trans_probs) else trans_probs.get(d_main)
                     print(f"Deep champion component: weighted consensus of {d_main} (70%) and {d_sec} (30%)")
+                elif "auditddi_target_seq_fusion" in s1_probs:
+                    d_sec = "auditddi_target_seq_fusion"
+                    p_deep_s1 = 0.70 * s1_probs[d_main] + 0.30 * s1_probs[d_sec]
+                    p_deep_ct = 0.70 * cold_target_probs[d_main] + 0.30 * cold_target_probs[d_sec]
+                    p_deep_s2 = (0.70 * s2_probs[d_main] + 0.30 * s2_probs[d_sec]) if (d_main in s2_probs and d_sec in s2_probs) else s2_probs.get(d_main)
+                    p_deep_val = (0.70 * val_probs[d_main] + 0.30 * val_probs[d_sec]) if (d_main in val_probs and d_sec in val_probs) else val_probs.get(d_main)
+                    p_deep_trans = (0.70 * trans_probs[d_main] + 0.30 * trans_probs[d_sec]) if (d_main in trans_probs and d_sec in trans_probs) else trans_probs.get(d_main)
+                    print(f"Deep champion component: weighted consensus of {d_main} (70%) and {d_sec} (30%)")
                 else:
                     p_deep_s1 = s1_probs[d_main]
                     p_deep_ct = cold_target_probs[d_main]
@@ -1494,7 +1502,7 @@ def run_cold_target_study(
                 p_deep_trans = trans_probs.get(fallback_name)
 
             # 2. Balanced soft-voting blend across orthogonal model paradigms
-            # Anchor primarily (65%) to deep sequence champion, enriched with 35% invariant tree signal
+            # Anchor primarily (65%) to deep sequence champion, enriched with 35% invariant tree signal for S1
             best_alpha = 0.65
             p_s1_blend = best_alpha * p_deep_s1 + (1.0 - best_alpha) * s1_probs[tree_model_name]
             s1_probs["auditddi_ensemble_blend"] = p_s1_blend
@@ -1539,12 +1547,13 @@ def run_cold_target_study(
 
             ct_m_blend = s1_m_blend if cold_target_equals_s1 else compute_comprehensive_metrics(cold_target_labels, p_ct_blend, threshold=best_thresh_blend)
 
-            # S2 Semi-Inductive
+            # S2 Semi-Inductive (Weighted 85% deep consensus + 15% tree for optimal representation fusion)
+            alpha_s2 = 0.85
             s2_m_blend = None
             s2_cal_m_blend = None
             p_s2_blend = None
             if p_deep_s2 is not None and tree_model_name in s2_probs and s2_labels is not None:
-                p_s2_blend = best_alpha * p_deep_s2 + (1.0 - best_alpha) * s2_probs[tree_model_name]
+                p_s2_blend = alpha_s2 * p_deep_s2 + (1.0 - alpha_s2) * s2_probs[tree_model_name]
                 s2_probs["auditddi_ensemble_blend"] = p_s2_blend
                 s2_m_blend = compute_comprehensive_metrics(s2_labels, p_s2_blend, threshold=best_thresh_blend)
                 s2_fpr, s2_tpr, s2_threshs = roc_curve(s2_labels, p_s2_blend)
