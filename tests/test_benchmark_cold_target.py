@@ -116,7 +116,7 @@ def test_extract_inductive_pair_features_and_hybrid_flow(tmp_path):
     device = torch.device("cpu")
     X, y, deep_p = extract_inductive_pair_features(model, loader, device)
     assert X.shape[0] == 4
-    assert X.shape[1] == 19  # Includes continuous Tanimoto similarity
+    assert X.shape[1] == 27  # Includes continuous physicochemical, similarity, K-NN transfer, and cross terms
     assert len(y) == 4
     assert len(deep_p) == 4
     assert not np.isnan(X).any()
@@ -126,6 +126,57 @@ def test_extract_inductive_pair_features_and_hybrid_flow(tmp_path):
     probs = clf.predict_proba(X)[:, 1]
     assert len(probs) == 4
     assert np.all((probs >= 0.0) & (probs <= 1.0))
+
+
+def test_training_graph_retrieval_index_inductive_s2():
+    from src.training.benchmark_cold_target import TrainingGraphRetrievalIndex
+    
+    # 1. Setup mock training dataframe with known edges
+    # Train drugs: D1, D2, D3
+    # D1-D2 has DDI (label 1), D1-D3 has no DDI (label 0)
+    df_train = pd.DataFrame({
+        "drug_a": ["D1", "D1"],
+        "drug_b": ["D2", "D3"],
+        "label": [1.0, 0.0],
+    })
+    
+    # Mock fingerprint dict (dim 128 for testing)
+    rng = np.random.RandomState(42)
+    fp_dim = 128
+    fps = {
+        "D1": rng.randn(fp_dim).astype(np.float32),
+        "D2": rng.randn(fp_dim).astype(np.float32),
+        "D3": rng.randn(fp_dim).astype(np.float32),
+    }
+    
+    index = TrainingGraphRetrievalIndex(df_train=df_train, training_fps=fps, k=2)
+    
+    # Test Transductive Pair (both in training) -> is_s2 == 0.0
+    t_sc, m_sim, is_s2 = index.query_pair("D1", "D2", fps["D1"], fps["D2"])
+    assert is_s2 == 0.0
+    
+    # Test S2 Pair: Novel drug D_unseen, known training drug D2
+    # Make D_unseen very close to D1
+    fp_novel = fps["D1"] + 0.01 * rng.randn(fp_dim).astype(np.float32)
+    t_sc, m_sim, is_s2 = index.query_pair("D_unseen", "D2", fp_novel, fps["D2"])
+    assert is_s2 == 1.0
+    assert m_sim > 0.90  # Very high similarity to D1
+    # Since D1 interacts with D2 (label 1.0), transfer score should be close to 1.0
+    assert t_sc > 0.50
+    
+    # Test Order-Invariance: query_pair(novel, train) == query_pair(train, novel)
+    t_sc_rev, m_sim_rev, is_s2_rev = index.query_pair("D2", "D_unseen", fps["D2"], fp_novel)
+    assert is_s2 == is_s2_rev
+    assert np.isclose(t_sc, t_sc_rev, atol=1e-5)
+    assert np.isclose(m_sim, m_sim_rev, atol=1e-5)
+    
+    # Test S1 Pair: Both drugs novel -> is_s2 == 0.0, knn_transfer == 0.0
+    fp_novel_2 = rng.randn(fp_dim).astype(np.float32)
+    t_sc_s1, m_sim_s1, is_s2_s1 = index.query_pair("D_unseen_1", "D_unseen_2", fp_novel, fp_novel_2)
+    assert is_s2_s1 == 0.0
+    assert t_sc_s1 == 0.0
+    assert m_sim_s1 == 0.0
+
 
 
 def test_ensemble_blend_and_calibrated_threshold():
@@ -156,3 +207,4 @@ def test_ensemble_blend_and_calibrated_threshold():
     # Calibrated threshold maximizes balanced accuracy and recall
     assert m_cal["sensitivity"] >= m_std["sensitivity"]
     assert m_cal["sensitivity"] == 1.0
+

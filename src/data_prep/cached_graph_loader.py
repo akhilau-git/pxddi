@@ -430,6 +430,8 @@ class CachedDDIPairDataset(Dataset):
             'target_seq_b': self.cache.target_sequences.get(sb, ""),
             'biophysical_a': self.cache.biophysical_vectors.get(sa, torch.zeros(BIOPHYSICAL_DIM, dtype=torch.float32)),
             'biophysical_b': self.cache.biophysical_vectors.get(sb, torch.zeros(BIOPHYSICAL_DIM, dtype=torch.float32)),
+            'drug_a_id': sa,
+            'drug_b_id': sb,
             'label': torch.tensor(lbl, dtype=torch.float32),
         }
         if self.memory_features and index < len(self.memory_features):
@@ -447,6 +449,8 @@ def multimodal_collate_fn(batch_items: list[dict[str, Any]]) -> dict[str, Any]:
     batch = {
         'drug_a': Batch.from_data_list(graph_a_list),
         'drug_b': Batch.from_data_list(graph_b_list),
+        'drug_a_id': [item.get('drug_a_id', '') for item in batch_items],
+        'drug_b_id': [item.get('drug_b_id', '') for item in batch_items],
         'fp_a': torch.stack([item['fp_a'] for item in batch_items]),
         'fp_b': torch.stack([item['fp_b'] for item in batch_items]),
         'gene_a': torch.stack([item['gene_a'] for item in batch_items]),

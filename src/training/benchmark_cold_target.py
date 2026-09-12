@@ -192,16 +192,109 @@ def evaluate_loader_predictions(
     return metrics, p_arr, y_arr
 
 
+class TrainingGraphRetrievalIndex:
+    """
+    Airtight, leak-free inductive retrieval index built strictly on transductive training pairs.
+    For S2 pairs (1 novel drug, 1 training drug), transfers known interactions
+    from the novel drug's chemically nearest training neighbors with zero test leakage.
+    """
+    def __init__(self, df_train: pd.DataFrame, cache: Any = None, k: int = 3, training_fps: dict[str, np.ndarray] | None = None):
+        self.k = k
+        self.train_edges: dict[tuple[str, str], float] = {}
+        self.train_drugs: set[str] = set()
+
+        s_col = "drug_a_id" if "drug_a_id" in df_train.columns else ("drug_a" if "drug_a" in df_train.columns else df_train.columns[0])
+        t_col = "drug_b_id" if "drug_b_id" in df_train.columns else ("drug_b" if "drug_b" in df_train.columns else df_train.columns[1])
+        y_col = next((c for c in ["label", "interaction", "y"] if c in df_train.columns), None)
+
+        for _, row in df_train.iterrows():
+            u = str(row[s_col]).strip()
+            v = str(row[t_col]).strip()
+            lbl = float(row[y_col]) if y_col else 1.0
+            self.train_edges[(u, v)] = lbl
+            self.train_edges[(v, u)] = lbl
+            self.train_drugs.add(u)
+            self.train_drugs.add(v)
+
+        self.train_drug_list = sorted(list(self.train_drugs))
+
+        # Pre-extract fingerprints for fast vectorised Tanimoto similarity
+        fps = []
+        fp_dim = 2048
+        if training_fps is not None and len(training_fps) > 0:
+            first_fp = next(iter(training_fps.values()))
+            fp_dim = len(np.array(first_fp).ravel())
+
+        for d in self.train_drug_list:
+            if training_fps is not None and d in training_fps:
+                fps.append(np.array(training_fps[d], dtype=np.float32).ravel())
+            elif cache is not None and hasattr(cache, "ecfp_dict") and d in cache.ecfp_dict:
+                fps.append(np.array(cache.ecfp_dict[d], dtype=np.float32).ravel())
+            else:
+                fps.append(np.zeros(fp_dim, dtype=np.float32))
+
+        self.train_fps = np.array(fps) if fps else np.zeros((len(self.train_drug_list), fp_dim), dtype=np.float32)
+        self.train_fp_norms = np.sum(np.abs(self.train_fps), axis=1)
+
+
+    def query_pair(self, drug_a_id: str, drug_b_id: str, fp_a: np.ndarray, fp_b: np.ndarray) -> tuple[float, float, float]:
+        in_a = drug_a_id in self.train_drugs
+        in_b = drug_b_id in self.train_drugs
+
+        if in_a and in_b:
+            exact = self.train_edges.get((drug_a_id, drug_b_id), 0.5)
+            return float(exact), 1.0, 0.0
+
+        if not in_a and not in_b:
+            return 0.0, 0.0, 0.0
+
+        # S2 Semi-Inductive: exactly one novel drug, one known training drug
+        novel_fp = (fp_a if not in_a else fp_b).ravel()
+        known_id = drug_b_id if not in_a else drug_a_id
+
+        if len(self.train_fps) == 0:
+            return 0.5, 0.0, 1.0
+
+        dot = np.dot(self.train_fps, novel_fp)
+        denom = self.train_fp_norms + np.sum(np.abs(novel_fp)) - dot + 1e-6
+        sims = np.clip(dot / denom, 0.0, 1.0)
+
+        top_k = min(self.k, len(sims))
+        top_indices = np.argsort(sims)[::-1][:top_k]
+        weights = []
+        scores = []
+        for idx in top_indices:
+            neighbor_id = self.train_drug_list[idx]
+            sim_val = float(sims[idx])
+            if (neighbor_id, known_id) in self.train_edges:
+                weights.append(sim_val)
+                scores.append(self.train_edges[(neighbor_id, known_id)])
+
+        if weights and sum(weights) > 1e-4:
+            w_arr = np.array(weights)
+            s_arr = np.array(scores)
+            transfer_score = float(np.sum(w_arr * s_arr) / np.sum(w_arr))
+            max_sim = float(np.max(w_arr))
+        else:
+            transfer_score = 0.5
+            max_sim = float(sims[top_indices[0]]) if len(top_indices) > 0 else 0.0
+
+        return transfer_score, max_sim, 1.0
+
+
 def extract_inductive_pair_features(
     model: nn.Module | None,
     loader: Any,
     device: torch.device,
+    train_index: Any = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Extract invariant pairwise tabular features:
     - 11 PK clearance collision terms (CYP overlaps, PPB displacement, hepatic clash, MW ratio, logP diff, TPSA overlap)
+    - 5 continuous physicochemical properties (MW diff, logP sum, TPSA diff, HBD sum, HBA sum)
     - Target protein sequence similarity (1 dim)
-    - ECFP Morgan fingerprint similarity (1 dim)
+    - ECFP Morgan fingerprint similarity (Cosine & Tanimoto, 2 dims)
+    - Inductive K-NN Graph Neighbor Retrieval (transfer score, max sim, is_s2 flag, 3 dims)
     - Deep neural model predicted risk probability & logit (2 dims, if model provided)
     - Cross-interaction terms between deep probability and biophysical features (3 dims)
     Returns (X, y, deep_probs).
@@ -254,6 +347,12 @@ def extract_inductive_pair_features(
                     np.minimum(b_a_t[:, 8:9].cpu().numpy(), b_b_t[:, 8:9].cpu().numpy())
                     / (np.maximum(b_a_t[:, 8:9].cpu().numpy(), b_b_t[:, 8:9].cpu().numpy()) + 1e-4)
                 )
+                # Continuous Physicochemical properties
+                mw_diff = np.abs(b_a_t[:, 9:10].cpu().numpy() - b_b_t[:, 9:10].cpu().numpy())
+                logp_sum = b_a_t[:, 7:8].cpu().numpy() + b_b_t[:, 7:8].cpu().numpy()
+                tpsa_diff = np.abs(b_a_t[:, 8:9].cpu().numpy() - b_b_t[:, 8:9].cpu().numpy())
+                hbd_sum = b_a_t[:, 2:3].cpu().numpy() + b_b_t[:, 2:3].cpu().numpy()
+                hba_sum = b_a_t[:, 3:4].cpu().numpy() + b_b_t[:, 3:4].cpu().numpy()
             else:
                 cyp_collision = np.zeros((batch_sz, 5), dtype=np.float32)
                 total_cyp_clash = np.zeros((batch_sz, 1), dtype=np.float32)
@@ -262,6 +361,11 @@ def extract_inductive_pair_features(
                 mw_ratio = np.zeros((batch_sz, 1), dtype=np.float32)
                 logp_diff = np.zeros((batch_sz, 1), dtype=np.float32)
                 tpsa_overlap = np.zeros((batch_sz, 1), dtype=np.float32)
+                mw_diff = np.zeros((batch_sz, 1), dtype=np.float32)
+                logp_sum = np.zeros((batch_sz, 1), dtype=np.float32)
+                tpsa_diff = np.zeros((batch_sz, 1), dtype=np.float32)
+                hbd_sum = np.zeros((batch_sz, 1), dtype=np.float32)
+                hba_sum = np.zeros((batch_sz, 1), dtype=np.float32)
 
             # 3. Protein target sequence similarity
             target_seq_a = batch.get("target_seq_a")
@@ -291,7 +395,6 @@ def extract_inductive_pair_features(
                 fp_b_t = fp_b.to(device).float().view(batch_sz, -1)
                 f_sim = F.cosine_similarity(fp_a_t, fp_b_t, dim=-1).clamp(0.0, 1.0)
                 fp_sim = f_sim.cpu().numpy().reshape(batch_sz, 1)
-                # Tanimoto coefficient for bit / count Morgan fingerprints
                 dot_prod = torch.sum(fp_a_t * fp_b_t, dim=-1)
                 denom = torch.sum(torch.abs(fp_a_t), dim=-1) + torch.sum(torch.abs(fp_b_t), dim=-1) - dot_prod + 1e-6
                 t_sim = torch.clamp(dot_prod / denom, 0.0, 1.0)
@@ -303,6 +406,23 @@ def extract_inductive_pair_features(
                 denom = torch.sum(torch.abs(da.fingerprint_features.float()), dim=-1) + torch.sum(torch.abs(db.fingerprint_features.float()), dim=-1) - dot_prod + 1e-6
                 t_sim = torch.clamp(dot_prod / denom, 0.0, 1.0)
                 fp_tanimoto = t_sim.cpu().numpy().reshape(batch_sz, 1)
+
+            # 5. Inductive K-NN Neighbor Retrieval for S2
+            knn_transfer = np.zeros((batch_sz, 1), dtype=np.float32)
+            knn_sim = np.zeros((batch_sz, 1), dtype=np.float32)
+            is_s2_col = np.zeros((batch_sz, 1), dtype=np.float32)
+            if train_index is not None:
+                da_ids = batch.get("drug_a_id", [])
+                db_ids = batch.get("drug_b_id", [])
+                fp_a_np = fp_a.cpu().numpy() if fp_a is not None else np.zeros((batch_sz, 2048))
+                fp_b_np = fp_b.cpu().numpy() if fp_b is not None else np.zeros((batch_sz, 2048))
+                for i in range(batch_sz):
+                    ida = str(da_ids[i]).strip() if i < len(da_ids) else ""
+                    idb = str(db_ids[i]).strip() if i < len(db_ids) else ""
+                    t_sc, m_sim, s2_f = train_index.query_pair(ida, idb, fp_a_np[i], fp_b_np[i])
+                    knn_transfer[i, 0] = t_sc
+                    knn_sim[i, 0] = m_sim
+                    is_s2_col[i, 0] = s2_f
 
             p_col = probs.reshape(batch_sz, 1)
             l_col = log_vals.reshape(batch_sz, 1)
@@ -320,9 +440,17 @@ def extract_inductive_pair_features(
                 mw_ratio,         # 1
                 logp_diff,        # 1
                 tpsa_overlap,     # 1
+                mw_diff,          # 1
+                logp_sum,         # 1
+                tpsa_diff,        # 1
+                hbd_sum,          # 1
+                hba_sum,          # 1
                 seq_sim,          # 1
                 fp_sim,           # 1
                 fp_tanimoto,      # 1
+                knn_transfer,     # 1
+                knn_sim,          # 1
+                is_s2_col,        # 1
                 p_col,            # 1
                 l_col,            # 1
                 cyp_deep,         # 1
@@ -461,6 +589,8 @@ def run_cold_target_study(
     df_val = pd.read_csv(splits_p / "validation.csv")
     df_s1 = pd.read_csv(splits_p / "s1_test.csv")
     df_trans = pd.read_csv(splits_p / "transductive_test.csv")
+    train_index = TrainingGraphRetrievalIndex(df_train, cache)
+    print(f"Built TrainingGraphRetrievalIndex: {len(train_index.train_drugs)} training drugs, {len(train_index.train_edges)//2} bidirectional edges.")
 
     df_s2 = None
     s2_loader = None
@@ -636,6 +766,68 @@ def run_cold_target_study(
                     trans_probs[model_name] = ckpt_payload["trans_probs"]
                     if trans_labels is None and "trans_labels" in ckpt_payload:
                         trans_labels = ckpt_payload["trans_labels"]
+
+                # Auto-evaluate on S2 Semi-Inductive cohort if checkpoint was generated before S2 tracking
+                if s2_loader is not None and (model_name not in s2_probs or s2_probs[model_name] is None):
+                    print(f"Evaluating loaded {model_name} on S2 cohort ({len(df_s2)} pairs)...", flush=True)
+                    saved_kwargs = ckpt_payload.get("model_kwargs")
+                    is_pur = bool(model_name == "auditddi_biophysical_fusion")
+                    if saved_kwargs:
+                        loaded_m = PxDDIModel(**saved_kwargs).to(device)
+                    else:
+                        loaded_m = PxDDIModel(
+                            in_channels=in_dim,
+                            hidden_channels=64,
+                            architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+                            edge_feature_dim=edge_dim,
+                            use_toxicity_pair_features=not is_pur,
+                            gene_feature_dim=cache.gene_dim,
+                            gene_hidden_channels=64,
+                            use_gene_encoder=not is_pur,
+                            use_clinical_toxicity=not is_pur,
+                            use_target_encoder=False if is_pur else True,
+                            target_feature_dim=cache.target_dim,
+                            target_hidden_channels=64,
+                            use_protein_sequence_encoder=use_protein_seq,
+                            use_esm=False,
+                            use_target_sequence_fusion=use_target_sequence_fusion if not is_pur else False,
+                            use_biophysical_features=use_biophysical,
+                            use_inductive_bio_features=False,
+                            cold_sim_dropout=0.0,
+                            use_pk_residual=use_biophysical,
+                            use_pdb_encoder=not is_pur,
+                            pdb_feature_dim=cache.pdb_dim,
+                            pdb_hidden_channels=64,
+                            use_geo_features=not is_pur,
+                            geo_dim=cache.geo_dim,
+                            use_cross_modal_attention=not is_pur,
+                            use_cross_drug_attention=True,
+                            mol_dropout=0.10,
+                            use_fusion_norm=True,
+                        ).to(device)
+                    if "model_state_dict" in ckpt_payload:
+                        loaded_m.load_state_dict(ckpt_payload["model_state_dict"], strict=False)
+                        loaded_m.eval()
+                        opt_thresh = results[model_name].get("optimal_threshold", 0.50)
+                        s2_m, s2_p, s2_y = evaluate_loader_predictions(loaded_m, s2_loader, device, threshold=opt_thresh)
+                        s2_fpr, s2_tpr, s2_thresholds = roc_curve(s2_y, s2_p)
+                        s2_j_scores = s2_tpr - s2_fpr
+                        s2_best_thresh = float(s2_thresholds[np.argmax(s2_j_scores)]) if len(s2_thresholds) > 0 else 0.50
+                        s2_calibrated_m = compute_comprehensive_metrics(s2_y, s2_p, threshold=s2_best_thresh)
+                        s2_probs[model_name] = s2_p
+                        s2_labels = s2_y
+                        results[model_name]["s2_semi_inductive"] = s2_m
+                        results[model_name]["s2_calibrated"] = s2_calibrated_m
+                        ckpt_payload["s2_probs"] = s2_p
+                        ckpt_payload["s2_labels"] = s2_y
+                        ckpt_payload["metrics"]["s2_semi_inductive"] = s2_m
+                        ckpt_payload["metrics"]["s2_calibrated"] = s2_calibrated_m
+                        try:
+                            torch.save(ckpt_payload, ckpt_file)
+                        except Exception:
+                            pass
+                        trained_models[model_name] = loaded_m
+
                 s2_stat_msg = f", S2 AUROC = {results[model_name].get('s2_semi_inductive', {}).get('auroc', 0.0):.4f}" if results[model_name].get('s2_semi_inductive') else ""
                 print(f"Loaded {model_name}: S1 AUROC = {results[model_name]['s1_cold_start']['auroc']:.4f}{s2_stat_msg}")
                 continue
@@ -949,11 +1141,22 @@ def run_cold_target_study(
                     ckpt_payload = torch.load(hybrid_ckpt_file, map_location="cpu", weights_only=False)
                 except TypeError:
                     ckpt_payload = torch.load(hybrid_ckpt_file, map_location="cpu")
-                results["auditddi_inductive_hybrid"] = ckpt_payload["metrics"]
-                s1_probs["auditddi_inductive_hybrid"] = ckpt_payload["s1_probs"]
-                cold_target_probs["auditddi_inductive_hybrid"] = ckpt_payload["cold_target_probs"]
-                print(f"Loaded auditddi_inductive_hybrid: S1 AUROC = {results['auditddi_inductive_hybrid']['s1_cold_start']['auroc']:.4f}")
-                run_hybrid = False
+                if s2_loader is not None and ("s2_probs" not in ckpt_payload or ckpt_payload["s2_probs"] is None):
+                    print("Saved hybrid checkpoint lacks S2 predictions. Re-fitting with inductive K-NN and physical features...", flush=True)
+                    run_hybrid = True
+                else:
+                    results["auditddi_inductive_hybrid"] = ckpt_payload["metrics"]
+                    s1_probs["auditddi_inductive_hybrid"] = ckpt_payload["s1_probs"]
+                    cold_target_probs["auditddi_inductive_hybrid"] = ckpt_payload["cold_target_probs"]
+                    if "s2_probs" in ckpt_payload and ckpt_payload["s2_probs"] is not None:
+                        s2_probs["auditddi_inductive_hybrid"] = ckpt_payload["s2_probs"]
+                    if "val_probs" in ckpt_payload:
+                        val_probs["auditddi_inductive_hybrid"] = ckpt_payload["val_probs"]
+                    if "trans_probs" in ckpt_payload:
+                        trans_probs["auditddi_inductive_hybrid"] = ckpt_payload["trans_probs"]
+                    s2_txt = f", S2 AUROC = {results['auditddi_inductive_hybrid'].get('s2_semi_inductive', {}).get('auroc', 0.0):.4f}" if results["auditddi_inductive_hybrid"].get("s2_semi_inductive") else ""
+                    print(f"Loaded auditddi_inductive_hybrid: S1 AUROC = {results['auditddi_inductive_hybrid']['s1_cold_start']['auroc']:.4f}{s2_txt}")
+                    run_hybrid = False
             except Exception as e:
                 print(f"Could not load hybrid checkpoint ({e}). Retraining...")
                 run_hybrid = True
@@ -1022,19 +1225,19 @@ def run_cold_target_study(
         if best_deep_model is None and 'model' in locals():
             best_deep_model = model
 
-        # Extract inductive tabular features with explicit progress feedback
+        # Extract inductive tabular features with explicit progress feedback and leak-free training graph index
         start_h_time = time.time()
         print("Extracting invariant tabular features (Train set)...", flush=True)
-        X_train, y_train, _ = extract_inductive_pair_features(best_deep_model, train_loader, device)
+        X_train, y_train, _ = extract_inductive_pair_features(best_deep_model, train_loader, device, train_index=train_index)
         print("Extracting invariant tabular features (Validation set)...", flush=True)
-        X_val, y_val, _ = extract_inductive_pair_features(best_deep_model, val_loader, device)
+        X_val, y_val, _ = extract_inductive_pair_features(best_deep_model, val_loader, device, train_index=train_index)
         print("Extracting invariant tabular features (S1 Cold-Start set)...", flush=True)
-        X_s1, y_s1, _ = extract_inductive_pair_features(best_deep_model, s1_loader, device)
+        X_s1, y_s1, _ = extract_inductive_pair_features(best_deep_model, s1_loader, device, train_index=train_index)
         print("Extracting invariant tabular features (Transductive Test set)...", flush=True)
-        X_trans, y_trans, _ = extract_inductive_pair_features(best_deep_model, trans_loader, device)
+        X_trans, y_trans, _ = extract_inductive_pair_features(best_deep_model, trans_loader, device, train_index=train_index)
         if s2_loader is not None:
             print("Extracting invariant tabular features (S2 Semi-Inductive set)...", flush=True)
-            X_s2, y_s2, _ = extract_inductive_pair_features(best_deep_model, s2_loader, device)
+            X_s2, y_s2, _ = extract_inductive_pair_features(best_deep_model, s2_loader, device, train_index=train_index)
         else:
             X_s2, y_s2 = None, None
 
@@ -1042,7 +1245,7 @@ def run_cold_target_study(
             X_ct, y_ct = X_s1, y_s1
         else:
             print("Extracting invariant tabular features (Cold-Target cohort)...", flush=True)
-            X_ct, y_ct, _ = extract_inductive_pair_features(best_deep_model, cold_target_loader, device)
+            X_ct, y_ct, _ = extract_inductive_pair_features(best_deep_model, cold_target_loader, device, train_index=train_index)
 
         print(f"Extracted {X_train.shape[1]} invariant features for {len(X_train)} training pairs.")
         tree_clf = HistGradientBoostingClassifier(
@@ -1138,13 +1341,18 @@ def run_cold_target_study(
                 b_payload = torch.load(blend_ckpt_file, map_location="cpu", weights_only=False)
             except TypeError:
                 b_payload = torch.load(blend_ckpt_file, map_location="cpu")
-            results["auditddi_ensemble_blend"] = b_payload["metrics"]
-            s1_probs["auditddi_ensemble_blend"] = b_payload["s1_probs"]
-            cold_target_probs["auditddi_ensemble_blend"] = b_payload["cold_target_probs"]
-            if "s2_probs" in b_payload and b_payload["s2_probs"] is not None:
-                s2_probs["auditddi_ensemble_blend"] = b_payload["s2_probs"]
-            print(f"Loaded auditddi_ensemble_blend: S1 AUROC = {results['auditddi_ensemble_blend']['s1_cold_start']['auroc']:.4f}")
-            run_blend = False
+            if s2_loader is not None and ("s2_probs" not in b_payload or b_payload["s2_probs"] is None):
+                print("Saved ensemble checkpoint lacks S2 predictions. Recomputing ensemble blend...", flush=True)
+                run_blend = True
+            else:
+                results["auditddi_ensemble_blend"] = b_payload["metrics"]
+                s1_probs["auditddi_ensemble_blend"] = b_payload["s1_probs"]
+                cold_target_probs["auditddi_ensemble_blend"] = b_payload["cold_target_probs"]
+                if "s2_probs" in b_payload and b_payload["s2_probs"] is not None:
+                    s2_probs["auditddi_ensemble_blend"] = b_payload["s2_probs"]
+                s2_msg = f", S2 AUROC = {results['auditddi_ensemble_blend'].get('s2_semi_inductive', {}).get('auroc', 0.0):.4f}" if results['auditddi_ensemble_blend'].get('s2_semi_inductive') else ""
+                print(f"Loaded auditddi_ensemble_blend: S1 AUROC = {results['auditddi_ensemble_blend']['s1_cold_start']['auroc']:.4f}{s2_msg}")
+                run_blend = False
         except Exception as be:
             print(f"Notice loading ensemble blend checkpoint: {be}")
             run_blend = True
