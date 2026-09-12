@@ -434,6 +434,7 @@ def run_cold_target_study(
 
         use_cross_drug = bool(kwargs.get("use_cross_drug_attention", True))
         mol_drop = float(kwargs.get("mol_dropout", 0.20))
+        cold_sim_drop = float(kwargs.get("cold_sim_dropout", 0.30 if use_biophysical else 0.0))
         use_fnorm = bool(kwargs.get("use_fusion_norm", True))
         w_decay = float(kwargs.get("weight_decay", 1e-3))
 
@@ -454,6 +455,8 @@ def run_cold_target_study(
             use_target_sequence_fusion=use_target_sequence_fusion,
             use_biophysical_features=use_biophysical,
             use_inductive_bio_features=bool(kwargs.get("use_inductive_bio_features", False)),
+            cold_sim_dropout=cold_sim_drop,
+            use_pk_residual=use_biophysical,
             use_pdb_encoder=True,
             pdb_feature_dim=cache.pdb_dim,
             pdb_hidden_channels=64,
@@ -798,6 +801,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true", default=True, help="Resume execution from existing checkpoints in output_dir")
     parser.add_argument("--force_retrain", action="store_true", default=False, help="Force retraining of models even if a checkpoint exists")
     parser.add_argument("--no_resume", dest="resume", action="store_false", help="Disable checkpoint resumption")
+    parser.add_argument("--cold_sim_dropout", type=float, default=0.30, help="Cold-start simulation graph dropout rate (Solution A)")
     args = parser.parse_args()
 
     data_p = Path(args.data_dir)
@@ -877,4 +881,5 @@ if __name__ == "__main__":
         models=args.models,
         resume=args.resume,
         force_retrain=args.force_retrain,
+        cold_sim_dropout=args.cold_sim_dropout,
     )

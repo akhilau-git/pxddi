@@ -432,6 +432,16 @@ class PxDDIModel(nn.Module):
             self.biophysical_gate = None
         # 2 * hidden_channels (sum + diff) + 11 explicit pairwise interaction collision terms
         biophysical_channels = (self.biophysical_hidden_channels * 2 + 11) if self.biophysical_encoder is not None else 0
+        self.cold_sim_dropout = float(kwargs.get('cold_sim_dropout', 0.0))
+        self.use_pk_residual = bool(kwargs.get('use_pk_residual', True) and self.use_biophysical_features)
+        if self.use_pk_residual:
+            self.pk_residual_head = nn.Sequential(
+                nn.Linear(11, 16),
+                nn.ReLU(),
+                nn.Linear(16, 1),
+            )
+        else:
+            self.pk_residual_head = None
 
         risk_input_channels = pair_embedding_channels * pair_feature_multiplier + (
             2 if use_toxicity_pair_features else 0
@@ -600,6 +610,15 @@ class PxDDIModel(nn.Module):
             mask_b = (torch.rand((eb.size(0), 1), device=eb.device) < keep_prob).float()
             ea = (ea * mask_a) / keep_prob
             eb = (eb * mask_b) / keep_prob
+
+        # Solution A: Cold-Start Simulation Masking (DropNode / Graph Representation Masking)
+        # Randomly zeroes out GNN graph representations to force model to learn non-graph biophysical interaction mechanisms
+        if self.training and getattr(self, 'cold_sim_dropout', 0.0) > 0.0:
+            p_drop = self.cold_sim_dropout
+            sim_mask_a = (torch.rand((ea.size(0), 1), device=ea.device) >= p_drop).float()
+            sim_mask_b = (torch.rand((eb.size(0), 1), device=eb.device) >= p_drop).float()
+            ea = ea * sim_mask_a
+            eb = eb * sim_mask_b
             
         if self.motif_encoder is not None:
             if not hasattr(drug_a, 'motif_features') or not hasattr(drug_b, 'motif_features'):
@@ -919,6 +938,7 @@ class PxDDIModel(nn.Module):
 
             features.append(torch.cat(inductive_feats, dim=1))
 
+        pair_collision_terms = None
         if self.use_biophysical_features:
             if biophysical_a is not None and biophysical_b is not None:
                 b_a = biophysical_a.float().view(ea.size(0), -1)
@@ -974,6 +994,15 @@ class PxDDIModel(nn.Module):
         risk_out = self.risk_classifier(combined)
         if self.num_side_effects == 1:
             risk_out = risk_out.squeeze(-1)
+
+        # Solution B: Explicit Pharmacokinetic Collision Residual Connection
+        pk_head = getattr(self, 'pk_residual_head', None)
+        if pk_head is not None and pair_collision_terms is not None:
+            pk_logit = pk_head(pair_collision_terms)
+            if self.num_side_effects == 1:
+                risk_out = risk_out + pk_logit.squeeze(-1)
+            else:
+                risk_out = risk_out + pk_logit
 
         return (
             risk_out,
