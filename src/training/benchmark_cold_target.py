@@ -266,6 +266,12 @@ def run_cold_target_study(
     val_loader = build_cached_multimodal_dataloader(df_val, cache, batch_size=batch_size, shuffle=False)
     s1_loader = build_cached_multimodal_dataloader(df_s1, cache, batch_size=batch_size, shuffle=False)
     trans_loader = build_cached_multimodal_dataloader(df_trans, cache, batch_size=batch_size, shuffle=False)
+    s1_dev_p = splits_p / "s1_dev.csv"
+    if s1_dev_p.is_file():
+        df_s1_dev = pd.read_csv(s1_dev_p)
+        cold_val_loader = build_cached_multimodal_dataloader(df_s1_dev, cache, batch_size=batch_size, shuffle=False)
+    else:
+        cold_val_loader = s1_loader
 
     # Defensively ensure target_sequences attribute exists on cache
     if not hasattr(cache, "target_sequences") or not cache.target_sequences:
@@ -493,6 +499,7 @@ def run_cold_target_study(
         scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
         best_val_auc = 0.0
+        best_cold_auc = 0.0
         best_state = None
         start_time = time.time()
 
@@ -515,11 +522,16 @@ def run_cold_target_study(
 
             scheduler.step()
             val_m, _, _ = evaluate_loader_predictions(model, val_loader, device)
-            if val_m["auroc"] > best_val_auc:
-                best_val_auc = val_m["auroc"]
+            cold_m, _, _ = evaluate_loader_predictions(model, cold_val_loader, device)
+            # Track best state by cold-start generalization to prevent transductive overfitting
+            if cold_m["auroc"] > best_cold_auc:
+                best_cold_auc = cold_m["auroc"]
                 best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
-            print(f"Epoch {ep:02d}/{epochs:02d} - Loss: {train_loss / len(train_loader):.4f} - Val AUROC: {val_m['auroc']:.4f}")
+            print(
+                f"Epoch {ep:02d}/{epochs:02d} - Loss: {train_loss / len(train_loader):.4f} - "
+                f"Val AUROC (Transductive): {val_m['auroc']:.4f} - S1 AUROC (Cold-Start): {cold_m['auroc']:.4f}"
+            )
 
         if best_state is not None:
             model.load_state_dict(best_state)
