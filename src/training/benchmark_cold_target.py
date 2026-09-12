@@ -220,20 +220,35 @@ class TrainingGraphRetrievalIndex:
 
         # Pre-extract fingerprints for fast vectorised Tanimoto similarity
         fps = []
-        fp_dim = 2048
+        fp_dim = 1024
         if training_fps is not None and len(training_fps) > 0:
             first_fp = next(iter(training_fps.values()))
+            fp_dim = len(np.array(first_fp).ravel())
+        elif cache is not None and hasattr(cache, "fingerprints") and len(cache.fingerprints) > 0:
+            first_fp = next(iter(cache.fingerprints.values()))
+            if isinstance(first_fp, torch.Tensor):
+                fp_dim = first_fp.numel()
+            else:
+                fp_dim = len(np.array(first_fp).ravel())
+        elif cache is not None and hasattr(cache, "ecfp_dict") and len(cache.ecfp_dict) > 0:
+            first_fp = next(iter(cache.ecfp_dict.values()))
             fp_dim = len(np.array(first_fp).ravel())
 
         for d in self.train_drug_list:
             if training_fps is not None and d in training_fps:
                 fps.append(np.array(training_fps[d], dtype=np.float32).ravel())
+            elif cache is not None and hasattr(cache, "fingerprints") and d in cache.fingerprints:
+                fp_val = cache.fingerprints[d]
+                if isinstance(fp_val, torch.Tensor):
+                    fps.append(fp_val.detach().cpu().numpy().astype(np.float32).ravel())
+                else:
+                    fps.append(np.array(fp_val, dtype=np.float32).ravel())
             elif cache is not None and hasattr(cache, "ecfp_dict") and d in cache.ecfp_dict:
                 fps.append(np.array(cache.ecfp_dict[d], dtype=np.float32).ravel())
             else:
                 fps.append(np.zeros(fp_dim, dtype=np.float32))
 
-        self.train_fps = np.array(fps) if fps else np.zeros((len(self.train_drug_list), fp_dim), dtype=np.float32)
+        self.train_fps = np.array(fps, dtype=np.float32) if fps else np.zeros((len(self.train_drug_list), fp_dim), dtype=np.float32)
         self.train_fp_norms = np.sum(np.abs(self.train_fps), axis=1)
 
 
@@ -254,6 +269,15 @@ class TrainingGraphRetrievalIndex:
 
         if len(self.train_fps) == 0:
             return 0.5, 0.0, 1.0
+
+        target_dim = self.train_fps.shape[1]
+        if novel_fp.shape[0] != target_dim:
+            if novel_fp.shape[0] < target_dim:
+                aligned = np.zeros(target_dim, dtype=np.float32)
+                aligned[:novel_fp.shape[0]] = novel_fp
+                novel_fp = aligned
+            else:
+                novel_fp = novel_fp[:target_dim]
 
         dot = np.dot(self.train_fps, novel_fp)
         denom = self.train_fp_norms + np.sum(np.abs(novel_fp)) - dot + 1e-6
@@ -414,8 +438,9 @@ def extract_inductive_pair_features(
             if train_index is not None:
                 da_ids = batch.get("drug_a_id", [])
                 db_ids = batch.get("drug_b_id", [])
-                fp_a_np = fp_a.cpu().numpy() if fp_a is not None else np.zeros((batch_sz, 2048))
-                fp_b_np = fp_b.cpu().numpy() if fp_b is not None else np.zeros((batch_sz, 2048))
+                fp_dim = train_index.train_fps.shape[1] if hasattr(train_index, "train_fps") and len(train_index.train_fps) > 0 else (fp_a.shape[1] if fp_a is not None else 1024)
+                fp_a_np = fp_a.cpu().numpy().reshape(batch_sz, -1) if fp_a is not None else np.zeros((batch_sz, fp_dim), dtype=np.float32)
+                fp_b_np = fp_b.cpu().numpy().reshape(batch_sz, -1) if fp_b is not None else np.zeros((batch_sz, fp_dim), dtype=np.float32)
                 for i in range(batch_sz):
                     ida = str(da_ids[i]).strip() if i < len(da_ids) else ""
                     idb = str(db_ids[i]).strip() if i < len(db_ids) else ""

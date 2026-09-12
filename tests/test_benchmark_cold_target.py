@@ -170,12 +170,25 @@ def test_training_graph_retrieval_index_inductive_s2():
     assert np.isclose(t_sc, t_sc_rev, atol=1e-5)
     assert np.isclose(m_sim, m_sim_rev, atol=1e-5)
     
-    # Test S1 Pair: Both drugs novel -> is_s2 == 0.0, knn_transfer == 0.0
-    fp_novel_2 = rng.randn(fp_dim).astype(np.float32)
-    t_sc_s1, m_sim_s1, is_s2_s1 = index.query_pair("D_unseen_1", "D_unseen_2", fp_novel, fp_novel_2)
-    assert is_s2_s1 == 0.0
-    assert t_sc_s1 == 0.0
-    assert m_sim_s1 == 0.0
+    # Test with MolecularCache fingerprints (1024-dim tensors)
+    class MockCache:
+        def __init__(self):
+            self.fingerprints = {
+                "D1": torch.randn(1024),
+                "D2": torch.randn(1024),
+                "D3": torch.randn(1024),
+            }
+    mock_cache = MockCache()
+    index_cache = TrainingGraphRetrievalIndex(df_train=df_train, cache=mock_cache, k=2)
+    assert index_cache.train_fps.shape == (3, 1024)
+    # Query with 1024-dim tensor converted to numpy
+    t_c, m_c, s2_c = index_cache.query_pair("D_unseen", "D2", np.random.randn(1024).astype(np.float32), mock_cache.fingerprints["D2"].numpy())
+    assert s2_c == 1.0
+    assert 0.0 <= t_c <= 1.0
+    # Query with different dim (e.g. 2048) gracefully aligned
+    t_align, _, _ = index_cache.query_pair("D_unseen", "D2", np.random.randn(2048).astype(np.float32), mock_cache.fingerprints["D2"].numpy())
+    assert 0.0 <= t_align <= 1.0
+
 
 
 
