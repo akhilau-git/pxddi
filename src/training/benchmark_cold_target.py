@@ -256,12 +256,9 @@ class TrainingGraphRetrievalIndex:
         in_a = drug_a_id in self.train_drugs
         in_b = drug_b_id in self.train_drugs
 
-        if in_a and in_b:
-            exact = self.train_edges.get((drug_a_id, drug_b_id), 0.5)
-            return exact, 1.0, 0.0
-
-        if not in_a and not in_b:
-            return 0.0, 0.0, 0.0
+        if (in_a and in_b) or (not in_a and not in_b):
+            # Transductive training or True Cold-Start (S1): no inductive neighbor transfer applicable
+            return 0.5, 0.0, 0.0
 
         # S2 Semi-Inductive: exactly one novel drug, one known training drug
         novel_fp = (fp_a if not in_a else fp_b).ravel()
@@ -1293,8 +1290,9 @@ def run_cold_target_study(
 
         print(f"Extracted {X_train.shape[1]} invariant features for {len(X_train)} training pairs.")
 
-        # Train HistGradientBoosting strictly on the 22 domain-invariant physical & chemical features (excluding in-sample overfitted deep logits)
-        feat_dim_invariant = 22 if X_train.shape[1] >= 22 else X_train.shape[1]
+        # Train HistGradientBoosting strictly on the 17 pure domain-invariant physical, chemical & sequence features
+        # (Excluding binary retrieval shortcut columns 17..21 that collapse under S1 full cold-start)
+        feat_dim_invariant = min(17, X_train.shape[1])
         X_tr_in = X_train[:, :feat_dim_invariant]
         X_va_in = X_val[:, :feat_dim_invariant]
         X_s1_in = X_s1[:, :feat_dim_invariant]
