@@ -536,6 +536,7 @@ def run_cold_target_study(
     cold_target_labels: np.ndarray | None = None
 
     models_to_run = [m.lower().strip() for m in models] if models else None
+    trained_models: dict[str, PxDDIModel] = {}
 
     for model_name, use_protein_seq, use_target_sequence_fusion, use_biophysical in configs:
         ckpt_file = out_p / f"checkpoint_{model_name}.pt"
@@ -776,10 +777,43 @@ def run_cold_target_study(
         }
         print(f"Finished {model_name}: S1 AUROC = {s1_m['auroc']:.4f}, Cold-Target AUROC = {ct_m['auroc']:.4f}")
 
+        trained_models[model_name] = model
+        model_kwargs = {
+            "in_channels": in_dim,
+            "hidden_channels": 64,
+            "architecture_version": MODEL_ARCHITECTURE_MULTIMODAL,
+            "edge_feature_dim": edge_dim,
+            "use_toxicity_pair_features": not is_purified,
+            "gene_feature_dim": cache.gene_dim,
+            "gene_hidden_channels": 64,
+            "use_gene_encoder": not is_purified,
+            "use_clinical_toxicity": not is_purified,
+            "use_target_encoder": False if is_purified else True,
+            "target_feature_dim": cache.target_dim,
+            "target_hidden_channels": 64,
+            "use_protein_sequence_encoder": use_protein_seq,
+            "use_esm": use_protein_seq and use_esm,
+            "use_target_sequence_fusion": use_target_sequence_fusion if not is_purified else False,
+            "use_biophysical_features": use_biophysical,
+            "use_inductive_bio_features": False,
+            "cold_sim_dropout": 0.0,
+            "use_pk_residual": use_biophysical,
+            "use_pdb_encoder": not is_purified,
+            "pdb_feature_dim": cache.pdb_dim,
+            "pdb_hidden_channels": 64,
+            "use_geo_features": not is_purified,
+            "geo_dim": cache.geo_dim,
+            "use_cross_modal_attention": not is_purified,
+            "use_cross_drug_attention": use_cross_drug,
+            "mol_dropout": mol_drop,
+            "use_fusion_norm": use_fnorm,
+        }
+
         # Save checkpoint and prediction artifacts immediately after each model
         try:
             torch.save({
                 "model_state_dict": model.state_dict(),
+                "model_kwargs": model_kwargs,
                 "s1_probs": s1_p,
                 "s1_labels": s1_y,
                 "cold_target_probs": ct_p,
@@ -820,6 +854,10 @@ def run_cold_target_study(
         # Select best backbone deep model for sequence embeddings & risk predictions
         best_deep_model = None
         for candidate_name in ["auditddi_regularized_fusion", "auditddi_protein_seq", "auditddi_biophysical_fusion"]:
+            if candidate_name in trained_models:
+                best_deep_model = trained_models[candidate_name]
+                print(f"Using in-memory {candidate_name} as deep sequence & logit feature generator for Inductive Hybrid.")
+                break
             cand_ckpt = out_p / f"checkpoint_{candidate_name}.pt"
             if cand_ckpt.is_file():
                 try:
@@ -827,19 +865,44 @@ def run_cold_target_study(
                         ckpt_data = torch.load(cand_ckpt, map_location=device, weights_only=False)
                     except TypeError:
                         ckpt_data = torch.load(cand_ckpt, map_location=device)
-                    cand_model = PxDDIModel(
-                        in_channels=in_dim,
-                        hidden_channels=64,
-                        architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
-                        edge_feature_dim=edge_dim,
-                        use_protein_sequence_encoder=True,
-                        use_biophysical_features=True,
-                        use_pk_residual=True,
-                    ).to(device)
+                    saved_kwargs = ckpt_data.get("model_kwargs")
+                    if saved_kwargs:
+                        cand_model = PxDDIModel(**saved_kwargs).to(device)
+                    else:
+                        is_pur = bool(candidate_name == "auditddi_biophysical_fusion")
+                        cand_model = PxDDIModel(
+                            in_channels=in_dim,
+                            hidden_channels=64,
+                            architecture_version=MODEL_ARCHITECTURE_MULTIMODAL,
+                            edge_feature_dim=edge_dim,
+                            use_toxicity_pair_features=not is_pur,
+                            gene_feature_dim=cache.gene_dim,
+                            gene_hidden_channels=64,
+                            use_gene_encoder=not is_pur,
+                            use_clinical_toxicity=not is_pur,
+                            use_target_encoder=False if is_pur else True,
+                            target_feature_dim=cache.target_dim,
+                            target_hidden_channels=64,
+                            use_protein_sequence_encoder=True,
+                            use_esm=False,
+                            use_target_sequence_fusion=True if not is_pur else False,
+                            use_biophysical_features=True,
+                            use_inductive_bio_features=False,
+                            cold_sim_dropout=0.0,
+                            use_pk_residual=True,
+                            use_pdb_encoder=not is_pur,
+                            pdb_feature_dim=cache.pdb_dim,
+                            pdb_hidden_channels=64,
+                            use_geo_features=not is_pur,
+                            geo_dim=cache.geo_dim,
+                            use_cross_modal_attention=not is_pur,
+                            use_cross_drug_attention=True,
+                            use_fusion_norm=True,
+                        ).to(device)
                     cand_model.load_state_dict(ckpt_data["model_state_dict"], strict=False)
                     cand_model.eval()
                     best_deep_model = cand_model
-                    print(f"Using {candidate_name} as deep sequence & logit feature generator for Inductive Hybrid.")
+                    print(f"Loaded {candidate_name} from checkpoint as deep sequence & logit feature generator for Inductive Hybrid.")
                     break
                 except Exception as ex:
                     print(f"Notice loading {candidate_name}: {ex}")
@@ -848,15 +911,20 @@ def run_cold_target_study(
         if best_deep_model is None and 'model' in locals():
             best_deep_model = model
 
-        # Extract inductive tabular features
+        # Extract inductive tabular features with explicit progress feedback
         start_h_time = time.time()
+        print("Extracting invariant tabular features (Train set)...", flush=True)
         X_train, y_train, _ = extract_inductive_pair_features(best_deep_model, train_loader, device)
+        print("Extracting invariant tabular features (Validation set)...", flush=True)
         X_val, y_val, _ = extract_inductive_pair_features(best_deep_model, val_loader, device)
+        print("Extracting invariant tabular features (S1 Cold-Start set)...", flush=True)
         X_s1, y_s1, _ = extract_inductive_pair_features(best_deep_model, s1_loader, device)
+        print("Extracting invariant tabular features (Transductive Test set)...", flush=True)
         X_trans, y_trans, _ = extract_inductive_pair_features(best_deep_model, trans_loader, device)
         if cold_target_equals_s1:
             X_ct, y_ct = X_s1, y_s1
         else:
+            print("Extracting invariant tabular features (Cold-Target cohort)...", flush=True)
             X_ct, y_ct, _ = extract_inductive_pair_features(best_deep_model, cold_target_loader, device)
 
         print(f"Extracted {X_train.shape[1]} invariant features for {len(X_train)} training pairs.")
